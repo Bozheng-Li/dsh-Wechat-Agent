@@ -52,7 +52,7 @@ async function perform(id, op, args) {
       await login.start(args?.replace === true); return snapshot();
     case 'login.cancel': await login.cancel(); return snapshot();
     case 'contacts': return {
-      privatePeers: (await backend.call('action.get_friend_list', {})).map(c => ({ id: c.id, name: c.remark || c.nickname || c.id })),
+      privatePeers: (await backend.call('action.get_friend_list', {})).map(c => ({ id: c.id, name: c.remark || c.nickname || c.id, remark: c.remark || '', nickname: c.nickname || '' })),
       groups: (await backend.call('action.get_group_list', {})).map(g => ({ id: g.id, name: g.name || g.id }))
     };
     case 'send': {

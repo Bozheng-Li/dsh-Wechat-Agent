@@ -2,9 +2,9 @@ import { ChannelError, validateModelChoice } from './contracts.mjs';
 
 /** Use the same live registry as DSH's model picker, never provider URLs/keys. */
 export async function availableModel(ctx, input, signal) {
+  signal?.throwIfAborted();
   const selection = validateModelChoice(input);
   if (selection === null) return null;
-  signal?.throwIfAborted();
   const registered = () => ctx.llm.listProviders().some(provider => provider.id === selection.provider);
   if (!registered()) throw new ChannelError('MODEL_UNAVAILABLE', '该模型已不在 DSH 可用列表中，请重新选择');
   const lifetime = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(10000)]);
@@ -31,6 +31,7 @@ export async function availableModel(ctx, input, signal) {
 
 export async function selectModel(ctx, store, input, signal) {
   const selection = await availableModel(ctx, input, signal);
+  signal?.throwIfAborted();
   store.setModelChoice(selection);
   return selection;
 }

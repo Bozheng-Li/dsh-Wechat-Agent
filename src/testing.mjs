@@ -4,4 +4,4 @@ export * from './agent.mjs';
 export * from './models.mjs';
 export * from './channel.mjs';
 export * from './worker-client.mjs';
-export { rpcHandler } from './index.mjs';
+export { rpcHandler, createPluginService } from './index.mjs';
