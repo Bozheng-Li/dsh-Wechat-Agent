@@ -157,6 +157,18 @@ const ctx = { llm: { listProviders: () => [{ id: 'fixture' }], listModels: async
 runner.search = new SearchService(ctx, { fetchImpl: async () => { throw new Error('UI fixture must not call a real search endpoint'); } });
 const service = createPluginService({ ctx, root: activeRoot, store, worker, runner, channel, scheduler, identity: agentIdentity, relocateWorkspace, dshSessionPath: path.join(fixture, 'host-sessions') });
 const rpc = rpcHandler(service), failures = new Set(), cancelRequests = [], assetUploadRequests = [], storageRequests = [], identityRequests = [];
+const heldRequests = new Map();
+let globalMemoryFault = null;
+function ownedFixtureFile(file) {
+  const absolute = path.resolve(file), relative = path.relative(fixture, absolute);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || !fs.lstatSync(absolute).isFile() || fs.lstatSync(absolute).isSymbolicLink()) throw new Error('Memory fault must stay in an ordinary owned fixture file');
+  return absolute;
+}
+function repairGlobalMemory() {
+  if (!globalMemoryFault) return;
+  fs.writeFileSync(ownedFixtureFile(globalMemoryFault.file), globalMemoryFault.bytes);
+  globalMemoryFault = null;
+}
 let lastHistoryRequest = null;
 const build = await rolldown({ input: path.join(root, 'tests/fixtures/ui-entry.jsx'), platform: 'browser', transform: { define: { 'process.env.NODE_ENV': JSON.stringify('production') } } });
 let script;
@@ -186,6 +198,28 @@ const server = http.createServer(async (req, res) => {
       if (body.command === 'assetZip') { json(res, { name: '界面测试表情.zip', data: assetZip.toString('base64'), bytes: assetZip.length }); return; }
       if (body.command === 'assets') { json(res, channel.library.list(state.account.id)); return; }
       if (body.command === 'globalMemory') { json(res, channel.longMemory.view(state.account.id)); return; }
+      if (body.command === 'localMemory') { json(res, await service.call('memory.get', { accountId, chatType: 'group', peerId: body.payload?.peerId || 'group_alpha@chatroom' })); return; }
+      if (body.command === 'holdNext') {
+        if (body.payload?.endpoint !== 'memory.edit' || heldRequests.has(body.payload.endpoint)) throw new Error('Only one isolated memory save can be held');
+        let release; const wait = new Promise(resolve => { release = resolve; });
+        heldRequests.set(body.payload.endpoint, { wait, release, started: false, payload: null }); json(res, { ok: true }); return;
+      }
+      if (body.command === 'heldRequest') {
+        const held = heldRequests.get(body.payload?.endpoint); json(res, { started: !!held?.started, payload: held?.payload || null }); return;
+      }
+      if (body.command === 'releaseRequest') {
+        const held = heldRequests.get(body.payload?.endpoint);
+        if (!held?.started) throw new Error('No started fixture request to release');
+        heldRequests.delete(body.payload.endpoint); held.release(); json(res, { ok: true }); return;
+      }
+      if (body.command === 'unreadableGlobalMemory') {
+        if (globalMemoryFault) throw new Error('Global memory fault already active');
+        const file = ownedFixtureFile(channel.longMemory.view(accountId).path);
+        globalMemoryFault = { file, bytes: fs.readFileSync(file) };
+        fs.writeFileSync(file, Buffer.alloc(8000001, 88));
+        json(res, channel.longMemory.view(accountId)); return;
+      }
+      if (body.command === 'repairGlobalMemory') { repairGlobalMemory(); json(res, channel.longMemory.view(accountId)); return; }
       if (body.command === 'taskHistory') {
         if (scheduler.data.tasks.some(task => task.id === 'ui-history-completed-0')) throw new Error('Task history fixture already seeded');
         const stamp = Date.now(), planned = stamp - 3600000;
@@ -226,6 +260,8 @@ const server = http.createServer(async (req, res) => {
     if (body.endpoint === 'storage.save') storageRequests.push(structuredClone(body.payload));
     if (body.endpoint === 'identity.save') identityRequests.push(structuredClone(body.payload));
     if (failures.delete(body.endpoint)) { json(res, { ok: false, error: { code: 'FIXTURE_FAILURE', message: '界面测试：模拟保存失败，原设置保留' } }); return; }
+    const held = heldRequests.get(body.endpoint);
+    if (held && !held.started) { held.started = true; held.payload = structuredClone(body.payload); await held.wait; }
     if (body.endpoint === 'records.list') lastHistoryRequest = body.payload;
     if (body.endpoint === 'cancel') cancelRequests.push(body.payload);
     if (body.endpoint.startsWith('assets.upload.')) assetUploadRequests.push({ endpoint: body.endpoint, accountId: body.payload.accountId, uploadId: body.payload.uploadId, offset: body.payload.offset, bytes: body.payload.data ? Buffer.from(body.payload.data, 'base64').length : undefined });
@@ -246,4 +282,8 @@ try {
   const exit = await new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', code => resolve(code)); });
   if (exit !== 0) throw new Error(`UI verification failed (${exit}); see ${path.join(out, 'report.json')}`);
   fs.writeFileSync(path.join(out, 'fixture-summary.json'), JSON.stringify({ ok: true, root: fixture, version: VERSION, actualWeChatMessages: 0, actualModelRequests: 0 }, null, 2));
-} finally { await scheduler.close(); await channel.close(); await new Promise(resolve => server.close(resolve)); }
+} finally {
+  for (const held of heldRequests.values()) held.release();
+  repairGlobalMemory();
+  await scheduler.close(); await channel.close(); await new Promise(resolve => server.close(resolve));
+}

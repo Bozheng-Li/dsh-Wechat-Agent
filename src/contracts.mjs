@@ -1,5 +1,7 @@
+import manifest from '../package.json' with { type: 'json' };
+
 export const CHANNEL = '/wechat-agent';
-export const VERSION = '0.2.0-preview.4';
+export const VERSION = manifest.version;
 export const MAX_TEXT = 12000;
 export const DEFAULT_TAVILY_URL = 'https://api.tavily.com';
 

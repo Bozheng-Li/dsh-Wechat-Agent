@@ -198,6 +198,7 @@ export class WechatChannel {
       this.store.update(record, { state: 'generating' });
       let result;
       let selectedMedia;
+      let replySelectionApplied = false;
       const persona = this.store.conversationPersona(record.accountId, record.chatType, record.peerId);
       const scope = { accountId: record.accountId, chatType: record.chatType, peerId: record.peerId, senderId: record.senderId,
         senderName: record.sender, source: 'chat', requestKey: record.key, requestedAt: record.createdAt,
@@ -253,8 +254,9 @@ export class WechatChannel {
           group: item.message.chatType === 'group', mode: item.mode, prompt: item.prompt, persona, history, memory: [longMemory, memoryText(doc)].filter(Boolean).join('\n\n'), tools,
           speaker: { id: record.senderId, name: record.sender }, account: this.transport.status().account,
           allowEmptyReply: () => !!selectedMedia,
+          selectReplyText: text => { replySelectionApplied = true; return selectedMedia ? selectedMedia.caption : text; },
           signal: controller.signal, onSession: id => this.store.update(record, { sessionId: id }) });
-        if (selectedMedia) result.text = typeof this.runner.polishReply === 'function' ? await this.runner.polishReply(selectedMedia.caption, item.text, controller.signal, persona, { prompt: item.prompt }) : selectedMedia.caption;
+        if (selectedMedia && !replySelectionApplied) result.text = typeof this.runner.polishReply === 'function' ? await this.runner.polishReply(selectedMedia.caption, item.text, controller.signal, persona, { prompt: item.prompt }) : selectedMedia.caption;
       }
       clearTimeout(timeout);
       controller.signal.throwIfAborted();

@@ -93,6 +93,61 @@ test('an explicit persona or account format is honored without treating negative
   assert(needsConversationalRewrite(report, '你怎么看', { prompt: '不要把回复写成带标题的报告。' }));
 });
 
+test('code literals, translations and quoted descriptions are not mistaken for an unsolicited identity monologue', () => {
+  assert(!needsConversationalRewrite('```js\nconst description = "AI 助手";\n```', '给我一个示例代码'));
+  assert(!needsConversationalRewrite('~~~python\nprint("人工智能助手")\n~~~', '给我一个示例代码'));
+  assert(!needsConversationalRewrite('我是一个人工智能助手，没有性别。', '将 I am an artificial intelligence assistant and I do not have a gender 翻译成中文'));
+  assert(!needsConversationalRewrite('“我是一个人工智能助手”这句话的主语是“我”。', '分析这句话的主语'));
+  assert(!needsConversationalRewrite('人工智能助手通常提供问答能力。', 'assistant 这个词是什么意思？'));
+  assert(needsConversationalRewrite('我是小胖，一个 AI 助手，住在服务器上。', '简单介绍一下自己'));
+});
+
+test('independent positive formatting instructions survive a preceding negative style clause', () => {
+  const report = '# 观察\n1. 先看条件\n2. 再做选择';
+  assert(!needsConversationalRewrite(report, '你怎么看', { persona: { prompt: '不要客服套话，回复使用标题和编号。' } }));
+  assert(!needsConversationalRewrite(report, '你怎么看', { prompt: '不要啰嗦，用列表回答。' }));
+  assert(needsConversationalRewrite(report, '你怎么看', { prompt: '不要使用标题和编号，直接自然接话。' }));
+});
+
+test('explicit numbered choices and step-by-step requests preserve the requested format in Chinese and English', () => {
+  const choices = '1. 先休息\n2. 换个环境\n3. 只做最小的一步';
+  for (const request of ['给我三个方案', '给我三条建议', '分点说明一下', '分步说一下', 'Give me three options', 'List the next steps'])
+    assert(!needsConversationalRewrite(choices, request), request);
+  assert(!needsConversationalRewrite('# Night\nA small lamp holds the evening still.', 'Write a short poem about evening'));
+  assert(needsConversationalRewrite(choices, '今天好累'));
+});
+
+test('an explicit no-list request rewrites a disobedient draft before any reply is returned', async () => {
+  const request = '今天列计划就把自己列累了，我只想聊两句，别给我行动清单。';
+  const draft = '1. 喝一杯水\n2. 列出优先级\n3. 先完成最简单的事';
+  const answer = '光安排这些事就够费神了，先陪你歇会儿。';
+  const f = agentFixture([draft, answer]);
+  const result = await new DshAgentRunner(f.ctx, () => null, () => ({ persona: { name: '阿衡', prompt: '使用编号清单给出建议。' } })).run({ text: request, signal: new AbortController().signal });
+  assert.equal(result.text, answer);
+  assert.equal(f.messages.length, 2);
+  assert(f.messages[1].content[0].text.includes(request));
+});
+
+test('the latest explicit format direction wins within a request without treating quoted directions as commands', () => {
+  const numbered = '1. 先休息\n2. 再决定', titled = '# 观察\n' + numbered;
+  assert(needsConversationalRewrite(numbered, '先用编号清单回答，算了，别给我行动清单。'));
+  assert(!needsConversationalRewrite(numbered, '不要清单，还是用编号列三条建议。'));
+  assert(needsConversationalRewrite(numbered, '用编号列表但是不要编号列表。'));
+  assert(!needsConversationalRewrite(numbered, '别用列表但改成编号清单。'));
+  assert(needsConversationalRewrite(titled, '不要标题，但保留编号清单。'));
+  assert(!needsConversationalRewrite(numbered, '不要标题，但保留编号清单。'));
+  assert(!needsConversationalRewrite('# 观察\n- 保留甲\n- 保留乙', '保留标题，不要编号列表。'));
+  assert(!needsConversationalRewrite(numbered, '解释“别给我行动清单”这句话的意思，给我两条示例。'));
+  assert(!needsConversationalRewrite(numbered, '不要忘记列出三条建议。'));
+  assert(needsConversationalRewrite(numbered, "Give me a list, but don't use a numbered list."));
+  assert(needsConversationalRewrite(titled, '不要标题和编号。'));
+  assert(needsConversationalRewrite('- 一条也不要', '不要使用任何列表。'));
+  assert(needsConversationalRewrite('**先休息**', '可以列清单，但是不要加粗。'));
+  assert(!needsConversationalRewrite('**先休息**', '不要加粗，还是保留加粗。'));
+  assert(!needsConversationalRewrite('# 观察\n先休息。', '用标题点出主题。'));
+  assert(!needsConversationalRewrite('```text\n1. 原文\n2. 保留\n```', '逐字返回这段代码，不要在正文用列表。'));
+});
+
 test('poetry polishing keeps the original persona, global identity, account requirements and model controls without tools', async () => {
   const choice = { provider: 'fixture', model: 'first' };
   const runtime = { identityMarkdown: '# GLOBAL_CAPTURED\n只用中文。', persona: { name: '墨白', aliases: [], prompt: 'MOBAI_CAPTURED：克制的轻古风。' },
@@ -112,6 +167,7 @@ test('poetry polishing keeps the original persona, global identity, account requ
     for (const value of ['GLOBAL_CAPTURED', 'MOBAI_CAPTURED', 'ACCOUNT_CAPTURED']) assert(prompt.includes(value), value);
     for (const value of ['GLOBAL_CHANGED', 'PERSONA_CHANGED']) assert(!prompt.includes(value), value);
     assert.equal(prompt.split(NATURAL_REPLY_RULES).length, 2, 'delivery defaults occur exactly once');
+    assert(prompt.indexOf('GLOBAL_CAPTURED') > prompt.indexOf('ACCOUNT_CAPTURED'), 'normal generation and rewriting share the final global contract');
   }
   assert(f.scopes[0].prompt.indexOf(NATURAL_REPLY_RULES) < f.scopes[0].prompt.indexOf('MOBAI_CAPTURED'));
   assert(f.scopes[0].prompt.indexOf('MOBAI_CAPTURED') < f.scopes[0].prompt.indexOf('ACCOUNT_CAPTURED'));

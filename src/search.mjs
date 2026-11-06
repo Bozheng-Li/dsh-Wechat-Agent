@@ -19,8 +19,10 @@ function boundedSources(values, limit) {
 }
 
 async function responseJSON(response, signal) {
-  if (Number(response.headers.get('content-length')) > MAX_RESPONSE_BYTES)
+  if (Number(response.headers.get('content-length')) > MAX_RESPONSE_BYTES) {
+    try { await response.body?.cancel(); } catch {}
     throw new ChannelError('WEB_SEARCH_RESPONSE_TOO_LARGE', '搜索服务的返回内容过大，请调整查询后重试。');
+  }
   const reader = response.body?.getReader();
   if (!reader) throw new ChannelError('WEB_SEARCH_INVALID_RESULT', '搜索服务返回了空响应，请稍后重试。');
   const chunks = []; let size = 0;

@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-wechat-agent",
-  "version": "0.2.0-preview.4",
+  "version": "0.2.0-preview.6",
   "description": "DeepSeek Harness 微信 Agent：独立人设、持久记忆、图片与表情回复、定时提醒、Tavily 与 DeepSeek 原生搜索",
   "keywords": [
     "dsh-plugin",

@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { conversationKey, formatTime, matchesSearch, peerId, peerName, peerType, searchText } from './client-utils.mjs';
 import { taskViews } from './task-history.mjs';
+import { MemoryOverview } from './memory-visuals.jsx';
 
 const samePeer = (left, right) => left && right && conversationKey(left) === conversationKey(right);
 const selector = (status, peer) => ({ accountId: status.account.id, chatType: peerType(peer), peerId: peerId(peer) });
@@ -8,11 +9,11 @@ const date = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: 
 function Button({ primary, danger, ...props }) { return <button type="button" className={'wa-button' + (primary ? ' wa-primary' : '') + (danger ? ' wa-danger' : '')} {...props}/>; }
 function Alert({ text }) { return text ? <div className="wa-alert is-error" role="alert">{text}</div> : null; }
 function Field({ label, children, help }) { return <label className="wa-field wa-automation-field"><span className="wa-label">{label}</span>{children}{help && <span className="wa-help">{help}</span>}</label>; }
-function RoomPicker({ rows, value, onChange, authorizedOnly = false }) {
+function RoomPicker({ rows, value, onChange, authorizedOnly = false, disabled = false }) {
   const [query, setQuery] = useState('');
   const filtered = rows.filter(peer => (!authorizedOnly || peer.authorized) && matchesSearch(peer, query));
-  return <div className="wa-room-picker"><input className="wa-input" aria-label="按名字筛选会话" placeholder="输入群名或微信名查找" value={query} onChange={event => setQuery(event.target.value)}/>
-    <select className="wa-select" aria-label="选择会话" value={value ? conversationKey(value) : ''} onChange={event => onChange(rows.find(peer => conversationKey(peer) === event.target.value) || null)}>
+  return <div className="wa-room-picker"><input className="wa-input" aria-label="按名字筛选会话" disabled={disabled} placeholder="输入群名或微信名查找" value={query} onChange={event => setQuery(event.target.value)}/>
+    <select className="wa-select" aria-label="选择会话" disabled={disabled} value={value ? conversationKey(value) : ''} onChange={event => onChange(rows.find(peer => conversationKey(peer) === event.target.value) || null)}>
       <option value="">请选择一个会话</option>{value && !filtered.some(peer => samePeer(value, peer)) && <option value={conversationKey(value)}>{peerName(value)}</option>}
       {filtered.map(peer => <option key={conversationKey(peer)} value={conversationKey(peer)}>{peerType(peer) === 'group' ? '群聊' : '私聊'} · {peerName(peer)}{peer.authorized ? '' : ' · 已撤销授权'}</option>)}
     </select></div>;
@@ -65,6 +66,7 @@ export function MemoryPage({ rpc, status, rows, initialPeer }) {
   const draft = useRef({ summary, base }); draft.current = { summary, base };
   const current = useRef(selected); current.current = selected;
   const accountId = status.account?.id;
+  const pendingAction = useRef(false);
   const reload = async (force = false, signal) => {
     if (!accountId) return;
     const data = await rpc('memory.list', { accountId }, signal); if (signal?.aborted) return; setList(data);
@@ -82,21 +84,22 @@ export function MemoryPage({ rpc, status, rows, initialPeer }) {
     void poll(); return () => { controller.abort(); clearTimeout(timer); };
   }, [accountId, selected && conversationKey(selected)]);
   const act = async (endpoint, payload, success) => {
-    if (busy) return; setBusy(endpoint); setError(''); setNotice('');
-    try { await rpc(endpoint, payload); await reload(true); setNotice(success); setConfirmClear(false); }
-    catch (failure) { setError(failure.message); } finally { setBusy(''); }
+    if (pendingAction.current) return; pendingAction.current = true; const selectedAtStart = current.current; setBusy(endpoint); setError(''); setNotice('');
+    try { await rpc(endpoint, payload); if ((current.current || selectedAtStart) && !samePeer(current.current, selectedAtStart)) return; await reload(true); setNotice(success); setConfirmClear(false); }
+    catch (failure) { setError(failure.message); } finally { pendingAction.current = false; setBusy(''); }
   };
-  const choose = peer => { setSelected(peer); current.current = peer; setDoc(null); setSummary(''); setBase(null); draft.current = { summary: '', base: null }; setConfirmClear(false); setError(''); setNotice(''); };
+  const choose = peer => { if (pendingAction.current) return; setSelected(peer); current.current = peer; setDoc(null); setSummary(''); setBase(null); draft.current = { summary: '', base: null }; setConfirmClear(false); setError(''); setNotice(''); };
   return <><header className="wa-page-head"><div><p className="wa-eyebrow">CONVERSATION MEMORY</p><h1>会话记忆库</h1><p className="wa-muted">每个会话保存自己的记忆，回复时一起交给 Agent；达到窗口后自动压缩。</p></div></header>
     <Alert text={error}/>{notice && <p className="wa-alert" role="status">{notice}</p>}
-    <section className="wa-card wa-content-narrow"><h2>默认记忆窗口</h2><p className="wa-help">按交给模型的记忆文字计数。原文和压缩前快照独立保存；压缩不会修改聊天处理记录。</p>
+    <details className="wa-memory-preferences" data-testid="memory-preferences"><summary><span>记忆窗口设置</span><span>默认 {list?.windowChars || status.memory?.windowChars || 32000} 字</span></summary><section className="wa-memory-preferences-body"><h2>默认记忆窗口</h2><p className="wa-help">按交给模型的记忆文字计数。原文和压缩前快照独立保存；压缩不会修改聊天处理记录。</p>
       <div className="wa-row wa-section-space wa-window-setting"><input className="wa-input" type="number" min="1000" max="200000" step="1000" aria-label="默认记忆窗口字符数" value={windowChars} onChange={event => setWindowChars(event.target.value)}/><span>字</span><Button disabled={!!busy || !Number.isInteger(Number(windowChars)) || Number(windowChars) < 1000 || Number(windowChars) > 200000} onClick={() => act('memory.configure', { windowChars: Number(windowChars) }, '默认记忆窗口已保存。')}>保存窗口</Button></div>
       <p className="wa-help">每个会话也可在“会话设置”中单独设置。默认 {list?.windowChars || status.memory?.windowChars || 32000} 字。</p>
-    </section>
-    {!accountId ? <div className="wa-empty"><h3>先连接微信账号</h3><p>连接后可查看这个账号的会话记忆。</p></div> : <section className="wa-card wa-section-space">
-      <RoomPicker rows={rows} value={selected} onChange={choose}/>
+    </section></details>
+    {!accountId ? <div className="wa-empty"><h3>先连接微信账号</h3><p>连接后可查看这个账号的会话记忆。</p></div> : <section className="wa-card wa-memory-document-card">
+      <RoomPicker rows={rows} value={selected} onChange={choose} disabled={!!busy}/>
       {doc ? <div className="wa-memory-content" data-testid="memory-document">
-        <div className="wa-between wa-section-space"><div><h2>{peerName(selected)}</h2><p className="wa-help">{doc.chars} / {doc.windowChars} 字 · {doc.entries.length} 条近期消息 · 已压缩 {doc.compressions} 次{doc.compacting ? ' · 正在压缩' : ''}</p></div><Button disabled={!!busy} onClick={() => { void reload(true).catch(failure => setError(failure.message)); }}>重新读取记忆</Button></div>
+        <MemoryOverview document={doc} name={peerName(selected)}/>
+        <div className="wa-between wa-section-space"><div><h2>摘要与补充</h2><p className="wa-help">修正这段会话的背景，近期原文会继续附在后面。</p></div><Button disabled={!!busy || summary !== base?.summary} onClick={() => { void reload(true).catch(failure => setError(failure.message)); }}>重新读取记忆</Button></div>
         <Alert text={doc.error}/>
         {(doc.failedImages > 0 || doc.lowQualityImages > 0) && <div className="wa-note-box">
           {doc.failedImages > 0 && <p>{doc.failedImages} 张图片暂未理解，记忆中保留了失败原因。</p>}
@@ -104,8 +107,8 @@ export function MemoryPage({ rpc, status, rows, initialPeer }) {
           <Button disabled={!!busy || status.modelConfig.vision === false || !selected.authorized} onClick={() => act('memory.retryImages', selector(status, selected), '已重新获取图片并重试理解，未取得清晰图片的笔记会保留清晰度提示。')}>{busy === 'memory.retryImages' ? '正在重新理解…' : '重试图片理解'}</Button>
           {status.modelConfig.vision === false && <p className="wa-help">请先在模型的高级设置中启用图像理解。</p>}
         </div>}
-        <Field label="已保存的记忆摘要" help="可以纠正记忆或补充长期信息。近期原文会继续附在后面。"><textarea className="wa-textarea" aria-label="记忆摘要" rows={10} maxLength={100000} value={summary} disabled={!!busy} onChange={event => setSummary(event.target.value)}/></Field>
-        <div className="wa-row"><Button primary disabled={!!busy || summary === base?.summary} onClick={() => act('memory.edit', { ...selector(status, selected), summary, revision: base.revision }, '记忆摘要已保存。')}>保存记忆</Button><Button disabled={!!busy || doc.compacting || doc.chars <= doc.windowChars || !selected.authorized} onClick={() => act('memory.compress', selector(status, selected), '记忆已压缩，原文快照已保留。')}>{busy === 'memory.compress' || doc.compacting ? '正在压缩…' : '立即压缩'}</Button></div>
+        <Field label="已保存的记忆摘要" help="需要长期保留的共同约定，可写入长期记忆。"><textarea className="wa-textarea" aria-label="记忆摘要" rows={8} maxLength={100000} value={summary} disabled={!!busy} onChange={event => setSummary(event.target.value)}/></Field>
+        <div className="wa-row"><Button primary disabled={!!busy || summary === base?.summary} onClick={() => act('memory.edit', { ...selector(status, selected), summary, revision: base.revision }, '记忆摘要已保存。')}>保存记忆</Button><Button disabled={!!busy || summary === base?.summary} onClick={() => { setSummary(doc.summary); setBase(doc); }}>撤销修改</Button><Button disabled={!!busy || doc.compacting || doc.chars <= doc.windowChars || !selected.authorized} onClick={() => act('memory.compress', selector(status, selected), '记忆已压缩，原文快照已保留。')}>{busy === 'memory.compress' || doc.compacting ? '正在压缩…' : '立即压缩'}</Button></div>
         <details className="wa-subsection"><summary>查看本次会带给 Agent 的完整记忆</summary><pre className="wa-memory-preview">{doc.text || '暂时没有记忆，新的授权会话消息会自动写入。'}</pre></details>
         <details className="wa-subsection"><summary>记忆文件保存位置</summary><div className="wa-path-value">{doc.path}</div><p className="wa-help">这是独立的记忆文件；聊天处理记录保存在另一个目录。压缩前的记忆保留在旁边的 archive 目录。</p></details>
         <div className="wa-subsection"><Button danger disabled={!!busy} onClick={() => setConfirmClear(true)}>清空当前记忆</Button>{confirmClear && <div className="wa-note-box"><p>清空“{peerName(selected)}”的当前记忆后，Agent 从新消息开始记忆。聊天记录和旧快照仍保留，但不会自动回填。</p><div className="wa-row"><Button danger disabled={!!busy} onClick={() => act('memory.clear', selector(status, selected), '当前记忆已清空，将从新消息开始积累。')}>确认清空这份记忆</Button><Button disabled={!!busy} onClick={() => setConfirmClear(false)}>返回</Button></div></div>}</div>

@@ -417,7 +417,7 @@ export class MediaLibrary {
           const record = this.account(id, true, next);
           for (const item of loaded) {
             const asset = record.assets.find(value => value.id === item.asset.id); committed.completed++;
-            if (!asset || asset.description !== item.asset.description) { committed.skipped++; continue; }
+            if (!asset || asset.revision !== item.asset.revision || asset.description !== item.asset.description) { committed.skipped++; continue; }
             const caption = captions[usable.findIndex(value => value.asset.id === asset.id)], failure = item.failure || modelError;
             if (!failure && typeof caption === 'string' && caption.trim() && caption.length <= 1600) { asset.description = caption.trim(); asset.descriptionError = null; asset.describedAt = this.now(); committed.succeeded++; }
             else { asset.descriptionError = failure instanceof ChannelError ? failure.message : '未能理解这张素材，可检查模型后重试或手动填写含义'; committed.failed++; }

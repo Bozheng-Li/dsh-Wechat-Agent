@@ -260,7 +260,14 @@ function Changelog({ connection, onBack }) {
 
 function MemoryWorkspace(props) {
   const [tab, setTab] = useState('conversation');
-  return <><div className="wa-memory-tabs" role="tablist" aria-label="记忆类型"><button type="button" role="tab" aria-selected={tab === 'conversation'} onClick={() => setTab('conversation')}>会话记忆窗口</button><button type="button" role="tab" aria-selected={tab === 'global'} onClick={() => setTab('global')}>全局长期记忆</button></div><div hidden={tab !== 'conversation'}><MemoryPage {...props}/></div><div hidden={tab !== 'global'}><LongTermMemoryPage {...props}/></div></>;
+  const buttons = useRef({});
+  const onKeyDown = event => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const next = event.key === 'Home' ? 'conversation' : event.key === 'End' ? 'global' : tab === 'conversation' ? 'global' : 'conversation';
+    setTab(next); buttons.current[next]?.focus();
+  };
+  return <><div className="wa-memory-tabs" role="tablist" aria-label="记忆类型" onKeyDown={onKeyDown}>{[['conversation', '会话记忆窗口', '衔接当前对话'], ['global', '全局长期记忆', '留存事实与共同约定']].map(([id, label, description]) => <button type="button" role="tab" key={id} id={'wa-memory-tab-' + id} aria-controls={'wa-memory-panel-' + id} aria-selected={tab === id} tabIndex={tab === id ? 0 : -1} ref={node => { buttons.current[id] = node; }} onClick={() => setTab(id)}><strong>{label}</strong><small>{description}</small></button>)}</div><div id="wa-memory-panel-conversation" role="tabpanel" aria-labelledby="wa-memory-tab-conversation" hidden={tab !== 'conversation'}><MemoryPage {...props}/></div><div id="wa-memory-panel-global" role="tabpanel" aria-labelledby="wa-memory-tab-global" hidden={tab !== 'global'}><LongTermMemoryPage {...props}/></div></>;
 }
 
 function ModelPicker({ catalog, status, blocked, busy, onSelect }) {

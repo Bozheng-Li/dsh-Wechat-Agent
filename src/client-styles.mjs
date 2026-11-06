@@ -1,4 +1,4 @@
-import { visualCss } from './client-theme.mjs';
+import { visualCss } from './client-optical-theme.mjs';
 
 export const css = `
 .wa-panel{--wa-accent:#16856d;--wa-accent-hover:#126e5b;--wa-border:color-mix(in srgb,currentColor 12%,transparent);--wa-subtle:color-mix(in srgb,currentColor 3%,transparent);--wa-hover:color-mix(in srgb,currentColor 5%,transparent);font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;color:inherit;height:100%;min-height:0;overflow:auto;isolation:isolate;background:var(--background-primary,transparent)}

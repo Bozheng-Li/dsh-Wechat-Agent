@@ -31,8 +31,8 @@ function writeText(file, text) {
   }
 }
 function readJson(file) {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
-  catch (error) { if (error.code === 'ENOENT') return null; throw new ChannelError('LONG_MEMORY_INVALID', '长期记忆来源索引无法读取，请保留文件并检查内容和权限'); }
+  try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(fs.readFileSync(file))); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw new ChannelError('LONG_MEMORY_INVALID', '长期记忆来源索引无法读取，请保留文件并检查 UTF-8 编码、内容和权限'); }
 }
 function decode(value) {
   try { const result = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')); if (object(result)) return result; } catch {}
@@ -109,11 +109,23 @@ export class LongTermMemory {
     state.updatedAt = this.now();
     writeText(this.paths(state.accountId).state, JSON.stringify(state, null, 2) + '\n');
   }
+  documentBytes(accountId) {
+    const file = this.paths(accountId).file;
+    try {
+      const stat = fs.lstatSync(file);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_DOCUMENT * 4) throw new ChannelError('LONG_MEMORY_INVALID', '长期记忆文件不是普通文件或过大，请先检查文件');
+      return fs.readFileSync(file);
+    } catch (error) {
+      if (error instanceof ChannelError) throw error;
+      throw new ChannelError('LONG_MEMORY_INVALID', '长期记忆文件暂时无法读取，请保留文件并检查目录和权限');
+    }
+  }
   document(accountId) {
     this.state(accountId);
-    const file = this.paths(accountId).file;
-    if (fs.lstatSync(file).isSymbolicLink() || fs.statSync(file).size > MAX_DOCUMENT * 4) throw new ChannelError('LONG_MEMORY_INVALID', '长期记忆文件不是普通文件或过大，请先检查文件');
-    const markdown = fs.readFileSync(file, 'utf8');
+    const bytes = this.documentBytes(accountId);
+    let markdown;
+    try { markdown = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+    catch { throw new ChannelError('LONG_MEMORY_INVALID', '长期记忆不是有效的 UTF-8 文本，原始文件已保留，请修复编码后再使用'); }
     return this.parse(accountId, markdown);
   }
   parse(accountId, markdown) {
@@ -180,7 +192,12 @@ export class LongTermMemory {
     catch (failure) {
       if (!(failure instanceof ChannelError)) throw failure;
       error = failure.message; invalid = true; this.readErrors.set(accountId, error); this.refreshError(accountId);
-      const markdown = fs.readFileSync(paths.file, 'utf8'); doc = { markdown, revision: hash(markdown), globalNotes: '', globalRange: null, sections: [] };
+      let bytes;
+      try { bytes = this.documentBytes(accountId); } catch {}
+      // Show a repairable draft only for a bounded regular file. Malformed
+      // bytes never enter prompts, and their exact bytes identify the draft.
+      doc = { markdown: bytes?.toString('utf8') || '', revision: bytes ? hash(bytes) : null,
+        globalNotes: '', globalRange: null, sections: [], readOnly: !bytes };
     }
     return { ...doc, accountId, path: paths.file, chars: doc.markdown.length, pendingCount: this.pendingCount(state),
       pending: Object.values(state.pending).map(pending => ({ ...pending.selector, count: pending.entries.length })),
@@ -201,14 +218,21 @@ export class LongTermMemory {
     }
   }
   archive(accountId, markdown, reason) {
-    const file = path.join(this.paths(accountId).directory, 'global-memory-archive', `${this.now()}-${randomUUID()}-${reason}.md`);
+    const directory = path.join(this.paths(accountId).directory, 'global-memory-archive');
+    if (fs.existsSync(directory)) {
+      const stat = fs.lstatSync(directory);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new ChannelError('LONG_MEMORY_INVALID', '长期记忆归档目录不是普通目录，请先检查后再修改或清空记忆');
+    }
+    const file = path.join(directory, `${this.now()}-${randomUUID()}-${reason}.md`);
     writeText(file, markdown);
   }
   edit(accountId, markdown, expectedRevision) {
     const current = this.view(accountId);
+    if (current.readOnly) throw new ChannelError('LONG_MEMORY_INVALID', '长期记忆文件无法安全读取，请先检查文件和目录，再保存正文');
     if (current.revision !== expectedRevision) throw new ChannelError('LONG_MEMORY_CHANGED', '长期记忆已更新，请重新读取后再保存；你的草稿仍保留');
     const next = this.parse(accountId, markdown), nextIds = new Set(next.sections.flatMap(section => section.facts.map(fact => fact.id)));
     const removedSources = current.sections.flatMap(section => section.facts.filter(fact => !nextIds.has(fact.id)).flatMap(fact => fact.sources.map(source => source?.key).filter(Boolean)));
+    this.archive(accountId, this.documentBytes(accountId), 'before-edit');
     if (removedSources.length) {
       const state = this.state(accountId), ignored = new Set([...state.ignoredKeys, ...removedSources]); state.ignoredKeys = [...ignored];
       for (const [key, pending] of Object.entries(state.pending)) {
@@ -216,11 +240,11 @@ export class LongTermMemory {
       }
       this.saveState(state);
     }
-    this.archive(accountId, current.markdown, 'before-edit'); writeText(this.paths(accountId).file, markdown);
+    writeText(this.paths(accountId).file, markdown);
     this.readErrors.delete(accountId); this.refreshError(accountId); return this.view(accountId);
   }
   clear(accountId) {
-    const state = this.state(accountId), file = this.paths(accountId).file, markdown = fs.readFileSync(file, 'utf8');
+    const state = this.state(accountId), file = this.paths(accountId).file, markdown = this.documentBytes(accountId);
     this.archive(accountId, markdown, 'before-clear');
     state.ignoredKeys = this.baseline(accountId, state); state.pending = {}; state.seen = {}; state.generation = randomUUID();
     // Persist the tombstone first. A failed Markdown replacement cannot cause
@@ -272,9 +296,11 @@ export class LongTermMemory {
       if (currentState.generation !== state.generation || current.revision !== before.revision)
         throw new ChannelError('LONG_MEMORY_CHANGED', '长期记忆被人工修改或清空，本次提取未覆盖新内容；来源保留待重试');
       let markdown = current.markdown, section = current.sections.find(section => section.key === selector.key), added = 0;
-      const additions = [], corrections = new Set(), texts = new Set(existing.map(fact => normalize(fact.text)));
+      const additions = [], corrections = new Set(proposed.flatMap(fact => fact.replaces));
+      // Deduplicate against facts that will remain active. Otherwise a
+      // same-wording correction would retire the old fact and omit its replacement.
+      const texts = new Set(existing.filter(fact => !corrections.has(fact.id)).map(fact => normalize(fact.text)));
       for (const fact of proposed) {
-        fact.replaces.forEach(id => corrections.add(id));
         if (texts.has(normalize(fact.text))) continue;
         const metadata = { id: randomUUID(), state: 'active', createdAt: this.now(), sources: fact.sources.map(id => {
           const entry = batch[Number(id.slice(1)) - 1]; return { key: entry.key, digest: entry.digest, sender: entry.senderName || entry.senderId, time: entry.time };

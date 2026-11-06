@@ -30,6 +30,28 @@
       },
       "versions": [
         {
+          "version": "0.2.0-preview.6",
+          "publishTimestamp": 1793969787,
+          "engines": {
+            "dsh": "0.2.1-rc.5"
+          },
+          "source": {
+            "type": "npm",
+            "registry": "https://registry.npmjs.org/"
+          }
+        },
+        {
+          "version": "0.2.0-preview.5",
+          "publishTimestamp": 1793967495,
+          "engines": {
+            "dsh": "0.2.1-rc.5"
+          },
+          "source": {
+            "type": "npm",
+            "registry": "https://registry.npmjs.org/"
+          }
+        },
+        {
           "version": "0.2.0-preview.4",
           "publishTimestamp": 1793961177,
           "engines": {

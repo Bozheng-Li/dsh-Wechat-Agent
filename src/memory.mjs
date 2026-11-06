@@ -7,8 +7,8 @@ import { conversationFolder, conversationKey, identity } from './state.mjs';
 
 const clone = value => structuredClone(value);
 function read(file) {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
-  catch (error) { if (error.code === 'ENOENT') return null; throw new ChannelError('MEMORY_INVALID', '记忆文件无法读取，请保留文件并检查内容和权限'); }
+  try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(fs.readFileSync(file))); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw new ChannelError('MEMORY_INVALID', '记忆文件无法读取，请保留文件并检查 UTF-8 编码、内容和权限'); }
 }
 function write(file, data) {
   try { atomicJson(file, data); }
@@ -143,6 +143,7 @@ export class ConversationMemory {
     const covered = doc.entries.slice(0, doc.entries.length - keep.length);
     if (typeof runner.summarize !== 'function') throw new ChannelError('MEMORY_COMPRESSION_FAILED', '记忆超过窗口，暂时无法压缩，原文已保留');
     const summary = await runner.summarize(memoryText({ summary: doc.summary, entries: covered }), maximum, signal);
+    signal.throwIfAborted();
     if (typeof summary !== 'string' || !summary.trim() || summary.length > maximum) throw new ChannelError('MEMORY_COMPRESSION_FAILED', '记忆摘要不符合窗口要求，原文已保留');
     return { ...doc, summary: summary.trim(), entries: keep };
   }
@@ -163,6 +164,7 @@ export class ConversationMemory {
         try { descriptions = typeof runner.describeImages === 'function' ? await runner.describeImages(valid.map(item => item.image), signal) : await Promise.all(valid.map(item => runner.describeImage(item.image, signal))); }
         catch (error) { if (signal.aborted) throw signal.reason; modelError = error; }
       }
+      signal.throwIfAborted();
       const current = this.load(input);
       if (current.generation !== generation) throw new ChannelError('MEMORY_CHANGED', '记忆已被清空，已取消旧图像理解');
       for (let index = 0; index < batch.length; index++) {
@@ -207,7 +209,10 @@ export class ConversationMemory {
           throw new ChannelError('MEMORY_COMPRESSION_FAILED', '模型返回的记忆摘要为空或过长，原文完整保留，稍后可重新压缩');
         signal.throwIfAborted();
         const current = this.load(input);
-        if (current.generation !== doc.generation || current.summary !== doc.summary || covered.some((entry, i) => current.entries[i]?.key !== entry.key))
+        // Newly completed image notes may keep the same message key. Reject
+        // a stale summary whenever any covered content changed, while still
+        // allowing later appended messages to remain after the compacted part.
+        if (current.generation !== doc.generation || current.summary !== doc.summary || covered.some((entry, i) => JSON.stringify(current.entries[i]) !== JSON.stringify(entry)))
           throw new ChannelError('MEMORY_CHANGED', '记忆已被修改，本次压缩未覆盖新内容');
         this.archive(doc, 'before-compaction');
         current.summary = summary.trim(); current.entries = current.entries.slice(covered.length);

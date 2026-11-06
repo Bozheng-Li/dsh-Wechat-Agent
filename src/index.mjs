@@ -8,7 +8,7 @@ import { acquireLock, StateStore } from './state.mjs';
 import { WorkerClient } from './worker-client.mjs';
 import { DshAgentRunner } from './agent.mjs';
 import { WechatChannel } from './channel.mjs';
-import { selectModel, availableModel } from './models.mjs';
+import { selectModel, visionSelection } from './models.mjs';
 import { absoluteDirectory, sameDirectory } from './storage-paths.mjs';
 import { TaskScheduler } from './scheduler.mjs';
 import { AgentIdentity } from './agent-identity.mjs';
@@ -101,7 +101,7 @@ export function createPluginService({ ctx, root, store, worker, runner, channel,
         await selectModel(ctx, store, payload.selection, AbortSignal.any([lifetime, ...(signal ? [signal] : [])])); break;
       case 'model.configure': {
         const config = validateModelConfig(payload.modelConfig);
-        if (config.vision && config.visionModel) await availableModel(ctx, config.visionModel, AbortSignal.any([lifetime, ...(signal ? [signal] : [])]));
+        if (config.vision && config.visionModel) await visionSelection(ctx, config.visionModel, config.visionModel, AbortSignal.any([lifetime, ...(signal ? [signal] : [])]));
         assertLive(signal); store.setModelConfig(config); break;
       }
       case 'memory.configure': channel.memory.setWindowChars(payload.windowChars); break;

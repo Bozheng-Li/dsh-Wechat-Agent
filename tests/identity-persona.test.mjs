@@ -59,7 +59,9 @@ test('on-demand memory keeps recent context and exposes only a scoped read tool'
   const read = request.tools.find(value => value.name === 'wechat_memory'); assert(read);
   const result = JSON.parse(await read.execute({ section: 'long-term', query: '摄影' }, { signal: new AbortController().signal }));
   assert(result.text.includes('A_ONLY')); assert(!result.text.includes('B_ONLY'));
-  assert.equal(JSON.parse(await read.execute({ section: 'long-term', query: '没有匹配' }, {})).found, false);
+  const unmatched = JSON.parse(await read.execute({ section: 'long-term', query: '没有匹配' }, {}));
+  assert.equal(unmatched.found, true); assert.equal(unmatched.queryMatched, false); assert.equal(unmatched.coverage, 'complete');
+  assert(unmatched.text.includes('A_ONLY')); assert(!unmatched.text.includes('B_ONLY'));
 });
 
 test('memory lookup rechecks permission and cannot be redirected to another scope', async () => {

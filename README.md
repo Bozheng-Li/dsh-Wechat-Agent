@@ -28,12 +28,12 @@
 
 ## 开始使用
 
-当前公开预览版为 **`0.2.0-preview.4`**，已针对 **Windows x64 · DeepSeek Harness `0.2.1-rc.5`** 验证。模型使用你在 DSH 中配置的服务。
+当前预览版为 **`0.2.0-preview.6`**，已针对 **Windows x64 · DeepSeek Harness `0.2.1-rc.5`** 验证。模型使用你在 DSH 中配置的服务。
 
 在 DSH 插件管理页输入 `dsh-plugin-wechat-agent` 安装，或在 PowerShell 执行：
 
 ```powershell
-dsh plugin --profile desktop add dsh-plugin-wechat-agent@0.2.0-preview.4
+dsh plugin --profile desktop add dsh-plugin-wechat-agent@0.2.0-preview.6
 ```
 
 完整 npm 包包含微信认证组件、Python 与依赖，安装后即可打开侧栏 **微信 Agent**。
@@ -59,15 +59,19 @@ DSH `0.2.1-rc.5` 使用用户添加的自定义索引。索引提供版本目录
 
 ## 日常使用，在一个工作台里
 
-连接、会话授权、处理记录、记忆、任务和素材各有清晰的入口。玉色与墨绿界面跟随 DSH 明暗主题，工作台的立体气泡可以暂停动效，也会跟随系统的“减少动态效果”设置。运行、等待、失败与微信已确认的结果分别显示，能看清当前发生了什么。
+连接、会话授权、处理记录、记忆、任务和素材各有清晰的入口。冷白与石墨界面跟随 DSH 明暗主题，工作台将日常入口、连接控制与会话概况分开呈现。金属与玻璃双环的轻微动效可以暂停，也会跟随系统的“减少动态效果”设置。运行、等待、失败与微信已确认的结果分别显示，能看清当前发生了什么。
 
-<img src="https://raw.githubusercontent.com/Bozheng-Li/dsh-Wechat-Agent/main/docs/images/visual-refresh-overview-light.png" alt="微信 Agent 工作台：立体对话气泡、连接状态、授权会话与快捷设置" width="100%" />
+<img src="https://raw.githubusercontent.com/Bozheng-Li/dsh-Wechat-Agent/main/docs/images/visual-refresh-overview-light.png" alt="冷白主题的微信 Agent 工作台：双环主视觉、独立连接面板与会话概况" width="100%" />
 
 ## 角色可以不同，记忆各有归属
 
 内置人设库支持分类、搜索与全文预览，载入后继续编辑，保存才生效。每个会话分别积累记忆；自动提取的事实保留原会话来源，跨会话共同约定可以由你写入全局备注。
 
 <img src="https://raw.githubusercontent.com/Bozheng-Li/dsh-Wechat-Agent/main/docs/images/visual-refresh-personas-dark.png" alt="深色主题中的 18 套内置人设分类与预览界面" width="100%" />
+
+记忆库把会话上下文和全局长期记忆放在两个独立页面。近期消息、字符数与窗口容量一眼可见；共同备注、来源事实和文件维护分区管理。切换页面保留未保存草稿，保存时锁定当前会话，避免改错对象；文件无法安全读取时显示原因并暂停编辑。
+
+<img src="https://raw.githubusercontent.com/Bozheng-Li/dsh-Wechat-Agent/main/docs/images/visual-refresh-memory-light.png" alt="长期记忆工作区：共同备注、来自各会话的事实与记忆概况" width="100%" />
 
 ## 认真记下，也按时提醒
 
@@ -81,7 +85,7 @@ DSH `0.2.1-rc.5` 使用用户添加的自定义索引。索引提供版本目录
 
 <img src="https://raw.githubusercontent.com/Bozheng-Li/dsh-Wechat-Agent/main/docs/images/visual-refresh-stickers-light.png" alt="三组内置 3D 表情：猫咪心情、软萌动物与元气心情" width="100%" />
 
-以上应用截图使用隔离的合成账号与会话，展示实际插件界面。
+以上应用截图使用隔离的合成账号与会话，展示本版构建的实际界面。
 
 ## 消息与数据，都能核对
 

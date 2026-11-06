@@ -1,4 +1,5 @@
 import React, { useCallback, useState, useSyncExternalStore } from 'react';
+import { ConversationArt } from './conversation-art.jsx';
 
 const MOTION_KEY = 'wechat-agent.visual-motion';
 const reducedMotionQuery = '(prefers-reduced-motion: reduce)';
@@ -38,15 +39,6 @@ export function MotionControl({ motion }) {
 // Decorative geometry only. Connection and reply states remain in the account copy.
 export function ConversationSculpture() {
   return <div className="wa-conversation-sculpture" aria-hidden="true" data-testid="conversation-sculpture">
-    <div className="wa-sculpture-stage">
-      <div className="wa-sculpture-halo"/>
-      <div className="wa-sculpture-orbit is-back"/>
-      <div className="wa-sculpture-platform"><span/><span/></div>
-      <div className="wa-sculpture-float is-main"><div className="wa-sculpture-bubble is-jade"><span className="wa-sculpture-dots"><i/><i/><i/></span><span className="wa-sculpture-reflection"/></div></div>
-      <div className="wa-sculpture-float is-companion"><div className="wa-sculpture-bubble is-pearl"><span className="wa-sculpture-spark">✦</span><span className="wa-sculpture-reflection"/></div></div>
-      <div className="wa-sculpture-orbit is-front"/>
-      <span className="wa-sculpture-orb is-large"/><span className="wa-sculpture-orb is-small"/>
-      <span className="wa-sculpture-star">+</span>
-    </div>
+    <div className="wa-sculpture-float"><ConversationArt/></div>
   </div>;
 }

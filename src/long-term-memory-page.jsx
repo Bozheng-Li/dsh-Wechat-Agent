@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { conversationKey, peerId, peerName, peerType } from './client-utils.mjs';
+import { MemoryOverview } from './memory-visuals.jsx';
 
 const stamp = value => value ? new Date(value < 1e12 ? value * 1000 : value).toLocaleString('zh-CN', { hour12: false }) : '时间未记录';
 function Button({ primary, danger, ...props }) { return <button type="button" className={'wa-button' + (primary ? ' wa-primary' : '') + (danger ? ' wa-danger' : '')} {...props}/>; }
@@ -32,7 +33,7 @@ export function LongTermMemoryPage({ rpc, status, rows = [] }) {
     void poll(); return () => { controller.abort(); clearTimeout(timer); };
   }, [accountId]);
   const act = async (endpoint, payload, success) => {
-    if (busy) return false; setBusy(endpoint); setError(''); setNotice('');
+    if (busy || doc?.readOnly) return false; setBusy(endpoint); setError(''); setNotice('');
     try {
       await rpc(endpoint, payload);
       if (account.current !== accountId) return false;
@@ -54,24 +55,26 @@ export function LongTermMemoryPage({ rpc, status, rows = [] }) {
       if (await save(remove.base, replace(remove.base, remove.range, ''), '这条长期事实已删除。')) setRemove(null);
     }}>确认删除这条事实</Button><Button disabled={!!busy} onClick={() => setRemove(null)}>返回</Button></div></div>}
   </article>;
-  return <><style>{css}</style><header className="wa-page-head"><div><p className="wa-eyebrow">LONG-TERM MEMORY</p><h1>长期全局记忆</h1><p className="wa-muted">把重要信息留在独立 Markdown 中，会话窗口压缩不会删改它。</p></div></header>
+  return <><style>{css}</style><header className="wa-page-head"><div><p className="wa-eyebrow">LONG-TERM MEMORY</p><h1>长期记忆</h1><p className="wa-muted">留下稳定偏好、重要约定，以及你希望它一直记得的事。</p></div></header>
     {(error || doc?.error) && <div className="wa-alert is-error" role="alert">{error || doc.error}</div>}{notice && <p className="wa-alert" role="status">{notice}</p>}
-    {!accountId ? <div className="wa-empty"><h3>先连接微信账号</h3><p>每个微信账号都有自己独立的长期记忆。</p></div> : !doc ? <p className="wa-help">正在读取长期记忆…</p> : <div data-testid="global-memory-document">
-      <section className="wa-card wa-content-narrow"><div className="wa-between"><div><h2>所有会话通用的内容</h2><p className="wa-help">由你手动填写，当前账号的授权会话都会参考。自动提取的私人信息保留在下方的来源会话内。</p></div><span className="wa-badge">独立保存</span></div>
+    {!accountId ? <div className="wa-empty"><h3>先连接微信账号</h3><p>每个微信账号都有自己独立的长期记忆。</p></div> : !doc ? <p className="wa-help">正在读取长期记忆…</p> : <div className="wa-long-workspace" data-testid="global-memory-document">
+      <MemoryOverview document={doc} longTerm/>
+      {doc.readOnly && <p className="wa-note-box" data-testid="memory-read-only">请修复记忆文件的位置或体积后重新读取。当前无法编辑、清空或整理这份文件。</p>}
+      <section className="wa-card wa-long-shared"><div className="wa-between"><div><span className="wa-section-number" aria-hidden="true">01 / SHARED NOTES</span><h2>所有会话通用的内容</h2><p className="wa-help">由你手动填写，当前账号的授权会话都会参考。自动提取的私人信息保留在下方的来源会话内。</p></div><span className="wa-badge">独立保存</span></div>
         <label className="wa-field wa-automation-field"><span className="wa-label">全局通用备注</span><textarea className="wa-textarea wa-long-editor" aria-label="全局通用备注" rows={8} maxLength={100000} disabled={!!busy || doc.invalid || !!editing || !!rawDraft} value={notes} onChange={event => setNotes(event.target.value)} placeholder="例如：默认使用中文；所有会话都可以知道的长期背景或共同约定。"/></label>
         <div className="wa-long-tools"><Button primary disabled={!!busy || !dirty || doc.invalid || !!editing || !!rawDraft} onClick={() => save(base, replace(base, base.globalRange, '\n' + notes.trim() + '\n'), '全局通用备注已保存。')}>保存全局备注</Button><Button disabled={!!busy || !dirty} onClick={() => { setBase(doc); setNotes(doc.globalNotes); }}>撤销修改</Button><Button disabled={!!busy || dirty || !!editing || !!rawDraft} onClick={() => { void reload(true).catch(failure => setError(failure.message)); }}>重新读取</Button></div>
         <p className="wa-help wa-section-space">已保存 {doc.factCount} 条有效长期事实 · {doc.pendingCount} 条消息等待提取{doc.extracting ? ' · 正在整理' : ''}。更正会保留原文，但旧事实不再作为当前结论使用。</p>
       </section>
-      <section className="wa-card wa-section-space"><h2>来自各会话的重要事实</h2><p className="wa-help">每次只向原会话提供它自己的长期事实。普通聊天不会直接取得其他群或私聊的信息。</p>
+      <section className="wa-card wa-long-collected"><span className="wa-section-number" aria-hidden="true">02 / CONVERSATION NOTES</span><h2>来自各会话的重要事实</h2><p className="wa-help">每次只向原会话提供它自己的长期事实。普通聊天不会直接取得其他群或私聊的信息。</p>
         <div className="wa-long-source"><select className="wa-select" aria-label="长期记忆来源会话" value={selected} disabled={!!busy || !!editing || !!rawDraft} onChange={event => { setSelected(event.target.value); setRemove(null); }}><option value="">查看当前账号全部来源</option>{rows.map(peer => <option key={conversationKey(peer)} value={conversationKey(peer)}>{peerType(peer) === 'group' ? '群聊' : '私聊'} · {peerName(peer)}</option>)}</select></div>
-        {target && <div className="wa-long-tools"><Button disabled={!!busy || doc.extracting || !target.authorized} onClick={() => act('memory.global.extract', { accountId, chatType: peerType(target), peerId: peerId(target) }, '已整理这批长期信息；剩余来源会继续在后台处理。')}>{busy === 'memory.global.extract' || doc.extracting ? '正在整理…' : '整理这个会话的重要信息'}</Button></div>}
+        {target && <div className="wa-long-tools"><Button disabled={!!busy || doc.invalid || doc.readOnly || doc.extracting || !target.authorized} onClick={() => act('memory.global.extract', { accountId, chatType: peerType(target), peerId: peerId(target) }, '已整理这批长期信息；剩余来源会继续在后台处理。')}>{busy === 'memory.global.extract' || doc.extracting ? '正在整理…' : '整理这个会话的重要信息'}</Button></div>}
         {sections.map(section => <div key={section.key} className="wa-long-source-head"><h3>{section.name}</h3><div className="wa-long-facts">{section.facts.filter(entry => entry.state === 'active').map(entry => fact(entry, section))}</div>{section.facts.some(entry => entry.state === 'superseded') && <details className="wa-subsection"><summary>查看已被更正的旧事实</summary><div className="wa-long-facts">{section.facts.filter(entry => entry.state === 'superseded').map(entry => fact(entry, section))}</div></details>}</div>)}
         {!sections.some(section => section.facts.length) && <p className="wa-help wa-section-space">还没有匹配的长期事实。身份、稳定偏好、重要约定和明确更正会从后续会话中逐步保存。</p>}
       </section>
-      <section className="wa-card wa-section-space"><h2>记忆文件</h2><div className="wa-path-value wa-section-space">{doc.path}</div><p className="wa-help wa-section-space">global-memory.md 是正文来源，可用文本编辑器查看和修改。请保留账号、会话和事实标记；未处理的原始来源单独保存，即使局部窗口压缩也能继续提取。</p>
+      <section className="wa-card wa-long-storage"><span className="wa-section-number" aria-hidden="true">03 / FILE & HISTORY</span><h2>记忆文件与维护</h2><div className="wa-path-value wa-section-space">{doc.path}</div><p className="wa-help wa-section-space">global-memory.md 是正文来源，可用文本编辑器查看和修改。请保留账号、会话和事实标记；未处理的原始来源单独保存，即使局部窗口压缩也能继续提取。</p>
         <details className="wa-subsection"><summary>查看完整 Markdown</summary><pre className="wa-long-preview">{doc.markdown}</pre></details>
-        {!rawDraft ? <div className="wa-long-tools"><Button disabled={!!busy || dirty || !!editing} onClick={() => setRawDraft({ base: doc, value: doc.markdown })}>{doc.invalid ? '修复完整 Markdown' : '编辑完整 Markdown'}</Button></div> : <div className="wa-section-space"><textarea className="wa-textarea" aria-label="完整长期记忆 Markdown" rows={16} maxLength={2000000} value={rawDraft.value} disabled={!!busy} onChange={event => setRawDraft({ ...rawDraft, value: event.target.value })}/><p className="wa-help">手动删除事实会同时记录来源，避免旧消息自动回填。来源标记损坏时不会覆盖原文。</p><div className="wa-long-tools"><Button primary disabled={!!busy || rawDraft.value === rawDraft.base.markdown} onClick={async () => { if (await save(rawDraft.base, rawDraft.value, '长期记忆 Markdown 已保存。')) setRawDraft(null); }}>保存 Markdown</Button><Button disabled={!!busy} onClick={() => setRawDraft(null)}>取消编辑</Button></div></div>}
-        <div className="wa-subsection"><Button danger disabled={!!busy || dirty || !!editing || !!rawDraft} onClick={() => setConfirmClear(true)}>清空这个账号的长期记忆</Button>{confirmClear && <div className="wa-note-box wa-section-space"><p>将清空全局备注和所有会话的长期事实，并从后续新消息重新积累。局部会话记忆、聊天记录和备份仍保留，但旧内容不会自动回填。</p><div className="wa-long-tools"><Button danger disabled={!!busy} onClick={() => act('memory.global.clear', { accountId }, '长期记忆已清空，将从后续新消息重新积累。')}>确认清空长期记忆</Button><Button disabled={!!busy} onClick={() => setConfirmClear(false)}>返回</Button></div></div>}</div>
+        {!rawDraft ? <div className="wa-long-tools"><Button disabled={!!busy || dirty || !!editing || doc.readOnly} onClick={() => setRawDraft({ base: doc, value: doc.markdown })}>{doc.invalid ? '修复完整 Markdown' : '编辑完整 Markdown'}</Button></div> : <div className="wa-section-space"><textarea className="wa-textarea" aria-label="完整长期记忆 Markdown" rows={16} maxLength={2000000} value={rawDraft.value} disabled={!!busy || doc.readOnly} onChange={event => setRawDraft({ ...rawDraft, value: event.target.value })}/><p className="wa-help">手动删除事实会同时记录来源，避免旧消息自动回填。来源标记损坏时不会覆盖原文。</p><div className="wa-long-tools"><Button primary disabled={!!busy || doc.readOnly || rawDraft.value === rawDraft.base.markdown} onClick={async () => { if (await save(rawDraft.base, rawDraft.value, '长期记忆 Markdown 已保存。')) setRawDraft(null); }}>保存 Markdown</Button><Button disabled={!!busy} onClick={() => setRawDraft(null)}>取消编辑</Button></div></div>}
+        <div className="wa-subsection"><Button danger disabled={!!busy || dirty || !!editing || !!rawDraft || doc.readOnly} onClick={() => setConfirmClear(true)}>清空这个账号的长期记忆</Button>{confirmClear && <div className="wa-note-box wa-section-space"><p>将清空全局备注和所有会话的长期事实，并从后续新消息重新积累。局部会话记忆、聊天记录和备份仍保留，但旧内容不会自动回填。</p><div className="wa-long-tools"><Button danger disabled={!!busy || doc.readOnly} onClick={() => act('memory.global.clear', { accountId }, '长期记忆已清空，将从后续新消息重新积累。')}>确认清空长期记忆</Button><Button disabled={!!busy} onClick={() => setConfirmClear(false)}>返回</Button></div></div>}</div>
       </section>
     </div>}
   </>;

@@ -80,10 +80,12 @@ test('global identity is reloaded each turn and a conversation persona overrides
   let markdown = '# GLOBAL_ONE\n简短接话。';
   const runner = new DshAgentRunner(f.ctx, () => null, () => ({ identityMarkdown: markdown, persona: { name: '默认名字', aliases: [], prompt: 'DEFAULT_ONLY' } }));
   await runner.run({ text: '你好', persona: { name: '会话小圆', aliases: [], prompt: 'ROOM_A_ONLY' }, signal: signal() });
-  assert(f.scopes[0].prompt.text.startsWith(markdown)); assert(f.scopes[0].prompt.text.includes('ROOM_A_ONLY')); assert(!f.scopes[0].prompt.text.includes('DEFAULT_ONLY'));
+  assert(f.scopes[0].prompt.text.includes(markdown)); assert(f.scopes[0].prompt.text.indexOf(markdown) > f.scopes[0].prompt.text.indexOf('ROOM_A_ONLY'));
+  assert.equal(f.scopes[0].prompt.text.split(markdown).length, 2); assert(f.scopes[0].prompt.text.includes('ROOM_A_ONLY')); assert(!f.scopes[0].prompt.text.includes('DEFAULT_ONLY'));
   markdown = '# GLOBAL_TWO\n自然一些。';
   await runner.run({ text: '你好', signal: signal() });
-  assert(f.scopes[1].prompt.text.startsWith(markdown)); assert(f.scopes[1].prompt.text.includes('DEFAULT_ONLY')); assert(!f.scopes[1].prompt.text.includes('ROOM_A_ONLY'));
+  assert(f.scopes[1].prompt.text.includes(markdown)); assert(f.scopes[1].prompt.text.indexOf(markdown) > f.scopes[1].prompt.text.indexOf('DEFAULT_ONLY'));
+  assert.equal(f.scopes[1].prompt.text.split(markdown).length, 2); assert(f.scopes[1].prompt.text.includes('DEFAULT_ONLY')); assert(!f.scopes[1].prompt.text.includes('ROOM_A_ONLY')); assert(!f.scopes[1].prompt.text.includes('GLOBAL_ONE'));
 });
 
 test('null temperature preserves host controls and the old constructor keeps compatible defaults', async () => {
