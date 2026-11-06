@@ -1,0 +1,3 @@
+- insert:
+    - id: wechat-agent
+      name: dsh-plugin-wechat-agent

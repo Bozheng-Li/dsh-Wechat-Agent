@@ -1,0 +1,84 @@
+export type Segment =
+  | { type: 'text'; data: { text: string } }
+  | { type: 'image'; data: { file: string; url?: string; resourceId?: string } }
+  | { type: 'at'; data: { qq: string } }
+  | { type: 'reply'; data: { id?: string; messageType?: number; senderId?: string; senderName?: string; content?: string } };
+
+export interface Contact { id: string; nickname: string; remark?: string; avatar?: string; alias?: string }
+export interface Group { id: string; name: string; memberCount: number; maxMemberCount?: number }
+export interface Member extends Contact { groupId: string; card?: string; role: 'owner' | 'admin' | 'member'; roleKnown?: boolean }
+export interface BridgeMessage {
+  id: string; time: number; chatType: 'private' | 'group'; peerId: string;
+  sender: Contact; message: Segment[]; direction: 'incoming' | 'outgoing';
+  source?: string; delivery?: string; observedAt?: number; partial?: boolean;
+  serverMessageId?: string; serverMessageIds?: string[]; messageType?: number;
+}
+export interface SendParams { chatType: 'private' | 'group'; peerId: string; message: Segment[] }
+export interface BackendStatus { online: boolean; good: boolean; mode: 'loopback' | 'protocol'; hookCount?: number; diagnostics?: unknown }
+export interface ActionMap {
+  'action.get_login_info': { params: Record<string, never>; result: Contact };
+  'action.send_msg': { params: SendParams; result: BridgeMessage };
+  'action.get_friend_list': { params: Record<string, never>; result: Contact[] };
+  'action.get_group_list': { params: Record<string, never>; result: Group[] };
+  'action.get_group_member_list': { params: { groupId: string }; result: Member[] };
+  'action.get_msg': { params: { id: string }; result: BridgeMessage };
+}
+export type ActionName = keyof ActionMap;
+export type Params<A extends ActionName> = ActionMap[A]['params'];
+export type Result<A extends ActionName> = ActionMap[A]['result'];
+export type BridgeEvent =
+  | { type: 'event.message'; payload: BridgeMessage }
+  | { type: 'event.notice'; payload: { noticeType: 'group_increase' | 'group_decrease'; groupId: string; userId: string; operatorId: string; time: number } }
+  | { type: 'event.meta'; payload: { state: 'connected' | 'disconnected'; mode: BackendStatus['mode'] } }
+  | { type: 'event.runtime'; payload: Record<string, unknown> }
+  | { type: 'event.log'; payload: { level: string; message: string; time: number } };
+
+export interface Backend {
+  readonly mode: BackendStatus['mode'];
+  start(): Promise<void>;
+  close(): Promise<void>;
+  status(): BackendStatus;
+  assertReady(action: ActionName): void;
+  call<A extends ActionName>(action: A, params: Params<A>): Promise<Result<A>>;
+  subscribe(listener: (event: BridgeEvent) => void): () => void;
+}
+export class BridgeError extends Error {
+  constructor(public readonly code: string, message: string, public readonly details: Record<string, unknown> = {}) { super(message); this.name = 'BridgeError'; }
+  toJSON() { return { code: this.code, message: this.message, details: this.details }; }
+}
+export function object(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new BridgeError('ERR_INVALID_PARAMS', 'Expected an object');
+  return value as Record<string, unknown>;
+}
+export function string(value: unknown, name: string): string {
+  if (typeof value !== 'string' || !value || value.length > 1_000_000) throw new BridgeError('ERR_INVALID_PARAMS', `Invalid ${name}`);
+  return value;
+}
+export function segments(value: unknown): Segment[] {
+  if (!Array.isArray(value) || value.length > 1024) throw new BridgeError('ERR_INVALID_PARAMS', 'Expected message segments');
+  return value.map((raw): Segment => {
+    const s = object(raw), d = object(s.data);
+    switch (s.type) {
+      case 'text': if (typeof d.text !== 'string') break; return { type: 'text', data: { text: d.text } };
+      case 'image': return { type: 'image', data: { file: string(d.file, 'image.file'), ...(d.url === undefined ? {} : { url: string(d.url, 'image.url') }) } };
+      case 'at': return { type: 'at', data: { qq: string(String(d.qq ?? ''), 'at.qq') } };
+      case 'reply': return { type: 'reply', data: { id: string(String(d.id ?? ''), 'reply.id') } };
+    }
+    throw new BridgeError('ERR_INVALID_PARAMS', `Unsupported or invalid segment ${String(s.type)}`);
+  });
+}
+export function validateParams<A extends ActionName>(action: A, raw: unknown): Params<A> {
+  if (!ACTIONS.includes(action)) throw new BridgeError('ERR_IPC_METHOD', 'Unknown IPC action');
+  const p = object(raw);
+  let result: unknown;
+  switch (action) {
+    case 'action.send_msg':
+      if (p.chatType !== 'private' && p.chatType !== 'group') throw new BridgeError('ERR_INVALID_PARAMS', 'Invalid chatType');
+      result = { chatType: p.chatType, peerId: string(p.peerId, 'peerId'), message: segments(p.message) }; break;
+    case 'action.get_group_member_list': result = { groupId: string(p.groupId, 'groupId') }; break;
+    case 'action.get_msg': result = { id: string(p.id, 'id') }; break;
+    default: result = {};
+  }
+  return result as Params<A>;
+}
+export const ACTIONS: ActionName[] = ['action.get_login_info', 'action.send_msg', 'action.get_friend_list', 'action.get_group_list', 'action.get_group_member_list', 'action.get_msg'];

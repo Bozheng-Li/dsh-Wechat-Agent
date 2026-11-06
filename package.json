@@ -1,0 +1,77 @@
+{
+  "name": "dsh-plugin-wechat-agent",
+  "version": "0.1.0-preview.4",
+  "description": "在 DeepSeek Harness 中登录微信，为授权会话提供 Agent 文本回复",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "lib/worker.cjs",
+    "runtime",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "CHANGELOG.md",
+    "licenses"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-model-selection"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=22.18",
+    "dsh": "0.2.1-rc.5"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Bozheng-Li/dsh-Wechat-Agent.git"
+  },
+  "private": true,
+  "homepage": "https://github.com/Bozheng-Li/dsh-Wechat-Agent#readme",
+  "bugs": {
+    "url": "https://github.com/Bozheng-Li/dsh-Wechat-Agent/issues"
+  },
+  "scripts": {
+    "build": "node scripts/build-dsh-plugin.mjs",
+    "test": "npm run build && node --test tests/dsh-plugin.test.mjs",
+    "test:native": "node scripts/test-dsh-native.cjs",
+    "test:python": "python -B -m unittest discover -s tests -p native_engine_test.py",
+    "engine:prepare": "node scripts/prepare-wechat-engine.mjs",
+    "pack:plugin": "node scripts/build-dsh-plugin.mjs --pack",
+    "audit:package": "node scripts/audit-dsh-package.mjs",
+    "dsh:build": "npm run build",
+    "dsh:test": "npm test",
+    "dsh:pack": "npm run pack:plugin"
+  },
+  "devDependencies": {
+    "fast-xml-parser": "5.11.2",
+    "rolldown": "1.2.15",
+    "tar": "7.5.22",
+    "zod": "4.6.7"
+  }
+}

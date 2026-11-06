@@ -1,0 +1,304 @@
+import { EventEmitter } from 'node:events';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { BridgeError, object, validateParams, type Backend, type BackendStatus, type ActionName, type Params, type Result, type BridgeEvent, type BridgeMessage, type Contact, type Group, type Member } from '@napcat-wechat/protocol';
+import { atomicJson, readJson, SessionStore, validateCredential, type Credential } from './session.js';
+import { bytes, commandFields, fields, fv, ld, num, signed, syncRequest, syncResponse, sendRequest, sendResponse, unstring } from './wire.js';
+import { LonglinkTransport } from './transport.js';
+import { observedImage } from './media.js';
+import { quotedMessage } from './reference.js';
+
+export interface ProtocolOptions {
+  sessionFile: string; cacheDir: string; syncIntervalMs: number; heartbeatIntervalMs: number;
+  requestTimeoutMs: number; reconnectMs: number; sendIntervalMs: number; sendJitterMs: number; segmentBytes: number;
+}
+type CachedGroup = Group & { memberCountKnown: false };
+interface Cache { account: string; contacts: Contact[]; groups: CachedGroup[]; members: Member[]; messages: BridgeMessage[]; cursor: string }
+export class ProtocolBackend implements Backend {
+  readonly mode = 'protocol' as const;
+  readonly session: SessionStore;
+  private events = new EventEmitter();
+  private transport?: LonglinkTransport;
+  private controller?: AbortController;
+  private worker?: Promise<void>;
+  private online = false;
+  private state = 'session-missing';
+  private lastError?: string;
+  private lastSyncAt?: number;
+  private lastHeartbeatAt?: number;
+  private activeHost?: string;
+  private activePort?: number;
+  private reconnects = 0;
+  private tx = 0; private rx = 0; private sent = 0; private received = 0;
+  private cache!: Cache;
+  private messages = new Map<string, BridgeMessage>();
+  private sendTail: Promise<unknown> = Promise.resolve();
+  private sendPending = 0;
+  private nextSendAt = 0;
+  private importing = false;
+  private syncRequested = false;
+  constructor(readonly options: ProtocolOptions) { this.session = new SessionStore(options.sessionFile); this.loadCache(); }
+  private accountKey(c: Credential) { return `${c.uin}-${c.wxid}`; }
+  private cacheFile() { return path.join(this.options.cacheDir, `${this.session.value!.uin}.json`); }
+  private loadCache() {
+    const c = this.session.value;
+    this.cache = { account: c ? this.accountKey(c) : '', contacts: [], groups: [], members: [], messages: [], cursor: c?.sync_key ?? '' };
+    this.messages.clear();
+    if (c && existsSync(this.cacheFile())) {
+      const saved = readJson(this.cacheFile()) as Cache;
+      if (saved.account !== this.accountKey(c)) throw new BridgeError('ERR_CACHE_ACCOUNT', 'Protocol cache belongs to another account');
+      if (![saved.contacts, saved.groups, saved.members, saved.messages].every(Array.isArray)) throw new BridgeError('ERR_CACHE_FORMAT', 'Invalid protocol cache');
+      this.cache = saved;
+      if (saved.cursor) { fields(Buffer.from(saved.cursor, 'hex')); c.sync_key = saved.cursor; }
+      for (const m of saved.messages) this.messages.set(m.id, m);
+    }
+  }
+  private persist() {
+    if (!this.session.value) return;
+    this.cache.messages = [...this.messages.values()].slice(-5000);
+    atomicJson(this.cacheFile(), this.cache);
+  }
+  private emit(event: BridgeEvent) {
+    // The sync cursor is already committed before publication. One consumer's
+    // failure must not prevent other consumers or later batch messages running.
+    const errors: unknown[] = [];
+    for (const listener of this.events.rawListeners('event')) {
+      try { listener.call(this.events, event); }
+      catch (error) { errors.push(error); }
+    }
+    // A failing log consumer must not recursively generate more log events.
+    if (event.type !== 'event.log') for (const error of errors) {
+      const detail = error instanceof Error ? error.message : String(error);
+      this.log('error', `事件处理失败（${event.type}${event.type === 'event.message' ? ' · ' + event.payload.id : ''}）：${detail}`);
+    }
+  }
+  private log(level: string, message: string) { this.emit({ type: 'event.log', payload: { level, message, time: Date.now() } }); }
+  private setState(state: string, online = false) {
+    const changed = this.online !== online; this.online = online; this.state = state;
+    if (changed) this.emit({ type: 'event.meta', payload: { state: online ? 'connected' : 'disconnected', mode: this.mode } });
+    this.emit({ type: 'event.runtime', payload: { state, online } });
+  }
+  status(): BackendStatus {
+    const transport = this.transport;
+    return { mode: this.mode, online: this.online && !!transport?.connected, good: this.online && !!transport?.connected && !this.lastError, hookCount: 0,
+      diagnostics: { state: this.state, account: this.session.publicStatus().account, credentials: this.session.publicStatus(), lastError: this.lastError,
+        connection: { host: this.activeHost, port: this.activePort, connected: !!transport?.connected, latencyMs: transport?.latencyMs ?? null, connectedAt: transport?.connectedAt, txFrames: this.tx + (transport?.tx ?? 0), rxFrames: this.rx + (transport?.rx ?? 0), reconnects: this.reconnects },
+        sync: { lastSyncAt: this.lastSyncAt, lastHeartbeatAt: this.lastHeartbeatAt, intervalMs: this.options.syncIntervalMs },
+        cache: { contacts: this.cache.contacts.length, groups: this.cache.groups.length, members: this.cache.members.length, messages: this.messages.size, scope: 'protocol-observed-only' },
+        sent: this.sent, received: this.received, sendQueue: this.sendPending, independent: true, loginSupported: true } };
+  }
+  async start() {
+    if (this.worker) return;
+    if (!this.session.value) { this.lastError = this.session.error; this.setState(this.session.error ? 'credential-error' : 'session-missing'); return; }
+    this.controller = new AbortController(); const signal = this.controller.signal;
+    this.worker = this.run(signal).catch(error => { if (!signal.aborted) { this.lastError = error instanceof Error ? error.message : String(error); this.setState('error'); this.log('error', this.lastError); } }).finally(() => { this.worker = undefined; });
+  }
+  private retireTransport() {
+    if (!this.transport) return;
+    this.tx += this.transport.tx; this.rx += this.transport.rx;
+    this.transport.close(); this.transport = undefined;
+  }
+  private async run(signal: AbortSignal) {
+    let attempts = 0;
+    while (!signal.aborted) {
+      const c = this.session.value!;
+      const endpoints = [...new Map([{ host: c.host, port: c.port }, ...c.edges, { host: 'long.weixin.qq.com', port: c.port }]
+        .map(endpoint => [`${endpoint.host}:${endpoint.port}`, endpoint])).values()];
+      const endpoint = endpoints[attempts % endpoints.length], host = endpoint.host; this.activeHost = host; this.activePort = endpoint.port;
+      this.setState('connecting');
+      const t = new LonglinkTransport(c, this.options.requestTimeoutMs, () => { this.syncRequested = true; }); this.transport = t;
+      try {
+        await t.connect(host, endpoint.port);
+        if (signal.aborted) return;
+        await this.sync(t);
+        c.host = host; c.port = endpoint.port; this.session.save(c);
+        if (attempts) this.log('info', 'Protocol connection recovered'); attempts = 0;
+        let nextSync = Date.now() + this.options.syncIntervalMs;
+        let nextHeartbeat = Date.now() + this.options.heartbeatIntervalMs;
+        while (!signal.aborted && t.connected) {
+          if (this.syncRequested || Date.now() >= nextSync) {
+            this.syncRequested = false; await this.sync(t); nextSync = Date.now() + this.options.syncIntervalMs;
+          }
+          if (c.heartbeat_base_request && Date.now() >= nextHeartbeat) {
+            const body = Buffer.concat([ld(1, Buffer.from(c.heartbeat_base_request, 'hex')), fv(2, Math.floor(Date.now() / 1000)), ld(3, Buffer.from(c.sync_key, 'hex'))]);
+            const response = fields(await t.request(518, body));
+            const ret = signed(num(fields(bytes(response, 1)), 1));
+            if (ret !== 0) throw new BridgeError('ERR_HEARTBEAT', `Heartbeat rejected (ret=${ret ?? 'missing'})`);
+            this.lastHeartbeatAt = Date.now(); nextHeartbeat = Date.now() + this.options.heartbeatIntervalMs;
+          }
+          await sleep(250, undefined, { signal });
+        }
+        if (!signal.aborted) throw new BridgeError('ERR_CONNECTION_CLOSED', 'Protocol edge closed the connection');
+      } catch (error) {
+        if (signal.aborted) return;
+        this.lastError = error instanceof Error ? error.message : String(error); this.setState('reconnecting');
+        this.log('warn', `${host}:${endpoint.port}: ${this.lastError}`); attempts++; this.reconnects++;
+      } finally { this.retireTransport(); }
+      try { await sleep(Math.min(this.options.reconnectMs * Math.max(1, Math.floor(attempts / endpoints.length) + 1), 60000), undefined, { signal }); }
+      catch { return; }
+    }
+  }
+  private async sync(t: LonglinkTransport) {
+    const c = this.session.value!;
+    const result = syncResponse(await t.request(138, syncRequest(c.sync_key)));
+    const published: BridgeMessage[] = [];
+    // Decode the whole batch first: a malformed supported command must not advance the cursor.
+    const decoded = result.commands.map(cmd => ({ id: cmd.id, fs: cmd.id === 5 || cmd.id === 2 ? commandFields(cmd.payload, cmd.id === 5 ? 'message' : 'contact') : [] }));
+    const previousCache = result.commands.length ? structuredClone(this.cache) : this.cache;
+    const previousMessages = result.commands.length ? new Map(this.messages) : this.messages;
+    const previousCursor = c.sync_key, previousReceived = this.received;
+    try {
+      for (const cmd of decoded) {
+        if (cmd.id === 2) this.updateContact(cmd.fs);
+        else if (cmd.id === 5) {
+          const message = this.decodeMessage(cmd.fs);
+          if (message && !this.messages.has(message.id)) {
+            this.remember(message); published.push(message);
+            if (message.direction === 'incoming') this.received++;
+          }
+        }
+      }
+      if (result.key) { this.cache.cursor = result.key; c.sync_key = result.key; }
+      // Cache and cursor are one atomic record; session.json mirrors it for portability.
+      if (result.commands.length || c.sync_key !== previousCursor) this.persist();
+    } catch (error) {
+      this.cache = previousCache; this.messages = previousMessages; c.sync_key = previousCursor; this.cache.cursor = previousCursor; this.received = previousReceived;
+      throw error;
+    }
+    let mirrorError: unknown;
+    try { if (c.sync_key !== previousCursor) this.session.save(c); } catch (error) { mirrorError = error; }
+    this.lastSyncAt = Date.now(); this.syncRequested = result.more;
+    if (!this.online) { this.lastError = undefined; this.setState('online', true); }
+    for (const message of published) this.emit({ type: 'event.message', payload: structuredClone(message) });
+    if (mirrorError) throw mirrorError;
+  }
+  private updateContact(fs: ReturnType<typeof fields>) {
+    const id = unstring(bytes(fs, 1)); if (!/^[\w@.:-]{1,256}$/.test(id)) throw new BridgeError('ERR_PROTOCOL', 'Invalid ModContact identity');
+    const nickname = unstring(bytes(fs, 2)) || id;
+    if (id.endsWith('@chatroom')) {
+      const group: CachedGroup = { id, name: nickname, memberCount: 0, memberCountKnown: false };
+      this.cache.groups = [...this.cache.groups.filter(g => g.id !== id), group];
+    } else {
+      const previous = this.cache.contacts.find(c => c.id === id);
+      // Only fields evidenced in mod_contact_cmd.json are promoted to metadata.
+      const contact: Contact = { ...previous, id, nickname, remark: unstring(bytes(fs, 10)) };
+      this.cache.contacts = [...this.cache.contacts.filter(c => c.id !== id), contact];
+      if (id === this.session.value?.wxid && nickname !== id) this.session.value.nickname = nickname;
+    }
+  }
+  private decodeMessage(fs: ReturnType<typeof fields>): BridgeMessage | undefined {
+    const self = this.session.value!, from = unstring(bytes(fs, 2)), to = unstring(bytes(fs, 3));
+    const type = Number(num(fs, 4));
+    if (!/^[\w@.:-]{1,256}$/.test(from) || !/^[\w@.:-]{1,256}$/.test(to) || !Number.isInteger(type)) throw new BridgeError('ERR_PROTOCOL', 'Invalid AddMsg fields');
+    const outgoing = from === self.wxid;
+    if (!outgoing && to !== self.wxid && !from.endsWith('@chatroom')) return;
+    const peer = outgoing ? to : from, group = peer.endsWith('@chatroom');
+    let content = unstring(bytes(fs, 5)), sender = outgoing ? self.wxid : from;
+    if (group && !outgoing) {
+      const match = /^([\w@.:-]+):\n/.exec(content);
+      if (match) { sender = match[1]; content = content.slice(match[0].length); }
+    }
+    const id = (num(fs, 12) || num(fs, 1))?.toString();
+    if (!id || id === '0') throw new BridgeError('ERR_PROTOCOL', 'AddMsg has no message ID');
+    const contact = sender === self.wxid ? { id: self.wxid, nickname: self.nickname } : this.cache.contacts.find(c => c.id === sender) ?? { id: sender, nickname: sender };
+    const quoted = type === 49 ? quotedMessage(content, peer) : undefined;
+    const mentions: BridgeMessage['message'] = [];
+    if (group && (type === 1 || type === 3 || quoted)) {
+      const source = unstring(bytes(fs, 10));
+      const list = /<atuserlist>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/atuserlist>/.exec(source)?.[1];
+      for (const at of list?.split(',') ?? []) if (/^[\w@.:-]+$/.test(at.trim())) mentions.push({ type: 'at', data: { qq: at.trim() } });
+      if (!this.cache.groups.some(g => g.id === peer)) this.cache.groups.push({ id: peer, name: peer, memberCount: 0, memberCountKnown: false });
+      if (sender !== peer && !this.cache.members.some(m => m.groupId === peer && m.id === sender)) this.cache.members.push({ ...contact, groupId: peer, role: 'member', roleKnown: false });
+    } else if (!outgoing && !this.cache.contacts.some(c => c.id === sender)) this.cache.contacts.push(contact);
+    const labels: Record<number, string> = { 3: '[图片]', 34: '[语音]', 43: '[视频]', 47: '[表情]', 49: '[链接或文件]', 10000: '[系统消息]' };
+    return { id: `wx:${peer}:${id}`, serverMessageId: id, time: Number(num(fs, 9) ?? 0n), chatType: group ? 'group' : 'private', peerId: peer, sender: contact,
+      message: [...mentions, ...(quoted ?? (type === 3 ? [observedImage(fs, content, path.join(this.options.cacheDir, 'media', String(self.uin)), `${peer}:${id}`)] : [{ type: 'text' as const, data: { text: type === 1 ? content : labels[type] ?? `[消息类型 ${type}]` } }]))], messageType: type,
+      direction: outgoing ? 'outgoing' : 'incoming', source: 'longlink:NewSync', delivery: 'observed', observedAt: Date.now(), partial: type !== 1 && type !== 3 && !quoted };
+  }
+  private remember(m: BridgeMessage) { this.messages.set(m.id, m); while (this.messages.size > 5000) this.messages.delete(this.messages.keys().next().value!); }
+  recentMessages(peerId?: string, limit = 100) { return structuredClone([...this.messages.values()].filter(m => !peerId || m.peerId === peerId).slice(-limit)); }
+  assertReady(_action: ActionName) { if (!this.status().online) throw new BridgeError('ERR_BACKEND_OFFLINE', this.lastError ?? 'Import valid session credentials and wait for a successful NewSync'); }
+  async call<A extends ActionName>(action: A, raw: Params<A>): Promise<Result<A>> {
+    const p = validateParams(action, raw); let result: unknown;
+    switch (action) {
+      case 'action.get_login_info': { const c = this.session.value; this.assertReady(action); result = { id: c!.wxid, nickname: c!.nickname }; break; }
+      case 'action.get_friend_list': result = this.cache.contacts; break;
+      case 'action.get_group_list': result = this.cache.groups; break;
+      case 'action.get_group_member_list': result = this.cache.members.filter(m => m.groupId === (p as Params<'action.get_group_member_list'>).groupId); break;
+      case 'action.get_msg': { result = this.messages.get((p as Params<'action.get_msg'>).id); if (!result) throw new BridgeError('ERR_NOT_FOUND', 'Message is not in the protocol cache'); break; }
+      case 'action.send_msg': result = await this.enqueueSend(p as Params<'action.send_msg'>); break;
+    }
+    return structuredClone(result) as Result<A>;
+  }
+  sendMessage(p: Params<'action.send_msg'>, cancel?: AbortSignal): Promise<BridgeMessage> { return this.enqueueSend(validateParams('action.send_msg', p), cancel); }
+  private enqueueSend(p: Params<'action.send_msg'>, cancel?: AbortSignal): Promise<BridgeMessage> {
+    this.assertReady('action.send_msg');
+    if (!/^[\w@.:-]{1,256}$/.test(p.peerId) || p.peerId.endsWith('@chatroom') !== (p.chatType === 'group')) throw new BridgeError('ERR_INVALID_PARAMS', 'Destination does not match chat type');
+    if (p.message.some(s => s.type !== 'text')) throw new BridgeError('ERR_UNSUPPORTED_ACTION', 'Pure protocol sending supports text only');
+    const text = p.message.map(s => s.type === 'text' ? s.data.text : '').join('');
+    if (!text.trim()) throw new BridgeError('ERR_INVALID_PARAMS', 'Message cannot be empty');
+    if (this.sendPending >= 128) throw new BridgeError('ERR_SEND_QUEUE_FULL', 'Send queue is full');
+    const signal = cancel ? AbortSignal.any([this.controller!.signal, cancel]) : this.controller!.signal; this.sendPending++;
+    const task = this.sendTail.then(async () => {
+      const parts: string[] = []; let part = '', size = 0;
+      for (const char of text) { const n = Buffer.byteLength(char); if (size + n > this.options.segmentBytes) { parts.push(part); part = ''; size = 0; } part += char; size += n; }
+      if (part) parts.push(part);
+      const ids: string[] = []; let first: BridgeMessage | undefined;
+      try {
+        for (const chunk of parts) {
+          await sleep(Math.max(0, this.nextSendAt - Date.now()) + Math.floor(Math.random() * (this.options.sendJitterMs + 1)), undefined, { signal });
+          if (signal.aborted) throw new BridgeError('ERR_STOPPED', 'Session stopped');
+          this.assertReady('action.send_msg');
+          const request = sendRequest(p.peerId, chunk), t = this.transport!;
+          this.nextSendAt = Date.now() + this.options.sendIntervalMs;
+          const ack = sendResponse(await t.request(522, request.body), request.f4, request.f5);
+          ids.push(ack.id); this.sent++;
+          const c = this.session.value!;
+          const message: BridgeMessage = { id: `wx:${p.peerId}:${ack.id}`, serverMessageId: ack.id, time: ack.time, chatType: p.chatType, peerId: p.peerId, sender: { id: c.wxid, nickname: c.nickname }, message: [{ type: 'text', data: { text: chunk } }], direction: 'outgoing', source: 'longlink:SendMsg', delivery: 'server-ack', observedAt: Date.now(), messageType: 1 };
+          this.remember(message); this.persist(); first ??= message; this.emit({ type: 'event.message', payload: structuredClone(message) });
+        }
+      } catch (error) {
+        throw new BridgeError(error instanceof BridgeError ? error.code : 'ERR_SEND_FAILED', error instanceof Error ? error.message : 'Send failed', { ...(error instanceof BridgeError ? error.details : {}), acknowledgedMessageIds: ids, delivery: ids.length ? 'partially-acknowledged' : error instanceof BridgeError ? error.details.delivery ?? 'unknown' : 'unknown' });
+      }
+      return { ...first!, serverMessageIds: ids };
+    });
+    this.sendTail = task.catch(() => {});
+    return task.finally(() => { this.sendPending--; });
+  }
+  async importSession(raw: unknown) {
+    if (this.importing) throw new BridgeError('ERR_SESSION_BUSY', 'Session import is already in progress');
+    const data = object(raw), next = validateCredential(data);
+    let contacts: Contact[] = [];
+    if (data.contacts !== undefined) {
+      if (!Array.isArray(data.contacts) || data.contacts.length > 50000) throw new BridgeError('ERR_CREDENTIAL', 'Invalid native contact list');
+      contacts = data.contacts.map(rawContact => {
+        const c = object(rawContact);
+        if (typeof c.id !== 'string' || !/^[\w@.:-]{1,256}$/.test(c.id) || typeof c.nickname !== 'string' || c.nickname.length > 256 || typeof c.remark !== 'string' || c.remark.length > 256)
+          throw new BridgeError('ERR_CREDENTIAL', 'Invalid native contact');
+        return { id: c.id, nickname: c.nickname || c.id, remark: c.remark };
+      });
+    }
+    this.importing = true;
+    try {
+      await this.stopProtocol();
+      const importedCursor = next.sync_key;
+      this.session.save(next); this.loadCache();
+      for (const contact of contacts) {
+        if (contact.id.endsWith('@chatroom')) this.cache.groups = [...this.cache.groups.filter(g => g.id !== contact.id), { id: contact.id, name: contact.nickname, memberCount: 0, memberCountKnown: false }];
+        else this.cache.contacts = [...this.cache.contacts.filter(c => c.id !== contact.id), contact];
+      }
+      // An explicit import replaces any older local cursor for the same account.
+      this.cache.cursor = importedCursor; this.session.value!.sync_key = importedCursor; this.persist();
+      this.lastError = undefined; this.lastSyncAt = undefined; this.lastHeartbeatAt = undefined;
+      await this.start(); return this.session.publicStatus();
+    } finally { this.importing = false; }
+  }
+  private async stopProtocol() {
+    this.controller?.abort(); this.transport?.close(); await this.worker;
+    await this.sendTail; this.nextSendAt = 0; this.setState('stopped');
+  }
+  async close() { await this.stopProtocol(); this.events.removeAllListeners(); }
+  async disconnect() { await this.stopProtocol(); }
+  subscribe(listener: (event: BridgeEvent) => void) { this.events.on('event', listener); return () => this.events.off('event', listener); }
+}
