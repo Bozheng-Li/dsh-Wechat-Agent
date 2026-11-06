@@ -4,6 +4,7 @@ import { ProtocolBackend } from './wechat/protocol/backend.ts';
 import { QrLoginManager } from './wechat/protocol/login.ts';
 import { protectStorage, projectPaths } from './wechat/paths.ts';
 import { ChannelError } from './contracts.mjs';
+import { loadObservedMedia } from './wechat/protocol/media-loader.mjs';
 
 const root = path.resolve(process.argv[2]);
 const resources = process.env.NAPCAT_RESOURCE_ROOT;
@@ -56,8 +57,18 @@ async function perform(id, op, args) {
       groups: (await backend.call('action.get_group_list', {})).map(g => ({ id: g.id, name: g.name || g.id }))
     };
     case 'send': {
+      const account = backend.session.value;
+      if (!account || args?.accountId !== account.wxid) throw new ChannelError('ACCOUNT_CHANGED', '微信账号已变化或发送账号不匹配，消息尚未发送', { delivery: 'rejected' });
+      const { accountId: _accountId, ...params } = args;
       const controller = new AbortController(); sending.set(id, controller);
-      try { return await backend.sendMessage(args, controller.signal); }
+      try { return await backend.sendMessage(params, controller.signal); }
+      finally { sending.delete(id); }
+    }
+    case 'media': {
+      const account = backend.session.value;
+      if (!account || args.accountId !== account.wxid) throw new ChannelError('ACCOUNT_CHANGED', '微信账号已变化，未读取其他账号的图片');
+      const controller = new AbortController(); sending.set(id, controller);
+      try { return await loadObservedMedia({ directory: path.join(dirs.cache, 'protocol/media', String(account.uin)), peerId: args.peerId, messageId: args.messageId, resourceId: args.resourceId, signal: controller.signal }); }
       finally { sending.delete(id); }
     }
     case 'close': await close(); return null;
@@ -73,10 +84,10 @@ process.on('message', async message => {
     const details = error?.details || {};
     send({ type: 'result', id: message.id, ok: false, error: {
       code: error?.code || 'WECHAT_FAILED',
-      message: error instanceof ChannelError || ['ERR_LOGIN_BUSY', 'ERR_SESSION_EXISTS', 'ERR_LOGIN_HANDOFF'].includes(error?.code)
+      message: error instanceof ChannelError || ['ERR_LOGIN_BUSY', 'ERR_SESSION_EXISTS', 'ERR_LOGIN_HANDOFF', 'ERR_IMAGE_FORMAT', 'ERR_IMAGE_CREDENTIAL', 'ERR_UNSUPPORTED_IMAGE'].includes(error?.code)
         ? error.message : message.op === 'send' ? '微信发送失败，请检查连接及回执记录' : '微信操作失败，请检查连接状态',
       details: {
-        ...['unknown', 'partially-acknowledged'].includes(details.delivery) ? { delivery: details.delivery } : {},
+        ...['unknown', 'partially-acknowledged', 'rejected'].includes(details.delivery) ? { delivery: details.delivery } : {},
         ...Array.isArray(details.acknowledgedMessageIds) ? { acknowledgedMessageIds: details.acknowledgedMessageIds } : {}
       }
     } });

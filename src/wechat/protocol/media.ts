@@ -54,7 +54,8 @@ export function observedImage(
       .replace(/&gt;/g, ">")
       .replace(/&quot;/g, '"')
       .replace(/&amp;/g, "&");
-  const tag = /<img\b([^>]{0,32768})\/?\s*>/i.exec(xml)?.[1] ?? "";
+  const emoji = /<emoji\b/i.test(xml);
+  const tag = /<(?:img|emoji)\b([^>]{0,32768})\/?\s*>/i.exec(xml)?.[1] ?? "";
   for (const m of tag.matchAll(
     /([\w]+)\s*=\s*(?:"([^"\r\n]*)"|'([^'\r\n]*)')/g,
   ))
@@ -91,6 +92,10 @@ export function observedImage(
         : {}),
     });
   }
+  if (emoji) for (const field of ['cdnurl', 'thumburl', 'externurl']) {
+    if (attrs[field]) descriptor.resources.push({ quality: field === 'thumburl' ? 'thumbnail' : 'original', reference: attrs[field],
+      ...(field === 'cdnurl' && /^[a-f0-9]{32}$/i.test(attrs.md5 || '') ? { md5: attrs.md5 } : {}) });
+  }
   const wrapped = bytes(fs, 8);
   if (wrapped.length) {
     let b: Buffer;
@@ -116,7 +121,7 @@ export function observedImage(
           JSON.stringify(descriptor),
           { mode: 0o600 },
         );
-        return { type: "image", data: { file, resourceId: id } };
+        return { type: emoji ? 'face' : "image", data: { file, resourceId: id } };
       } catch (e) {
         if (!(e instanceof BridgeError)) throw e;
       }
@@ -125,5 +130,5 @@ export function observedImage(
   writeFileSync(path.join(dir, id + ".json"), JSON.stringify(descriptor), {
     mode: 0o600,
   });
-  return { type: "image", data: { file: "unavailable", resourceId: id } };
+  return { type: emoji ? 'face' : "image", data: { file: "unavailable", resourceId: id } };
 }

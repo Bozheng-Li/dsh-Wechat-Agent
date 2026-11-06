@@ -71,24 +71,27 @@ test('unauthorized, self and outgoing messages never invoke the model', async t 
   await f.channel.whenIdle(); assert.equal(f.calls.length, 0); assert.equal(f.sent.length, 0);
 });
 
-test('consecutive questions queue in order and continue the same member session', async t => {
+test('consecutive questions queue in order and each receives updated durable conversation memory', async t => {
   const f = fixture(t), gate = Promise.withResolvers(), original = f.runner.run;
   f.runner.run = async input => { if (!f.calls.length) { f.calls.push(input); await gate.promise; f.calls.pop(); } return original(input); };
   f.receive(message(1)); f.receive(message(2)); f.receive(message(3));
   assert.equal(f.channel.summary().queued, 2);
   gate.resolve(); await f.channel.whenIdle();
   assert.deepEqual(f.calls.map(c => c.text), ['问题 1', '问题 2', '问题 3']);
-  assert.equal(f.calls[1].sessionId, 'session-1'); assert.equal(f.calls[2].sessionId, 'session-1');
+  assert.equal(f.calls[1].sessionId, undefined); assert.equal(f.calls[2].sessionId, undefined);
+  assert(f.calls[1].memory.includes('回答 问题 1')); assert(f.calls[2].memory.includes('回答 问题 2'));
   assert.equal(f.sent.length, 3); assert(f.store.data.records.every(r => r.state === 'sent'));
 });
 
-test('group members and private peers have separate DSH context identities', async t => {
+test('group speakers share room memory while private conversations remain separate', async t => {
   const f = fixture(t);
   const group = (id, sender) => message(id, { chatType: 'group', peerId: '123@chatroom', sender: { id: sender }, message: [{ type: 'text', data: { text: `/agent ${id}` } }] });
   f.receive(group(1, 'alice')); f.receive(group(2, 'bob')); f.receive(group(3, 'alice')); f.receive(message(4));
   await f.channel.whenIdle();
   assert.equal(f.calls[0].sessionId, undefined); assert.equal(f.calls[1].sessionId, undefined);
-  assert.equal(f.calls[2].sessionId, 'session-1'); assert.equal(f.calls[3].sessionId, undefined);
+  assert.equal(f.calls[2].sessionId, undefined); assert.equal(f.calls[3].sessionId, undefined);
+  assert(f.calls[2].memory.includes('alice') && f.calls[2].memory.includes('bob'));
+  assert(!f.calls[3].memory.includes('bob'));
 });
 
 test('deduplication survives reload and uses account + peer + server message identity', async t => {
@@ -164,7 +167,7 @@ test('old, empty and unsupported media messages have understandable skip reasons
   const f = fixture(t);
   f.receive(message(1, { time: Math.floor(Date.now() / 1000) - 1200 }));
   f.receive(message(2, { message: [{ type: 'text', data: { text: ' ' } }] }));
-  f.receive(message(3, { message: [{ type: 'image', data: { file: 'private-path' } }] }));
+  f.receive(message(3, { message: [{ type: 'file', data: { file: 'private-path' } }] }));
   await f.channel.whenIdle(); assert.equal(f.calls.length, 0); assert(f.store.data.records.every(r => r.state === 'skipped' && r.reason));
 });
 

@@ -1,6 +1,14 @@
+export interface MediaData {
+  file?: string; url?: string; resourceId?: string;
+  // Only trusted, already-loaded bytes may be submitted for sending. File/URL
+  // references describe received or cached media; the sender never reads them.
+  base64?: string; mediaType?: string; bytes?: number; sha256?: string;
+}
+export const MAX_SEND_IMAGE_BYTES = 10 * 1024 * 1024;
 export type Segment =
   | { type: 'text'; data: { text: string } }
-  | { type: 'image'; data: { file: string; url?: string; resourceId?: string } }
+  | { type: 'image'; data: MediaData }
+  | { type: 'face'; data: MediaData }
   | { type: 'at'; data: { qq: string } }
   | { type: 'reply'; data: { id?: string; messageType?: number; senderId?: string; senderName?: string; content?: string } };
 
@@ -60,7 +68,17 @@ export function segments(value: unknown): Segment[] {
     const s = object(raw), d = object(s.data);
     switch (s.type) {
       case 'text': if (typeof d.text !== 'string') break; return { type: 'text', data: { text: d.text } };
-      case 'image': return { type: 'image', data: { file: string(d.file, 'image.file'), ...(d.url === undefined ? {} : { url: string(d.url, 'image.url') }) } };
+      case 'image':
+      case 'face': {
+        if (d.base64 !== undefined) {
+          if (typeof d.base64 !== 'string' || !d.base64.length || d.base64.length > Math.ceil(MAX_SEND_IMAGE_BYTES / 3) * 4 || d.base64.length % 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(d.base64))
+            throw new BridgeError('ERR_INVALID_PARAMS', '图片内容必须是标准 base64，单张不能超过 10 MiB');
+          if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(String(d.mediaType)))
+            throw new BridgeError('ERR_INVALID_PARAMS', '图片类型必须是 PNG、JPEG、GIF 或 WebP');
+          return { type: s.type, data: { base64: d.base64, mediaType: String(d.mediaType) } };
+        }
+        return { type: s.type, data: { file: string(d.file, `${s.type}.file`), ...(d.url === undefined ? {} : { url: string(d.url, `${s.type}.url`) }), ...(d.resourceId === undefined ? {} : { resourceId: string(d.resourceId, `${s.type}.resourceId`) }) } };
+      }
       case 'at': return { type: 'at', data: { qq: string(String(d.qq ?? ''), 'at.qq') } };
       case 'reply': return { type: 'reply', data: { id: string(String(d.id ?? ''), 'reply.id') } };
     }

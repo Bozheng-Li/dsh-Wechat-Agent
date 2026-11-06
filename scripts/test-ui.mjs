@@ -4,8 +4,9 @@ import http from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { deflateSync } from 'node:zlib';
 import { rolldown } from 'rolldown';
-import { StateStore, WechatChannel, identity, createPluginService, rpcHandler, ChannelError } from '../lib/testing.js';
+import { StateStore, WechatChannel, TaskScheduler, VERSION, identity, createPluginService, rpcHandler, ChannelError } from '../lib/testing.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const electron = process.argv[2] || process.env.ELECTRON_PATH;
@@ -16,6 +17,25 @@ fs.mkdirSync(path.join(root, 'storage/tmp'), { recursive: true });
 const fixture = fs.mkdtempSync(path.join(root, 'storage/tmp/ui-preview-'));
 const token = randomBytes(24).toString('hex');
 const accountId = 'wxid_ui_fixture';
+const crc32 = data => { let value = 0xffffffff; for (const byte of data) { value ^= byte; for (let bit = 0; bit < 8; bit++) value = (value >>> 1) ^ (value & 1 ? 0xedb88320 : 0); } return (value ^ 0xffffffff) >>> 0; };
+function fixturePng(rgb, padding = 0) {
+  const chunk = (kind, data) => { const name = Buffer.from(kind), size = Buffer.alloc(4), checksum = Buffer.alloc(4); size.writeUInt32BE(data.length); checksum.writeUInt32BE(crc32(Buffer.concat([name, data]))); return Buffer.concat([size, name, data, checksum]); };
+  const header = Buffer.alloc(13); header.writeUInt32BE(2, 0); header.writeUInt32BE(2, 4); header[8] = 8; header[9] = 2;
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header), ...(padding ? [chunk('tEXt', Buffer.from('ui-fixture\0' + 'A'.repeat(padding)))] : []), chunk('IDAT', deflateSync(Buffer.from([0, ...rgb, ...rgb, 0, ...rgb, ...rgb]))), chunk('IEND', Buffer.alloc(0))]);
+}
+function fixtureZip(items) {
+  const local = [], directory = []; let offset = 0;
+  for (const item of items) {
+    const name = Buffer.from(item.name), data = item.data, checksum = crc32(data), header = Buffer.alloc(30), central = Buffer.alloc(46);
+    header.writeUInt32LE(0x04034b50); header.writeUInt16LE(20, 4); header.writeUInt16LE(0x0800, 6); header.writeUInt32LE(checksum, 14); header.writeUInt32LE(data.length, 18); header.writeUInt32LE(data.length, 22); header.writeUInt16LE(name.length, 26);
+    central.writeUInt32LE(0x02014b50); central.writeUInt16LE(20, 4); central.writeUInt16LE(20, 6); central.writeUInt16LE(0x0800, 8); central.writeUInt32LE(checksum, 16); central.writeUInt32LE(data.length, 20); central.writeUInt32LE(data.length, 24); central.writeUInt16LE(name.length, 28); central.writeUInt32LE(offset, 42);
+    local.push(header, name, data); directory.push(central, name); offset += header.length + name.length + data.length;
+  }
+  const central = Buffer.concat(directory), end = Buffer.alloc(22); end.writeUInt32LE(0x06054b50); end.writeUInt16LE(items.length, 8); end.writeUInt16LE(items.length, 10); end.writeUInt32LE(central.length, 12); end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...local, central, end]);
+}
+// An ancillary PNG chunk makes the ZIP cross the real 256 KiB upload boundary.
+const assetZip = fixtureZip([{ name: '赞同/红色方块.png', data: fixturePng([220, 66, 66], 300 * 1024) }, { name: '冷静/绿色方块.png', data: fixturePng([44, 168, 112]) }]);
 const store = new StateStore(fixture);
 store.ensureWorkspace();
 store.configure(accountId, { enabled: true, privatePeers: ['wxid_alice'], groups: ['group_alpha@chatroom', 'group_beta@chatroom'], prompt: '回答清楚、简洁。' });
@@ -23,7 +43,9 @@ store.setPersona({ name: '小胖', aliases: ['胖胖'], background: '一起讨�
 const contacts = {
   privatePeers: [
     { id: 'wxid_alice', name: 'Alice·产品同事', nickname: 'Alice', remark: '产品负责人' },
-    { id: 'wxid_bob', name: 'Bob·设计同事', nickname: 'Bob', remark: '视觉设计' }
+    { id: 'wxid_bob', name: 'Bob·设计同事', nickname: 'Bob', remark: '视觉设计' },
+    { id: 'wxid_li_ming', name: '李明', nickname: '李明', remark: '' },
+    { id: 'wxid_xiao_li', name: '小李', nickname: '李同学', remark: '小李' }
   ],
   groups: [{ id: 'group_alpha@chatroom', name: '产品讨论组' }, { id: 'group_beta@chatroom', name: '周末出游' }, { id: 'group_gamma@chatroom', name: '设计评审组' }]
 };
@@ -52,9 +74,15 @@ const worker = {
   },
   async send() { throw new Error('The UI fixture must never send a WeChat message'); }
 };
+const assetAnalysisRequests = [];
 const runner = { selection: () => store.modelChoice() || { provider: 'fixture', model: 'alpha' }, defaultSelection: () => ({ provider: 'fixture', model: 'alpha' }),
+  async describeImages(images, signal) { signal.throwIfAborted(); assetAnalysisRequests.push(images.length); return images.map(() => '合成方块，用于表达赞同或让讨论冷静下来。'); },
   async run() { throw new Error('The UI fixture must never generate a model response'); } };
 const channel = new WechatChannel({ store, runner, transport: worker });
+// This fixture checks owner UI/RPC and durable files. Automatic extraction must not
+// drain its deliberately queued cancellation samples or call a real model.
+channel.maintainMemory = () => {};
+const scheduler = new TaskScheduler({ store, channel }); channel.scheduler = scheduler;
 function appendFixtureRecord(peerId, queued = false) {
   if (!['group_alpha@chatroom', 'group_beta@chatroom'].includes(peerId)) throw new Error('Unknown synthetic conversation');
   const id = `ui-live-${++sequence}`, chatType = 'group', key = identity([accountId, chatType, peerId, id]);
@@ -71,7 +99,7 @@ function appendFixtureRecord(peerId, queued = false) {
 }
 const ctx = { llm: { listProviders: () => [{ id: 'fixture' }], listModels: async () => [{ id: 'alpha' }, { id: 'beta' }] } };
 const service = createPluginService({ ctx, root: fixture, store, worker, runner, channel, dshSessionPath: path.join(fixture, 'host-sessions') });
-const rpc = rpcHandler(service), failures = new Set(), cancelRequests = [];
+const rpc = rpcHandler(service), failures = new Set(), cancelRequests = [], assetUploadRequests = [];
 let lastHistoryRequest = null;
 const paths = { workspacePath: path.join(fixture, 'custom-workspace'), recordsPath: path.join(fixture, 'custom-records'), conversationPath: path.join(fixture, 'custom-alpha') };
 const build = await rolldown({ input: path.join(root, 'tests/fixtures/ui-entry.jsx'), platform: 'browser', transform: { define: { 'process.env.NODE_ENV': JSON.stringify('production') } } });
@@ -86,12 +114,15 @@ const server = http.createServer(async (req, res) => {
   if (req.method !== 'POST' || !['/rpc', '/fixture'].includes(req.url) || req.headers['x-fixture-key'] !== token) { json(res, { message: 'Not found' }, 404); return; }
   try {
     let bytes = 0; const chunks = [];
-    for await (const chunk of req) { bytes += chunk.length; if (bytes > 131072) throw new Error('Fixture request too large'); chunks.push(chunk); }
+    for await (const chunk of req) { bytes += chunk.length; if (bytes > 524288) throw new Error('Fixture request too large'); chunks.push(chunk); }
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     if (req.url === '/fixture') {
       if (body.command === 'state') { json(res, service.call('status')); return; }
       if (body.command === 'paths') { json(res, paths); return; }
-      if (body.command === 'stats') { json(res, { lastHistoryRequest, cancelRequests }); return; }
+      if (body.command === 'stats') { json(res, { lastHistoryRequest, cancelRequests, tasks: scheduler.list(accountId).tasks, assetUploadRequests, assetAnalysisRequests }); return; }
+      if (body.command === 'assetZip') { json(res, { name: '界面测试表情.zip', data: assetZip.toString('base64'), bytes: assetZip.length }); return; }
+      if (body.command === 'assets') { json(res, channel.library.list(state.account.id)); return; }
+      if (body.command === 'globalMemory') { json(res, channel.longMemory.view(state.account.id)); return; }
       if (body.command === 'appendRecords') {
         const count = body.payload?.count;
         if (!Number.isSafeInteger(count) || count < 1 || count > 10) throw new Error('Invalid fixture count');
@@ -111,6 +142,7 @@ const server = http.createServer(async (req, res) => {
     if (failures.delete(body.endpoint)) { json(res, { ok: false, error: { code: 'FIXTURE_FAILURE', message: '界面测试：模拟保存失败，原设置保留' } }); return; }
     if (body.endpoint === 'records.list') lastHistoryRequest = body.payload;
     if (body.endpoint === 'cancel') cancelRequests.push(body.payload);
+    if (body.endpoint.startsWith('assets.upload.')) assetUploadRequests.push({ endpoint: body.endpoint, accountId: body.payload.accountId, uploadId: body.payload.uploadId, offset: body.payload.offset, bytes: body.payload.data ? Buffer.from(body.payload.data, 'base64').length : undefined });
     // A typo in a browser test must not create files outside its disposable fixture.
     for (const value of Object.values(body.payload?.storage || {})) {
       const relative = path.relative(fixture, path.resolve(String(value)));
@@ -127,5 +159,5 @@ try {
   const child = spawn(electron, [path.join(root, 'scripts/test-ui-driver.cjs'), 'ui-fixture', out], { cwd: root, windowsHide: true, stdio: 'inherit', env });
   const exit = await new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', code => resolve(code)); });
   if (exit !== 0) throw new Error(`UI verification failed (${exit}); see storage/logs/ui-preview/report.json`);
-  fs.writeFileSync(path.join(out, 'fixture-summary.json'), JSON.stringify({ ok: true, root: fixture, version: '0.2.0-preview.1', actualWeChatMessages: 0, actualModelRequests: 0 }, null, 2));
-} finally { await channel.close(); await new Promise(resolve => server.close(resolve)); }
+  fs.writeFileSync(path.join(out, 'fixture-summary.json'), JSON.stringify({ ok: true, root: fixture, version: VERSION, actualWeChatMessages: 0, actualModelRequests: 0 }, null, 2));
+} finally { await scheduler.close(); await channel.close(); await new Promise(resolve => server.close(resolve)); }

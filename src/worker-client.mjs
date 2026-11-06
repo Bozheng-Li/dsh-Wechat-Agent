@@ -61,6 +61,7 @@ export class WorkerClient extends EventEmitter {
     });
   }
   send(params, signal) { return this.call('send', params, { signal }); }
+  media(params, signal) { return this.call('media', params, { signal, timeoutMs: 30000 }); }
   async close() {
     if (this.closing) return this.closing;
     this.closed = true;

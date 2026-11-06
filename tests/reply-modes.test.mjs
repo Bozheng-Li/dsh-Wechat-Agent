@@ -64,7 +64,7 @@ test('nickname mode recognizes configured names and aliases without changing def
   assert.equal(f.sent.length, 6);
 });
 
-test('participation thresholds are random per group, persistent, and do not treat mentions as immediate replies', async t => {
+test('participation thresholds are random per group and persistent; direct calls reply immediately and restart counting', async t => {
   const draws = [0, 0.999999, 0.5];
   const f = fixture(t, { random: () => draws.shift() ?? 0 });
   f.configure(roomA, 'participate'); f.configure(roomB, 'participate');
@@ -86,19 +86,20 @@ test('participation thresholds are random per group, persistent, and do not trea
   f.receive(f.message('@微信本名\u2005 被提及', { message: [
     { type: 'at', data: { qq: account.id } }, { type: 'text', data: { text: '@微信本名\u2005 被提及' } },
   ] }));
-  f.receive(f.message('/agent 不插队'));
-  f.receive(f.message('', { message: [{ type: 'image', data: { file: 'fixture-image' } }] }));
-  assert.equal(f.calls.length, 0);
-  f.receive(f.message('第五条，讨论午饭'));
+  f.receive(f.message('/agent 直接提问'));
   await f.channel.whenIdle();
-  assert.equal(f.calls.length, 1);
-  assert.equal(f.calls[0].mode, 'participate');
-  assert.equal(f.calls[0].history.filter(entry => entry.direction === 'incoming').length, 5);
-  assert(f.calls[0].history.some(entry => entry.mediaOnly));
-  assert(!JSON.stringify(f.calls[0].history).includes('B 的独立话题'));
-  assert.deepEqual(f.store.progress(account.id, 'group', roomA), { count: 0, target: 13 });
+  assert.equal(f.calls.length, 2);
+  assert.deepEqual(f.calls.map(call => call.text), ['被提及', '直接提问']);
+  f.receive(f.message('', { message: [{ type: 'image', data: { file: 'fixture-image' } }] }));
+  for (let i = 0; i < 4; i++) f.receive(f.message('普通话题 ' + i));
+  await f.channel.whenIdle();
+  assert.equal(f.calls.length, 3);
+  assert.equal(f.calls[2].mode, 'participate');
+  assert(f.calls[2].history.some(entry => entry.mediaOnly));
+  assert(!JSON.stringify(f.calls[2].history).includes('B 的独立话题'));
+  assert.deepEqual(f.store.progress(account.id, 'group', roomA), { count: 0, target: 5 });
   const reloaded = new StateStore(f.root);
-  assert.deepEqual(reloaded.progress(account.id, 'group', roomA), { count: 0, target: 13 });
+  assert.deepEqual(reloaded.progress(account.id, 'group', roomA), { count: 0, target: 5 });
   assert.deepEqual(reloaded.progress(account.id, 'group', roomB), { count: 1, target: 20 });
   assert.equal(draws.length, 0);
 });
@@ -163,7 +164,7 @@ test('a busy group coalesces batches into one queued reply and reads the latest 
   assert.deepEqual(f.store.progress(account.id, 'group', roomA), { count: 1, target: 5 });
 });
 
-test('default group context isolates members, rooms, private peers and accounts', async t => {
+test('group memory includes different speakers while rooms, private peers and accounts remain isolated', async t => {
   const f = fixture(t);
   f.receive(f.message('BOB 的普通发言', { sender: { id: 'bob', nickname: 'Bob' } }));
   f.receive(f.message('ALICE 的普通发言'));
@@ -175,10 +176,10 @@ test('default group context isolates members, rooms, private peers and accounts'
   f.state.account = { id: 'wxid_second_owner', nickname: '另一个账号' };
   f.store.configure(f.state.account.id, settings);
   f.receive(f.message('/agent ALICE 其他账号')); await f.channel.whenIdle();
-  assert.deepEqual(f.calls[0].history.map(entry => entry.text), ['ALICE 的普通发言']);
-  assert.deepEqual(f.calls[1].history.map(entry => entry.text), ['BOB 的普通发言']);
-  assert(!JSON.stringify(f.calls[2].history).includes('BOB'));
-  assert.equal(f.calls[2].sessionId, 'session-1');
+  assert.deepEqual(f.calls[0].history.map(entry => entry.text), ['BOB 的普通发言', 'ALICE 的普通发言']);
+  assert(f.calls[1].memory.includes('BOB 的普通发言') && f.calls[1].memory.includes('ALICE 的普通发言'));
+  assert(f.calls[2].memory.includes('BOB 的问题'));
+  assert.equal(f.calls[2].sessionId, undefined, 'each turn receives the current memory instead of reusing stale host history');
   for (const index of [1, 3, 4, 5]) assert.equal(f.calls[index].sessionId, undefined);
   for (const index of [3, 4, 5]) assert.deepEqual(f.calls[index].history, []);
 });

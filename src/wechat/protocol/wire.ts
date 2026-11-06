@@ -9,7 +9,7 @@ export const DEFAULT_KEY = Buffer.from('qmjzZcR^=mN2a(ed');
 export const DEFAULT_S08 = Buffer.from('f9e4a2cf206681961c1a35aa4b24cf53', 'hex');
 export const MAGIC = 0x00100001;
 export const RESPONSE = 0x3b9aca00;
-export const WIRE: Record<number, number> = { 522: 0xed, 138: 0x79, 518: 0xee };
+export const WIRE: Record<number, number> = { 522: 0xed, 138: 0x79, 518: 0xee, 110: 9 };
 export const MAX_FRAME = 16 * 1024 * 1024;
 export type Field = { tag: number; wire: number; value: Buffer | bigint };
 const fail = (message: string): never => { throw new BridgeError('ERR_PROTOCOL', message); };
@@ -139,6 +139,40 @@ export function sendResponse(body: Buffer, f4: number, f5: number) {
   // The response deliberately swaps request f4/f5 (REPORT40 section 3.2).
   if (!id || id === '0' || num(message, 4) !== BigInt(f5) || num(message, 5) !== BigInt(f4)) fail('SendMsg ACK is missing its message ID or matching client IDs');
   return { id: id!, time: Number(num(message, 6) ?? BigInt(Math.floor(Date.now() / 1000))) };
+}
+// UploadMsgImg CGI 110 / longlink command 9. Field numbers and 50,000-byte
+// chunks are independently documented in ByboyCn/wechat7016 and
+// ThePeppy/wechat-api-ipad (see THIRD_PARTY_NOTICES.md). A chunk ACK alone is
+// never reported as delivery of the whole image.
+export const IMAGE_CHUNK_BYTES = 50_000;
+export interface ImageUpload {
+  clientId: string; from: string; to: string; total: number; time: number;
+  baseRequest: Buffer; extension: 'png' | 'jpg';
+}
+export function imageUploadRequest(upload: ImageUpload, start: number, chunk: Buffer): Buffer {
+  if (!Number.isSafeInteger(start) || start < 0 || !chunk.length || chunk.length > IMAGE_CHUNK_BYTES || start + chunk.length > upload.total)
+    throw new BridgeError('ERR_INVALID_PARAMS', '无效的图片上传分片');
+  return Buffer.concat([
+    ld(1, upload.baseRequest), ld(2, ld(1, upload.clientId)),
+    ld(3, ld(1, upload.from)), ld(4, ld(1, upload.to)),
+    fv(5, upload.total), fv(6, start), fv(7, chunk.length),
+    ld(8, Buffer.concat([fv(1, chunk.length), ld(2, chunk)])),
+    fv(9, 3), ld(10, MSG_SOURCE), fv(14, upload.time), fv(18, 0),
+    fv(26, upload.time), ld(33, upload.extension),
+  ]);
+}
+export function imageUploadResponse(body: Buffer, upload: ImageUpload, start: number, length: number): { complete: boolean; id?: string; time: number } {
+  const fs = fields(body), ret = signed(num(fields(bytes(fs, 1)), 1));
+  if (ret === undefined) fail('图片上传回执缺少状态，发送结果未知，请勿自动重发');
+  if (ret !== 0) throw new BridgeError('ERR_SEND_REJECTED', `微信拒绝接收图片（ret=${ret}）`, { ret, delivery: 'rejected' });
+  if (unstring(bytes(fs, 3)) !== upload.clientId || unstring(bytes(fs, 4)) !== upload.from || unstring(bytes(fs, 5)) !== upload.to)
+    fail('图片上传回执的客户端标识或收发会话不匹配，发送结果未知');
+  const offset = num(fs, 7), receivedLength = num(fs, 8), end = start + length;
+  if (num(fs, 6) !== BigInt(upload.total) || receivedLength !== BigInt(length) || (offset !== BigInt(start) && offset !== BigInt(end)))
+    fail('图片上传回执的长度或分片位置不匹配，发送结果未知');
+  const id = num(fs, 10)?.toString(), complete = end === upload.total;
+  if (complete && (!id || id === '0')) fail('图片上传结束但缺少微信消息 ID，发送结果未知，请勿自动重发');
+  return { complete, ...(complete ? { id } : {}), time: Number(num(fs, 9) ?? BigInt(upload.time)) };
 }
 export function syncRequest(key: string) {
   return Buffer.concat([ld(1, fv(1, 0)), fv(2, 262151), ld(3, Buffer.from(key, 'hex')), fv(4, 1), ld(5, 'Windows 11 x64'), fv(6, 3), fv(7, 1)]);

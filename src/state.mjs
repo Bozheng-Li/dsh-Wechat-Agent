@@ -8,11 +8,17 @@ import { absoluteDirectory, sameDirectory, writableDirectory } from './storage-p
 
 export function identity(parts) { return createHash('sha256').update(JSON.stringify(parts)).digest('hex'); }
 export function conversationKey(accountId, chatType, peerId) { return identity([accountId, chatType, peerId]); }
+export function conversationFolder(conversation, name) {
+  const cleaned = String(name || (conversation.chatType === 'group' ? '群聊' : '私聊')).normalize('NFKC')
+    .replace(/[<>:"/\\|?*\u0000-\u001f\u007f]/g, '_').replace(/[ .]+$/g, '').trim().slice(0, 60).replace(/[ .]+$/g, '');
+  const safe = !cleaned || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(cleaned) ? '会话_' + cleaned : cleaned;
+  return safe + '--' + conversation.key.slice(0, 10);
+}
 
 const defaults = {
   persona: () => ({ name: '微信助手', aliases: [], background: '', personality: '', style: '' }),
-  model: () => ({ maxTokens: 4096, temperature: null }),
-  conversation: () => ({ mode: 'default', minMessages: 5, maxMessages: 20, recordsPath: '' }),
+  model: () => ({ maxTokens: 4096, temperature: null, vision: true, visionModel: null, webSearch: false }),
+  conversation: () => validateConversationSettings({ mode: 'default', minMessages: 5, maxMessages: 20, recordsPath: '' }),
 };
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const pendingStates = new Set(['queued', 'generating', 'sending']);
@@ -105,7 +111,7 @@ export class StateStore {
     if (this.data.persona !== undefined) this.data.persona = validatePersona(this.data.persona);
     if (this.data.modelConfig !== undefined) this.data.modelConfig = validateModelConfig(this.data.modelConfig);
     for (const settings of Object.values(this.data.accounts)) validateSettings(settings);
-    for (const config of Object.values(this.data.conversationConfigs)) validateConversationSettings(config);
+    for (const [key, config] of Object.entries(this.data.conversationConfigs)) this.data.conversationConfigs[key] = validateConversationSettings(config);
     if (migrating) {
       const backup = path.join(path.dirname(this.file), 'channel.v1.backup.json');
       try { fs.copyFileSync(this.file, backup, fs.constants.COPYFILE_EXCL); }
@@ -148,10 +154,22 @@ export class StateStore {
     }
     if (changed) this.save();
     else this.rootWritten = JSON.stringify(this._rootSnapshot());
+    this.migrateNamedDirectories();
   }
   _directory(conversation, storage = this.data.storageSettings, config = this.data.conversationConfigs[conversation.key]) {
     const base = config?.recordsPath || storage.recordsPath;
-    return path.join(base, identity([conversation.accountId]).slice(0, 24), conversation.key);
+    return path.join(base, '账号-' + identity([conversation.accountId]).slice(0, 8), conversationFolder(conversation, this.data.conversations[conversation.key]?.name || conversation.name));
+  }
+  migrateNamedDirectories() {
+    const moving = [...this.views.values()].filter(view => !sameDirectory(this.data.conversations[view.key].directory, this._directory(view)));
+    if (!moving.length) return;
+    this._withSourceLocks(moving, () => {
+      const before = moving.map(view => [view.key, this.data.conversations[view.key].directory]);
+      for (const view of moving) this._writeAt(view, this._directory(view));
+      for (const view of moving) this.data.conversations[view.key].directory = this._directory(view);
+      try { this._saveRoot(); }
+      catch (error) { for (const [key, directory] of before) this.data.conversations[key].directory = directory; throw error; }
+    });
   }
   _allocate(conversation) {
     let view = this.views.get(conversation.key);
@@ -314,7 +332,7 @@ export class StateStore {
   }
   conversationSettings(accountId, chatType, peerId) {
     const conversation = info(accountId, chatType, peerId);
-    return clone(this.data.conversationConfigs[conversation.key] ?? defaults.conversation());
+    return validateConversationSettings(this.data.conversationConfigs[conversation.key] ?? defaults.conversation());
   }
   setConversationSettings(accountId, chatType, peerId, input) {
     const conversation = info(accountId, chatType, peerId);
@@ -377,7 +395,9 @@ export class StateStore {
       .map(segment => '[' + (mediaNames[segment.type] || '非文本') + '消息]'))].join(' ');
     return { key, messageId: message.serverMessageId || message.id || key, direction: message.direction || 'incoming',
       senderId: message.sender?.id || accountId, senderName: message.sender?.nickname || message.sender?.id || accountId,
-      text: text.slice(0, 12000) || placeholders, time, observedAt: at, kind: 'message', mediaOnly };
+      text: text.slice(0, 12000) || placeholders, time, observedAt: at, kind: 'message', mediaOnly,
+      attachments: segments.filter(segment => ['image', 'face'].includes(segment.type) && typeof segment.data?.resourceId === 'string')
+        .map(segment => ({ resourceId: segment.data.resourceId, type: segment.type })) };
   }
   remember(key, at, record, observation = {}) {
     if (Object.hasOwn(this.data.seen, key)) return false;
@@ -416,6 +436,7 @@ export class StateStore {
       }
     }
     this.save();
+    if (view && observation.message) this.memory?.append(target, view.messages.find(entry => entry.key === key));
     return true;
   }
   add(record) {
@@ -431,16 +452,22 @@ export class StateStore {
   update(record, fields) {
     Object.assign(record, fields, { updatedAt: Date.now() });
     const target = recordInfo(record), view = target ? this.views.get(target.key) : undefined;
-    if (view && record.state === 'sent' && typeof record.reply === 'string' && record.reply &&
+    if (view && record.state === 'sent' && typeof record.reply === 'string' && (record.reply || record.replyMedia) &&
         record.acknowledgedMessageIds?.length && !view.messages.some(message => message.sourceKey === record.key)) {
       view.messages.push({ key: 'reply:' + record.key, sourceKey: record.key,
         messageId: record.acknowledgedMessageIds[0], direction: 'outgoing',
         senderId: record.accountId, senderName: record.agentName || this.persona().name,
-        text: record.reply, time: record.updatedAt, observedAt: record.updatedAt, kind: 'reply', replyTo: record.senderId,
+        text: record.reply || `[${record.replyMedia.kind === 'sticker' ? '表情包' : '图片'}：${record.replyMedia.name}]`,
+        ...(record.replyMedia ? { attachments: [{ assetId: record.replyMedia.id, type: record.replyMedia.kind === 'sticker' ? 'face' : 'image', description: record.replyMedia.description || record.replyMedia.name }] } : {}),
+        time: record.updatedAt, observedAt: record.updatedAt, kind: 'reply', replyTo: record.senderId,
         mode: record.mode || 'default' });
       if (view.messages.length > historyLimit) view.messages = view.messages.slice(-historyLimit);
     }
     this.save();
+    if (view && record.state === 'sent') {
+      const entry = view.messages.find(message => message.sourceKey === record.key);
+      if (entry) this.memory?.append(target, entry);
+    }
   }
   session(contextKey) { return this.data.sessions[contextKey]?.id; }
   saveSession(contextKey, id) {
@@ -525,6 +552,7 @@ export class StateStore {
       for (const key of allocated) { this.views.delete(key); this.written.delete(key); }
       throw error;
     }
+    if (changed) this.migrateNamedDirectories();
   }
   conversations(accountId) {
     const settings = this.settings(accountId), entries = new Map();

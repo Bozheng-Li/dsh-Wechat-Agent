@@ -35,3 +35,21 @@ export async function selectModel(ctx, store, input, signal) {
   store.setModelChoice(selection);
   return selection;
 }
+
+/** Image understanding may use a separate, explicitly image-capable route. */
+export async function visionSelection(ctx, selected, configured, signal) {
+  signal?.throwIfAborted();
+  const choice = configured ? await availableModel(ctx, configured, signal) : selected;
+  if (typeof ctx.llm.resolveModelInfo !== 'function') return choice;
+  const info = await ctx.llm.resolveModelInfo(choice.provider, choice.model, signal);
+  if (!info.inputModalities || info.inputModalities.includes('image')) return choice;
+  if (configured) throw new ChannelError('MODEL_NO_VISION', '所选图像理解模型不接受图片，请在高级设置中选择支持图像的模型');
+  const models = await ctx.llm.listModels(choice.provider, signal);
+  const candidates = models.filter(model => model.inputModalities?.includes('image'));
+  // A dated custom route can be missing capability metadata while the same
+  // family's stable route is explicitly advertised as accepting images.
+  const family = choice.model.replace(/-\d{4,8}$/, '');
+  const candidate = candidates.find(model => model.id === family) || candidates[0];
+  if (!candidate) throw new ChannelError('MODEL_NO_VISION', '当前 DSH 服务没有可用的视觉模型，请在高级设置中指定图像理解模型');
+  return { provider: choice.provider, model: candidate.id };
+}

@@ -1,5 +1,5 @@
 export const CHANNEL = '/wechat-agent';
-export const VERSION = '0.2.0-preview.1';
+export const VERSION = '0.2.0-preview.2';
 export const MAX_TEXT = 12000;
 
 export class ChannelError extends Error {
@@ -9,6 +9,10 @@ export class ChannelError extends Error {
 export function emptySettings() { return { enabled: false, privatePeers: [], groups: [], prompt: '' }; }
 
 export function emptyPersona() { return { name: '微信助手', aliases: [], background: '', personality: '', style: '' }; }
+export function personaText(persona = {}) {
+  if (typeof persona.prompt === 'string') return persona.prompt;
+  return [persona.background && `角色背景：\n${persona.background}`, persona.personality && `性格与互动：\n${persona.personality}`, persona.style && `表达方式：\n${persona.style}`].filter(Boolean).join('\n\n');
+}
 export function validatePersona(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new ChannelError('INVALID_PERSONA', '人设格式不正确');
   const field = (key, max, required = false) => {
@@ -20,7 +24,9 @@ export function validatePersona(input) {
   const name = field('name', 80, true);
   if (!Array.isArray(input.aliases) || input.aliases.length > 12 || input.aliases.some(alias => typeof alias !== 'string' || !alias.trim() || alias.length > 80 || /[\u0000-\u001f\u007f]/.test(alias)))
     throw new ChannelError('INVALID_PERSONA', '昵称别名最多 12 个，每个 1–80 字，不能包含换行');
-  return { name, aliases: [...new Set(input.aliases.map(alias => alias.trim()))], background: field('background', 2000), personality: field('personality', 6000), style: field('style', 2000) };
+  const aliases = [...new Set(input.aliases.map(alias => alias.trim()))];
+  if (Object.hasOwn(input, 'prompt')) return { name, aliases, prompt: field('prompt', 16000) };
+  return { name, aliases, background: field('background', 2000), personality: field('personality', 6000), style: field('style', 2000) };
 }
 
 export function validateModelConfig(input) {
@@ -28,17 +34,26 @@ export function validateModelConfig(input) {
     throw new ChannelError('INVALID_MODEL_CONFIG', '回复输出上限应为 256–8192 的整数');
   if (input.temperature !== null && (typeof input.temperature !== 'number' || !Number.isFinite(input.temperature) || input.temperature < 0 || input.temperature > 2))
     throw new ChannelError('INVALID_MODEL_CONFIG', '温度应在 0–2 之间，留空表示跟随模型默认');
-  return { maxTokens: input.maxTokens, temperature: input.temperature };
+  for (const key of ['vision', 'webSearch']) if (input[key] !== undefined && typeof input[key] !== 'boolean')
+    throw new ChannelError('INVALID_MODEL_CONFIG', '图像理解和联网搜索需要选择开启或关闭');
+  return { maxTokens: input.maxTokens, temperature: input.temperature, vision: input.vision ?? true, visionModel: validateModelChoice(input.visionModel ?? null), webSearch: input.webSearch ?? false };
 }
 
 export function validateConversationSettings(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input) || !['default', 'nickname', 'participate'].includes(input.mode))
     throw new ChannelError('INVALID_CONVERSATION', '请选择默认回复、昵称唤醒或主动参与模式');
-  if (!Number.isInteger(input.minMessages) || !Number.isInteger(input.maxMessages) || input.minMessages < 5 || input.maxMessages > 20 || input.minMessages > input.maxMessages)
-    throw new ChannelError('INVALID_CONVERSATION', '主动参与的消息间隔须满足 5 ≤ 最少条数 ≤ 最多条数 ≤ 20');
+  const intervalMode = input.intervalMode ?? 'random', fixedMessages = input.fixedMessages ?? input.minMessages;
+  if (!['random', 'fixed'].includes(intervalMode) || !Number.isInteger(fixedMessages) || fixedMessages < 1 || fixedMessages > 100 ||
+      !Number.isInteger(input.minMessages) || !Number.isInteger(input.maxMessages) || input.minMessages < 1 || input.maxMessages > 100 || input.minMessages > input.maxMessages)
+    throw new ChannelError('INVALID_CONVERSATION', '参与条数应为 1–100 的整数；随机区间的最少条数不能超过最多条数');
   if (typeof input.recordsPath !== 'string' || input.recordsPath.length > 2048 || /[\u0000-\u001f\u007f]/.test(input.recordsPath))
     throw new ChannelError('INVALID_PATH', '请输入有效的会话记录目录，留空则使用默认目录');
-  return { mode: input.mode, minMessages: input.minMessages, maxMessages: input.maxMessages, recordsPath: input.recordsPath.trim() };
+  const memoryWindowChars = input.memoryWindowChars ?? null;
+  if (memoryWindowChars !== null && (!Number.isInteger(memoryWindowChars) || memoryWindowChars < 1000 || memoryWindowChars > 200000))
+    throw new ChannelError('INVALID_MEMORY_SETTINGS', '会话记忆窗口应为 1000–200000 字，留空使用记忆库默认值');
+  if (input.allowChatTasks !== undefined && typeof input.allowChatTasks !== 'boolean')
+    throw new ChannelError('INVALID_CONVERSATION', '请选择是否允许会话创建定时任务');
+  return { mode: input.mode, intervalMode, fixedMessages, minMessages: input.minMessages, maxMessages: input.maxMessages, recordsPath: input.recordsPath.trim(), memoryWindowChars, allowChatTasks: input.allowChatTasks ?? true };
 }
 
 export function validateModelChoice(value) {
@@ -92,8 +107,8 @@ export function nicknameMentioned(text, names) {
 }
 
 export function messageText(message, account, { mode = 'default', persona = emptyPersona() } = {}) {
-  if (!Array.isArray(message.message) || message.message.some(s => !['text', 'at', 'reply'].includes(s.type)))
-    return { reason: '预览版只处理文本，图片、语音和文件消息未交给模型' };
+  if (!Array.isArray(message.message)) return { reason: '消息没有可处理的内容' };
+  const visual = message.message.some(s => ['image', 'face'].includes(s.type));
   let text = message.message.filter(s => s.type === 'text').map(s => s.data?.text ?? '').join('').trim();
   const mentioned = message.message.some(s => s.type === 'at' && s.data?.qq === account.id);
   if (mentioned) {
@@ -102,11 +117,12 @@ export function messageText(message, account, { mode = 'default', persona = empt
     text = text.replace(/^@[^\r\n\u2005]{1,150}\u2005\s*/u, '').trim();
   }
   const command = /^\/agent(?:\s|$)/i.test(text);
-  const nickname = mode === 'nickname' && nicknameMentioned(text, [persona.name, ...(persona.aliases || []), account.nickname]);
+  const nickname = mode !== 'default' && nicknameMentioned(text, [persona.name, ...(persona.aliases || []), account.nickname]);
   if (message.chatType === 'group' && mode !== 'participate' && !mentioned && !command && !nickname)
     return { reason: mode === 'nickname' ? '群消息没有呼叫 Agent 名字，也未 @ 当前账号或使用 /agent' : '群消息未 @ 当前账号，也未使用 /agent' };
   if (command) text = text.replace(/^\/agent\s*/i, '').trim();
-  if (!text) return { reason: '消息没有可回答的正文' };
+  if (!text && visual) text = '请理解这条消息中的图片或表情包，结合当前对话自然回应。';
+  if (!text) return { reason: '消息没有可回答的正文，当前支持文字、图片和表情包' };
   if (text.length > MAX_TEXT) return { reason: `消息超过 ${MAX_TEXT} 字，未交给模型` };
-  return { text };
+  return { text, trigger: mentioned ? 'mention' : command ? 'command' : nickname ? 'nickname' : message.chatType === 'private' ? 'private' : null };
 }

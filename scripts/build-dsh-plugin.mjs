@@ -101,7 +101,7 @@ if (process.argv.includes('--pack')) {
     if (licenseDirectory !== directory) licenses.push('NOTICE.md');
     for (const file of licenses) copy(path.join(licenseDirectory, file), path.join(stage, 'licenses', dependency.name.replaceAll('/', '__'), file));
   }
-  for (const file of ['native_login_worker.py', 'native_login_agent.js', 'native_engine.py']) copy(path.join(root, 'runtime', file), path.join(stage, 'runtime', file));
+  for (const file of ['native_login_worker.py', 'native_login_agent.js', 'native_engine.py', 'prepare_reply_image.py']) copy(path.join(root, 'runtime', file), path.join(stage, 'runtime', file));
   copy(path.join(root, 'runtime/wechat39/proto'), path.join(stage, 'runtime/wechat39/proto'));
   const engine = JSON.parse(fs.readFileSync(path.join(engineSource, 'manifest.json'), 'utf8'));
   for (const file of engine.files) {

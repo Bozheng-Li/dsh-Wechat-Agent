@@ -8,10 +8,11 @@ import { acquireLock, StateStore } from './state.mjs';
 import { WorkerClient } from './worker-client.mjs';
 import { DshAgentRunner } from './agent.mjs';
 import { WechatChannel } from './channel.mjs';
-import { selectModel } from './models.mjs';
+import { selectModel, availableModel } from './models.mjs';
 import { absoluteDirectory, sameDirectory } from './storage-paths.mjs';
+import { TaskScheduler } from './scheduler.mjs';
 
-export const inject = ['connection', 'webServer', 'agents', 'agentDefaultModel', 'llm', 'tools', 'systemPrompt', 'sessionPersistence'];
+export const inject = ['connection', 'webServer', 'agents', 'agentDefaultModel', 'llm', 'tools', 'systemPrompt', 'sessionPersistence', 'attachments', 'web'];
 
 export function rpcHandler(service, isDisposed = () => false) {
   return async (endpoint, payload, signal, peer) => {
@@ -19,14 +20,19 @@ export function rpcHandler(service, isDisposed = () => false) {
       if (peer?.principal?.kind !== 'owner') throw new ChannelError('OWNER_REQUIRED', '只有 DSH 本机所有者可以管理微信插件');
       if (isDisposed()) throw new ChannelError('PLUGIN_STOPPING', '微信插件正在停止，请稍后重试');
       signal?.throwIfAborted();
-      if (!['status', 'changelog', 'settings', 'model.select', 'model.configure', 'persona.save', 'storage.save', 'conversation.configure', 'records.list', 'contacts', 'connect', 'disconnect', 'login.start', 'login.cancel', 'cancel'].includes(endpoint))
+      if (!['status', 'changelog', 'settings', 'model.select', 'model.configure', 'persona.save', 'storage.save', 'conversation.configure', 'records.list', 'contacts', 'connect', 'disconnect', 'login.start', 'login.cancel', 'cancel',
+        'memory.list', 'memory.get', 'memory.configure', 'memory.edit', 'memory.clear', 'memory.compress', 'memory.retryImages',
+        'memory.global.get', 'memory.global.edit', 'memory.global.clear', 'memory.global.extract',
+        'assets.list', 'assets.content', 'assets.import', 'assets.edit', 'assets.delete', 'assets.configure', 'assets.describe',
+        'assets.upload.start', 'assets.upload.chunk', 'assets.upload.finish', 'assets.upload.abort',
+        'tasks.list', 'tasks.create', 'tasks.cancel', 'tasks.pause', 'tasks.resume'].includes(endpoint))
         throw new ChannelError('UNKNOWN_OPERATION', '不支持的微信插件操作');
       return { ok: true, value: await service.call(endpoint, payload ?? {}, signal) };
     } catch (error) { return { ok: false, error: publicError(error) }; }
   };
 }
 
-export function createPluginService({ ctx, root, store, worker, runner, channel, startupError, isDisposed = () => false, lifetime = new AbortController().signal, dshSessionPath = null }) {
+export function createPluginService({ ctx, root, store, worker, runner, channel, scheduler = channel?.scheduler, startupError, isDisposed = () => false, lifetime = new AbortController().signal, dshSessionPath = null }) {
   let mutations = Promise.resolve();
   let discovered;
   const assertLive = signal => {
@@ -51,17 +57,20 @@ export function createPluginService({ ctx, root, store, worker, runner, channel,
     try { const selected = runner.defaultSelection(); defaultModel = { provider: selected.provider, model: selected.model }; } catch {}
     return { version: VERSION, ...state, model, defaultModel, modelChoice: store?.modelChoice() ?? null, startupError,
       persona: store?.persona() ?? emptyPersona(), modelConfig: store?.modelConfig() ?? { maxTokens: 4096, temperature: null },
+      capabilities: { vision: !!ctx?.attachments?.admitPromptContent, webSearch: !!ctx?.web?.search },
+      memory: { windowChars: channel?.memory?.index.windowChars ?? 32000, path: channel?.memory?.root || null },
+      scheduler: { enabled: !!scheduler && !scheduler.stopped, error: scheduler?.error || null },
       storage: { ...(store?.storageSettings() ?? {}), loginPath: path.join(root, 'storage/private'), dshSessionPath, observedMessageLimit: 1000 },
       settings: state.account && store ? store.settings(state.account.id) : emptySettings(),
       conversations: state.account && store ? store.conversations(state.account.id).map(peer => ({ ...peer,
         processing: channel?.summary(peer) ?? { queued: 0, active: null, fault: null } })) : [], records: [],
       processing: channel?.summary() ?? { queued: 0, active: null, fault: null } };
   };
-  const paused = async (reason, action, selector) => {
+  const paused = async (reason, action, selector, { resetProgress = true } = {}) => {
     const selectors = Array.isArray(selector) ? selector : [selector];
     const resumes = selectors.map(target => channel.pause(reason, target));
     try {
-      for (const target of selectors) channel.cancel(reason, target);
+      for (const target of selectors) channel.cancel(reason, target, { resetProgress });
       for (const target of selectors) await channel.whenIdle(target);
       assertLive(); return await action();
     } finally { for (const resume of resumes.reverse()) resume(); }
@@ -72,7 +81,100 @@ export function createPluginService({ ctx, root, store, worker, runner, channel,
     switch (endpoint) {
       case 'model.select':
         await selectModel(ctx, store, payload.selection, AbortSignal.any([lifetime, ...(signal ? [signal] : [])])); break;
-      case 'model.configure': store.setModelConfig(validateModelConfig(payload.modelConfig)); break;
+      case 'model.configure': {
+        const config = validateModelConfig(payload.modelConfig);
+        if (config.vision && config.visionModel) await availableModel(ctx, config.visionModel, AbortSignal.any([lifetime, ...(signal ? [signal] : [])]));
+        assertLive(signal); store.setModelConfig(config); break;
+      }
+      case 'memory.configure': channel.memory.setWindowChars(payload.windowChars); break;
+      case 'memory.global.edit': {
+        const account = currentAccount(payload); channel.longMemory.edit(account.id, payload.markdown, payload.revision); break;
+      }
+      case 'memory.global.clear': {
+        const account = currentAccount(payload);
+        await paused('正在清空长期记忆', () => { currentAccount(payload); channel.longMemory.clear(account.id); }, { accountId: account.id }); break;
+      }
+      case 'memory.global.extract': {
+        const account = currentAccount(payload), combined = AbortSignal.any([lifetime, ...(signal ? [signal] : [])]);
+        const selectors = payload.peerId ? [conversation(payload)] : store.conversations(account.id).filter(peer => peer.authorized);
+        for (const selector of selectors) {
+          currentAccount(payload); combined.throwIfAborted();
+          await channel.memory.enrich(selector, runner, worker, combined);
+          channel.longMemory.capture(selector, channel.memory.load(selector));
+          await channel.longMemory.extract(selector, runner, combined);
+        }
+        break;
+      }
+      case 'assets.import': {
+        const account = currentAccount(payload); return channel.library.import(account.id, payload);
+      }
+      case 'assets.configure': {
+        const account = currentAccount(payload);
+        if (payload.settings?.enabled === false) return paused('正在停用图片回复', () => { currentAccount(payload); return channel.library.configure(account.id, payload.settings); }, { accountId: account.id, mediaOnly: true }, { resetProgress: false });
+        return channel.library.configure(account.id, payload.settings);
+      }
+      case 'assets.edit': {
+        const account = currentAccount(payload);
+        if (payload.patch?.enabled === false) {
+          channel.library.resolveAsset(account.id, payload.assetId, { enabledOnly: false });
+          return paused('正在停用这张素材', () => { currentAccount(payload); return channel.library.edit(account.id, payload.assetId, payload.patch); }, { accountId: account.id, assetIds: [payload.assetId] }, { resetProgress: false });
+        }
+        return channel.library.edit(account.id, payload.assetId, payload.patch);
+      }
+      case 'assets.delete': {
+        const account = currentAccount(payload);
+        if (!Array.isArray(payload.assetIds) || !payload.assetIds.length) throw new ChannelError('INVALID_ASSETS', '请选择要删除的素材');
+        for (const id of payload.assetIds) channel.library.resolveAsset(account.id, id, { enabledOnly: false });
+        return paused('正在删除这张素材', () => { currentAccount(payload); return channel.library.remove(account.id, payload.assetIds); }, { accountId: account.id, assetIds: payload.assetIds }, { resetProgress: false });
+      }
+      case 'assets.describe': {
+        const account = currentAccount(payload);
+        if (!store.modelConfig().vision) throw new ChannelError('VISION_DISABLED', '请先在模型高级设置中开启图像理解');
+        return channel.library.describe(account.id, payload.assetIds, runner, AbortSignal.any([lifetime, ...(signal ? [signal] : [])]));
+      }
+      case 'assets.upload.start': { const account = currentAccount(payload); return channel.library.beginUpload(account.id, payload); }
+      case 'assets.upload.chunk': { const account = currentAccount(payload); return channel.library.appendUpload(account.id, payload.uploadId, payload); }
+      case 'assets.upload.finish': { const account = currentAccount(payload); return channel.library.finishUpload(account.id, payload.uploadId); }
+      case 'assets.upload.abort': { const account = currentAccount(payload); return channel.library.abortUpload(account.id, payload.uploadId); }
+      case 'memory.edit': {
+        const selector = conversation(payload);
+        channel.memory.edit(selector, payload.summary, payload.revision); break;
+      }
+      case 'memory.clear':
+      case 'memory.retryImages':
+      case 'memory.compress': {
+        const selector = conversation(payload);
+        await paused(endpoint === 'memory.clear' ? '正在清空此会话记忆' : '正在压缩此会话记忆', async () => {
+          currentAccount(payload);
+          if (endpoint === 'memory.clear') { channel.memory.clear(selector); store.resetSessions(selector); }
+          else {
+            const combined = AbortSignal.any([lifetime, ...(signal ? [signal] : [])]);
+            await channel.memory.enrich(selector, runner, worker, combined, { retryFailed: endpoint === 'memory.retryImages' });
+            if (endpoint === 'memory.compress') {
+              channel.longMemory.capture(selector, channel.memory.load(selector));
+              await channel.memory.compact(selector, runner, combined);
+            }
+          }
+        }, selector);
+        break;
+      }
+      case 'tasks.create': {
+        const selector = conversation(payload);
+        if (!scheduler) throw new ChannelError('TASKS_UNAVAILABLE', '定时任务组件尚未启动');
+        if (payload.requestId !== undefined && (typeof payload.requestId !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(payload.requestId))) throw new ChannelError('INVALID_TASK', '任务请求标识无效，请重新打开任务表单');
+        scheduler.create(payload.task, { ...selector, source: 'owner', senderId: selector.accountId, senderName: '管理员', requestKey: payload.requestId ? 'owner:' + selector.accountId + ':' + payload.requestId : undefined }); break;
+      }
+      case 'tasks.cancel':
+      case 'tasks.pause':
+      case 'tasks.resume': {
+        const account = currentAccount(payload);
+        if (!scheduler) throw new ChannelError('TASKS_UNAVAILABLE', '定时任务组件尚未启动');
+        const scope = { accountId: account.id };
+        if (endpoint === 'tasks.cancel') scheduler.cancel(payload.taskId, scope, true);
+        else if (endpoint === 'tasks.pause') scheduler.pause(payload.taskId, scope);
+        else scheduler.resume(payload.taskId, scope);
+        break;
+      }
       case 'persona.save': {
         const persona = validatePersona(payload.persona);
         if (JSON.stringify(persona) !== JSON.stringify(store.persona())) await paused('正在应用人设，旧任务已取消', () => {
@@ -146,6 +248,18 @@ export function createPluginService({ ctx, root, store, worker, runner, channel,
     if (endpoint === 'status') return status();
     if (endpoint === 'changelog') return { markdown: fs.readFileSync(new URL('../CHANGELOG.md', import.meta.url), 'utf8') };
     if (startupError) throw new ChannelError(startupError.code, startupError.message);
+    if (endpoint === 'memory.list') {
+      const account = currentAccount(payload);
+      return { conversations: channel.memory.list(account.id), windowChars: channel.memory.index.windowChars, path: channel.memory.root };
+    }
+    if (endpoint === 'memory.get') return channel.memory.view(conversation(payload));
+    if (endpoint === 'memory.global.get') return channel.longMemory.view(currentAccount(payload).id);
+    if (endpoint === 'assets.list') return channel.library.list(currentAccount(payload).id, payload);
+    if (endpoint === 'assets.content') return channel.library.getContent(currentAccount(payload).id, payload.assetId, { enabledOnly: false });
+    if (endpoint === 'tasks.list') {
+      const account = currentAccount(payload), selector = payload.peerId ? conversation(payload) : undefined;
+      return scheduler?.list(account.id, selector) ?? { tasks: [], runs: [], error: '定时任务组件尚未启动' };
+    }
     if (endpoint === 'records.list') {
       conversation(payload);
       return store.recordsPage(payload.accountId, payload);
@@ -170,13 +284,13 @@ export async function apply(ctx) {
   const dshHome = configuredHome?.startsWith('~/') || configuredHome?.startsWith('~\\') ? path.join(homedir(), configuredHome.slice(2)) : configuredHome || path.join(homedir(), '.dsh');
   const root = path.resolve(dshHome, 'wechat-agent');
   const resources = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-  let lock, store, worker, runner, channel, service, startupError, disposed = false, closing;
+  let lock, store, worker, runner, channel, scheduler, service, startupError, disposed = false, closing;
   const lifetime = new AbortController();
   const close = () => closing ??= (async () => {
     disposed = true;
     lifetime.abort();
-    try { await channel?.close(); }
-    finally { try { await service?.drain(); await worker?.close(); } finally { lock?.release(); } }
+    try { const stoppingScheduler = scheduler?.close(); await channel?.close(); await stoppingScheduler; }
+    finally { try { try { await service?.drain(); channel?.library?.close(); } finally { await worker?.close(); } } finally { lock?.release(); } }
   })();
   // Cordis runs sibling disposers concurrently. This one owns the complete
   // drain -> child exit -> exclusive-lock release sequence.
@@ -190,6 +304,7 @@ export async function apply(ctx) {
     worker = new WorkerClient(root, resources);
     lock.worker(worker.child.pid);
     channel = new WechatChannel({ store, runner, transport: worker });
+    scheduler = new TaskScheduler({ store, channel }); channel.scheduler = scheduler;
     worker.on('message', (message, accountId) => channel.receive(message, accountId));
     let wasOnline = false;
     worker.on('status', () => {
@@ -204,6 +319,7 @@ export async function apply(ctx) {
     await worker.ready;
     if (disposed) return;
     if (store.data.connectionWanted) await worker.call('connect');
+    if (!disposed) scheduler.start();
   } catch (error) {
     startupError = publicError(error, '微信插件启动失败，请检查安装包或重新启用插件');
     try { await worker?.close(); } finally { lock?.release(); lock = undefined; }
@@ -213,7 +329,7 @@ export async function apply(ctx) {
     const persistence = ctx.sessionPersistence;
     if (persistence?.name === 'session-persistence-jsonl' && typeof persistence.root === 'string' && path.isAbsolute(persistence.root)) dshSessionPath = persistence.root;
   } catch {}
-  service = createPluginService({ ctx, root, store, worker, runner, channel, startupError, isDisposed: () => disposed, lifetime: lifetime.signal, dshSessionPath });
+  service = createPluginService({ ctx, root, store, worker, runner, channel, scheduler, startupError, isDisposed: () => disposed, lifetime: lifetime.signal, dshSessionPath });
   // rc.5's rpc getter retains the Connection service's dependency shadow;
   // register with our explicit owner so webServer and teardown belong here.
   if (!disposed) ctx.connection.register(ctx, CHANNEL, rpcHandler(service, () => disposed));

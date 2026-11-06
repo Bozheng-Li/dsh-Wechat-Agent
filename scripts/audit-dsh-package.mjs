@@ -10,6 +10,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
 const file = path.join(root, `release/dsh-plugin-wechat-agent-${version}.tgz`);
 const files = [];
+let packageManifest;
 await tar.t({ file, onentry(entry) {
   const name = entry.path;
   assert(name.startsWith('package/') && !name.includes('..') && !name.includes('\\'), `unsafe archive path: ${name}`);
@@ -17,11 +18,23 @@ await tar.t({ file, onentry(entry) {
   assert(!/(^|\/)(?:storage|config|node_modules|__pycache__|\.git|\.venv)(\/|$)|\.(?:pyc|log|pem|key)$|SKILL\.md|testing\.js/.test(name), `unexpected private/development file: ${name}`);
   assert(/^package\/(?:runtime\/|licenses\/|lib\/(?:index\.js|client\.js|worker\.cjs)$|package\.json$|cordis\.patch\.yml$|README\.md$|LICENSE$|THIRD_PARTY_NOTICES\.md$|CHANGELOG\.md$)/.test(name), `undeclared release input: ${name}`);
   files.push(name);
+  if (name === 'package/package.json') {
+    const chunks = [];
+    entry.on('data', chunk => chunks.push(chunk));
+    entry.on('end', () => { packageManifest = JSON.parse(Buffer.concat(chunks).toString('utf8')); });
+  }
 } });
-for (const item of ['lib/index.js', 'lib/client.js', 'lib/worker.cjs', 'cordis.patch.yml', 'CHANGELOG.md', 'licenses/fast-xml-parser/LICENSE', 'licenses/zod/LICENSE', 'runtime/native_login_worker.py', 'runtime/python/python.exe', 'runtime/wechat39-engine/WeChatWin.dll']) assert(files.includes(`package/${item}`), `missing: ${item}`);
+assert.equal(packageManifest?.name, 'dsh-plugin-wechat-agent');
+assert.equal(packageManifest.version, version);
+assert(!packageManifest.private && !packageManifest.scripts && !packageManifest.devDependencies, 'publish only the prepared standalone package');
+assert.equal(packageManifest.publishConfig?.access, 'public');
+assert.equal(packageManifest.publishConfig?.registry, 'https://registry.npmjs.org/');
+assert(packageManifest.keywords?.includes('dsh-plugin'));
+assert.equal(packageManifest.dsh?.bundle?.patch, './cordis.patch.yml');
+for (const item of ['lib/index.js', 'lib/client.js', 'lib/worker.cjs', 'cordis.patch.yml', 'CHANGELOG.md', 'licenses/fast-xml-parser/LICENSE', 'licenses/zod/LICENSE', 'runtime/native_login_worker.py', 'runtime/prepare_reply_image.py', 'runtime/python/python.exe', 'runtime/wechat39-engine/WeChatWin.dll']) assert(files.includes(`package/${item}`), `missing: ${item}`);
 const digest = createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 assert.equal(fs.readFileSync(file + '.sha256', 'utf8').split(' ')[0], digest);
-const report = { ok: true, version, file, files: files.length, bytes: fs.statSync(file).size, sha256: digest, assertions: ['explicit release inputs only', 'no user data or credentials', 'no bytecode or test entry', 'standalone authentication runtime', 'SHA-256 sidecar matches'], at: new Date().toISOString() };
+const report = { ok: true, version, file, files: files.length, bytes: fs.statSync(file).size, sha256: digest, assertions: ['explicit release inputs only', 'no user data or credentials', 'no bytecode or test entry', 'standalone authentication runtime', 'public npm manifest with DSH bundle metadata', 'SHA-256 sidecar matches'], at: new Date().toISOString() };
 fs.mkdirSync(path.join(root, 'storage/logs'), { recursive: true });
 fs.writeFileSync(path.join(root, 'storage/logs/dsh-plugin-package-audit.json'), JSON.stringify(report, null, 2));
 console.log(JSON.stringify(report, null, 2));

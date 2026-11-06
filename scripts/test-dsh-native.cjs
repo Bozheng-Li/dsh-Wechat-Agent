@@ -25,7 +25,7 @@ const hostRequire = createRequire(path.join(installation, 'resources/app.asar/ds
 const { Context } = hostRequire('@deepseek-ai/cordis');
 const { LlmAdapter } = hostRequire('@deepseek-ai/dsh-llm');
 const { buildModelCatalog } = hostRequire('@deepseek-ai/dsh-api-session-controller');
-const { DshAgentRunner, WechatChannel, StateStore, ChannelError, selectModel } = require(path.join(repo, 'lib/testing.js'));
+const { DshAgentRunner, WechatChannel, StateStore, TaskScheduler, conversationTaskTool, webSearchTool, ChannelError, selectModel } = require(path.join(repo, 'lib/testing.js'));
 const root = fs.mkdtempSync(path.join(repo, 'storage/tmp/dsh-native-'));
 process.env.DSH_HOME = path.join(root, 'home');
 process.env.DSH_AGENTS_HOME = path.join(root, 'agents');
@@ -37,18 +37,38 @@ class FixtureAdapter extends LlmAdapter {
     return ['fixture', 'alternate'].map(id => ({ provider, id, name: `测试模型 ${id}` }));
   }
   async resolveModel(provider, id) {
-    return { provider, id, name: `测试模型 ${id}`, reasoning: {
+    return { provider, id, name: `测试模型 ${id}`, inputModalities: ['text', 'image'], reasoning: {
       efforts: [{ id: 'high', name: '高' }, { id: 'low', name: '低' }], defaultEffort: id === 'alternate' ? 'low' : 'high'
     } };
   }
   async *stream(options) {
     requests.push(options);
-    assert.equal(options.tools?.length || 0, 0, 'WeChat must not inherit host tools');
+    const expectedTools = mode === 'task-tool' || mode === 'task-denied' ? ['wechat_task'] : mode === 'search-tool' ? ['wechat_web_search'] : [];
+    assert.deepEqual((options.tools || []).map(tool => tool.name), expectedTools, 'only current-conversation tools are available; host tools never leak');
     const systems = options.messages.filter(m => m.role === 'system').flatMap(m => m.content).map(b => b.text || '').join('\n');
     assert(systems.includes('微信')); assert(!systems.includes('HOST_SECRET_PERSONA'));
     if (mode === 'cancel') {
       await new Promise((resolve, reject) => { options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }); });
       return;
+    }
+    if (['task-tool', 'task-denied', 'search-tool'].includes(mode) && !options.messages.some(message => message.role === 'tool')) {
+      const name = mode === 'search-tool' ? 'wechat_web_search' : 'wechat_task';
+      const args = name === 'wechat_task' ? { action: 'create', kind: 'message', content: '该喝水啦。', delaySeconds: 300 } : { query: '上海天气' };
+      const block = { type: 'tool-call', id: 'native-fixture-tool-call', name, arguments: JSON.stringify(args) };
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' };
+      yield { type: 'tool-call-delta', index: 0, id: block.id, name, argumentsDelta: block.arguments };
+      yield { type: 'block-end', index: 0, block };
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }; return;
+    }
+    if (mode === 'vision') {
+      const images = options.messages.flatMap(message => message.content || []).filter(block => block.type === 'image');
+      assert.equal(images.length, 2, 'native DSH must receive actual typed images, not placeholders');
+      for (const block of images) assert(block.attachment && !block.data, 'durable admitted image reference');
+      const text = JSON.stringify(['第一张是合成测试图片。', '第二张是合成测试表情包。']);
+      yield { type: 'block-start', index: 0, blockType: 'text' };
+      yield { type: 'text-delta', index: 0, text };
+      yield { type: 'block-end', index: 0, block: { type: 'text', text } };
+      yield { type: 'finish', reason: { kind: 'stop' } }; return;
     }
     yield { type: 'block-start', index: 0, blockType: 'reasoning' };
     yield { type: 'reasoning-delta', index: 0, text: 'PRIVATE_TEST_REASONING' };
@@ -140,8 +160,12 @@ async function verifyPluginLifecycle(hostContext) {
   await mount('dsh-session-projection');
   await mount('dsh-agent');
   await mount('dsh-llm');
+  await mount('dsh-attachment-local', { dshHome: process.env.DSH_HOME });
   await mount('dsh-system-prompt', { personaPrefix: 'HOST_SECRET_PERSONA' });
   await mount('dsh-tools', { mode: 'native' });
+  const hostTool = ctx.tools.register({ name: 'host_fixture_forbidden', description: 'Must never be inherited by a WeChat agent.',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] }, execute: () => { throw new Error('Inherited host tool executed'); } });
   await mount('dsh-agent-default-model', { provider: 'wechat-test-fixture', model: 'fixture', reasoningEffort: 'high' });
   await mount('dsh-session-persistence-jsonl', { root: path.join(root, 'sessions') });
   await mount('dsh-agent-loop', { agents: [] });
@@ -214,9 +238,27 @@ async function verifyPluginLifecycle(hostContext) {
   await channel.close();
   const reloaded = new WechatChannel({ store: new StateStore(path.join(root, 'channel')), runner, transport });
   reloaded.receive(incoming(1), 'fake-owner'); await reloaded.whenIdle(); await reloaded.close(); assert.equal(sent.length, 2);
+  const scheduler = new TaskScheduler({ store, channel });
+  const scope = { accountId: 'fake-owner', chatType: 'private', peerId: 'fake-friend', source: 'chat', senderId: 'fake-friend', senderName: '测试朋友', requestKey: 'native-tool-message', requestedAt: Date.now() };
+  mode = 'task-tool';
+  await runner.run({ text: '五分钟后提醒我喝水', signal: controller.signal, tools: [conversationTaskTool(scheduler, scope, () => {}, '五分钟后提醒我喝水')] });
+  assert.equal(scheduler.list('fake-owner').tasks.length, 1, 'real native tool execution persists exactly one scoped task');
+  assert.equal(scheduler.list('fake-owner').tasks[0].peerId, 'fake-friend');
+  assert(requests.at(-1).messages.filter(message => message.role === 'tool').some(message => JSON.stringify(message).includes('persisted')));
+  mode = 'task-denied';
+  await runner.run({ text: '请翻译“五分钟后提醒我喝水”', signal: controller.signal, tools: [conversationTaskTool(scheduler, { ...scope, requestKey: 'quoted-example' }, () => {}, '请翻译“五分钟后提醒我喝水”')] });
+  assert.equal(scheduler.list('fake-owner').tasks.length, 1, 'model tool calls cannot turn quoted examples into schedules');
+  mode = 'search-tool'; const searches = [];
+  await runner.run({ text: '上海天气怎么样', signal: controller.signal, tools: [webSearchTool(() => ({ search: async request => { searches.push(request); return { content: '合成测试天气', sources: [{ title: '测试来源', url: 'https://example.com/weather' }] }; } }))] });
+  assert.deepEqual(searches, [{ query: '上海天气', maxResults: 5 }]);
+  mode = 'vision';
+  const png = { mediaType: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGP4z8DAAMIM/4EAAB/uBfsL2WiLAAAAAElFTkSuQmCC' };
+  assert.deepEqual(await runner.describeImages([png, png], controller.signal), ['第一张是合成测试图片。', '第二张是合成测试表情包。']);
+  mode = 'complete'; await scheduler.close();
   await verifyPluginLifecycle(ctx);
   const report = { ok: true, dsh: hostRequire('./package.json').version, node: process.versions.node,
     assertions: ['shared native model catalog', 'model choice persistence', 'real provider/model routing on resume', 'chosen model reasoning defaults', 'removed provider refuses fallback', 'return to DSH default', 'real temperature and maxTokens request controls', 'null temperature preserves Host default', 'persona and participation instructions in model prompt', 'workspace stored on create and retained on resume', 'configured Host session root observed through injection', 'Host session root stays independent of workspace', 'real agent create', 'persistent resume', 'complete prompt isolation', 'no inherited tools', 'final reasoning filtering', 'max-token refusal', 'cancellation', 'queued channel-to-agent-to-ACK', 'reload deduplication', 'real plugin apply and WorkerClient shutdown preserve participation progress', 'initial offline snapshots preserve progress but live disconnect resets it'], requests: requests.length, at: new Date().toISOString() };
+  report.assertions.push('native scoped tool registration and actual task creation', 'quoted task requests denied inside the native tool boundary', 'native search tool calls only the bounded public query', 'actual DSH image admission and two ordered multimodal blocks');
   fs.writeFileSync(path.join(repo, 'storage/logs/dsh-plugin-native-test.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
   for (const fork of forks.reverse()) await fork.dispose();

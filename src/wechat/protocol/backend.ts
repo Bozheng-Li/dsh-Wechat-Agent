@@ -1,12 +1,13 @@
 import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { BridgeError, object, validateParams, type Backend, type BackendStatus, type ActionName, type Params, type Result, type BridgeEvent, type BridgeMessage, type Contact, type Group, type Member } from '@napcat-wechat/protocol';
+import { BridgeError, MAX_SEND_IMAGE_BYTES, object, validateParams, type Backend, type BackendStatus, type ActionName, type Params, type Result, type BridgeEvent, type BridgeMessage, type Contact, type Group, type Member } from '@napcat-wechat/protocol';
 import { atomicJson, readJson, SessionStore, validateCredential, type Credential } from './session.js';
-import { bytes, commandFields, fields, fv, ld, num, signed, syncRequest, syncResponse, sendRequest, sendResponse, unstring } from './wire.js';
+import { bytes, commandFields, fields, fv, ld, num, signed, syncRequest, syncResponse, sendRequest, sendResponse, unstring, IMAGE_CHUNK_BYTES, imageUploadRequest, imageUploadResponse, type ImageUpload } from './wire.js';
 import { LonglinkTransport } from './transport.js';
-import { observedImage } from './media.js';
+import { imageMime, observedImage } from './media.js';
 import { quotedMessage } from './reference.js';
 
 export interface ProtocolOptions {
@@ -15,6 +16,7 @@ export interface ProtocolOptions {
 }
 type CachedGroup = Group & { memberCountKnown: false };
 interface Cache { account: string; contacts: Contact[]; groups: CachedGroup[]; members: Member[]; messages: BridgeMessage[]; cursor: string }
+type SendPart = { type: 'text'; text: string } | { type: 'image'; bytes: Buffer; mediaType: string; extension: 'png' | 'jpg'; sha256: string };
 export class ProtocolBackend implements Backend {
   readonly mode = 'protocol' as const;
   readonly session: SessionStore;
@@ -35,6 +37,7 @@ export class ProtocolBackend implements Backend {
   private messages = new Map<string, BridgeMessage>();
   private sendTail: Promise<unknown> = Promise.resolve();
   private sendPending = 0;
+  private queuedMediaBytes = 0;
   private nextSendAt = 0;
   private importing = false;
   private syncRequested = false;
@@ -204,7 +207,7 @@ export class ProtocolBackend implements Backend {
     const contact = sender === self.wxid ? { id: self.wxid, nickname: self.nickname } : this.cache.contacts.find(c => c.id === sender) ?? { id: sender, nickname: sender };
     const quoted = type === 49 ? quotedMessage(content, peer) : undefined;
     const mentions: BridgeMessage['message'] = [];
-    if (group && (type === 1 || type === 3 || quoted)) {
+    if (group && (type === 1 || type === 3 || type === 47 || quoted)) {
       const source = unstring(bytes(fs, 10));
       const list = /<atuserlist>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/atuserlist>/.exec(source)?.[1];
       for (const at of list?.split(',') ?? []) if (/^[\w@.:-]+$/.test(at.trim())) mentions.push({ type: 'at', data: { qq: at.trim() } });
@@ -213,8 +216,8 @@ export class ProtocolBackend implements Backend {
     } else if (!outgoing && !this.cache.contacts.some(c => c.id === sender)) this.cache.contacts.push(contact);
     const labels: Record<number, string> = { 3: '[图片]', 34: '[语音]', 43: '[视频]', 47: '[表情]', 49: '[链接或文件]', 10000: '[系统消息]' };
     return { id: `wx:${peer}:${id}`, serverMessageId: id, time: Number(num(fs, 9) ?? 0n), chatType: group ? 'group' : 'private', peerId: peer, sender: contact,
-      message: [...mentions, ...(quoted ?? (type === 3 ? [observedImage(fs, content, path.join(this.options.cacheDir, 'media', String(self.uin)), `${peer}:${id}`)] : [{ type: 'text' as const, data: { text: type === 1 ? content : labels[type] ?? `[消息类型 ${type}]` } }]))], messageType: type,
-      direction: outgoing ? 'outgoing' : 'incoming', source: 'longlink:NewSync', delivery: 'observed', observedAt: Date.now(), partial: type !== 1 && type !== 3 && !quoted };
+      message: [...mentions, ...(quoted ?? (type === 3 || type === 47 ? [observedImage(fs, content, path.join(this.options.cacheDir, 'media', String(self.uin)), `${peer}:${id}`)] : [{ type: 'text' as const, data: { text: type === 1 ? content : labels[type] ?? `[消息类型 ${type}]` } }]))], messageType: type,
+      direction: outgoing ? 'outgoing' : 'incoming', source: 'longlink:NewSync', delivery: 'observed', observedAt: Date.now(), partial: type !== 1 && type !== 3 && type !== 47 && !quoted };
   }
   private remember(m: BridgeMessage) { this.messages.set(m.id, m); while (this.messages.size > 5000) this.messages.delete(this.messages.keys().next().value!); }
   recentMessages(peerId?: string, limit = 100) { return structuredClone([...this.messages.values()].filter(m => !peerId || m.peerId === peerId).slice(-limit)); }
@@ -235,27 +238,77 @@ export class ProtocolBackend implements Backend {
   private enqueueSend(p: Params<'action.send_msg'>, cancel?: AbortSignal): Promise<BridgeMessage> {
     this.assertReady('action.send_msg');
     if (!/^[\w@.:-]{1,256}$/.test(p.peerId) || p.peerId.endsWith('@chatroom') !== (p.chatType === 'group')) throw new BridgeError('ERR_INVALID_PARAMS', 'Destination does not match chat type');
-    if (p.message.some(s => s.type !== 'text')) throw new BridgeError('ERR_UNSUPPORTED_ACTION', 'Pure protocol sending supports text only');
-    const text = p.message.map(s => s.type === 'text' ? s.data.text : '').join('');
-    if (!text.trim()) throw new BridgeError('ERR_INVALID_PARAMS', 'Message cannot be empty');
     if (this.sendPending >= 128) throw new BridgeError('ERR_SEND_QUEUE_FULL', 'Send queue is full');
-    const signal = cancel ? AbortSignal.any([this.controller!.signal, cancel]) : this.controller!.signal; this.sendPending++;
+    // Validate the whole reply before sending its first text segment. Media
+    // references are never resolved here: only trusted callers can supply bytes.
+    const parts: SendPart[] = []; let text = '', mediaBytes = 0, mediaCount = 0;
+    const flushText = () => {
+      if (!text.trim()) { text = ''; return; }
+      let chunk = '', size = 0;
+      for (const char of text) {
+        const n = Buffer.byteLength(char);
+        if (chunk && size + n > this.options.segmentBytes) { parts.push({ type: 'text', text: chunk }); chunk = ''; size = 0; }
+        chunk += char; size += n;
+      }
+      if (chunk) parts.push({ type: 'text', text: chunk });
+      text = '';
+    };
+    for (const segment of p.message) {
+      if (segment.type === 'text') { text += segment.data.text; continue; }
+      if (segment.type !== 'image' && segment.type !== 'face') throw new BridgeError('ERR_UNSUPPORTED_ACTION', '当前发送只支持文字和素材库图片', { delivery: 'rejected' });
+      flushText();
+      const encoded = segment.data.base64;
+      if (!encoded) throw new BridgeError('ERR_INVALID_PARAMS', '发送图片需要素材库提供的图片内容，不能直接使用文件路径或网址', { delivery: 'rejected' });
+      const content = Buffer.from(encoded, 'base64');
+      if (!content.length || content.length > MAX_SEND_IMAGE_BYTES || content.toString('base64') !== encoded)
+        throw new BridgeError('ERR_INVALID_PARAMS', '图片内容无效或超过 10 MiB，整条回复尚未发送', { delivery: 'rejected' });
+      let mime: string;
+      try { mime = imageMime(content); }
+      catch { throw new BridgeError('ERR_IMAGE_FORMAT', '图片内容无法识别为有效图片，整条回复尚未发送', { delivery: 'rejected' }); }
+      if (mime !== segment.data.mediaType) throw new BridgeError('ERR_INVALID_PARAMS', '图片实际格式与声明的类型不一致，整条回复尚未发送', { delivery: 'rejected' });
+      if (mime !== 'image/png' && mime !== 'image/jpeg') throw new BridgeError('ERR_UNSUPPORTED_IMAGE', '当前微信发送支持 PNG/JPEG 静态图片；GIF/WebP 请先转成 PNG/JPEG，整条回复尚未发送', { delivery: 'rejected' });
+      mediaBytes += content.length; mediaCount++;
+      if (mediaCount > 8 || mediaBytes > 20 * 1024 * 1024) throw new BridgeError('ERR_INVALID_PARAMS', '每次回复最多发送 8 张图片，总大小不能超过 20 MiB', { delivery: 'rejected' });
+      parts.push({ type: 'image', bytes: content, mediaType: mime, extension: mime === 'image/png' ? 'png' : 'jpg', sha256: createHash('sha256').update(content).digest('hex') });
+    }
+    flushText();
+    if (!parts.length) throw new BridgeError('ERR_INVALID_PARAMS', 'Message cannot be empty');
+    const account = this.session.value!;
+    if (mediaCount && !account.heartbeat_base_request) throw new BridgeError('ERR_IMAGE_CREDENTIAL', '当前登录会话缺少图片上传凭据，请重新扫码登录；整条回复尚未发送', { delivery: 'rejected' });
+    if (this.queuedMediaBytes + mediaBytes > 64 * 1024 * 1024) throw new BridgeError('ERR_SEND_QUEUE_FULL', '图片发送队列已满，请等待正在发送的图片完成', { delivery: 'rejected' });
+    const signal = cancel ? AbortSignal.any([this.controller!.signal, cancel]) : this.controller!.signal; this.sendPending++; this.queuedMediaBytes += mediaBytes;
     const task = this.sendTail.then(async () => {
-      const parts: string[] = []; let part = '', size = 0;
-      for (const char of text) { const n = Buffer.byteLength(char); if (size + n > this.options.segmentBytes) { parts.push(part); part = ''; size = 0; } part += char; size += n; }
-      if (part) parts.push(part);
       const ids: string[] = []; let first: BridgeMessage | undefined;
       try {
-        for (const chunk of parts) {
+        for (const part of parts) {
           await sleep(Math.max(0, this.nextSendAt - Date.now()) + Math.floor(Math.random() * (this.options.sendJitterMs + 1)), undefined, { signal });
           if (signal.aborted) throw new BridgeError('ERR_STOPPED', 'Session stopped');
           this.assertReady('action.send_msg');
-          const request = sendRequest(p.peerId, chunk), t = this.transport!;
+          const t = this.transport!;
           this.nextSendAt = Date.now() + this.options.sendIntervalMs;
-          const ack = sendResponse(await t.request(522, request.body), request.f4, request.f5);
+          let ack: { id: string; time: number };
+          if (part.type === 'text') {
+            const request = sendRequest(p.peerId, part.text);
+            ack = sendResponse(await t.request(522, request.body), request.f4, request.f5);
+          } else {
+            const upload: ImageUpload = { clientId: `${account.wxid}_${Date.now()}_${randomBytes(8).toString('hex')}`, from: account.wxid, to: p.peerId, total: part.bytes.length, time: Math.floor(Date.now() / 1000), baseRequest: Buffer.from(account.heartbeat_base_request!, 'hex'), extension: part.extension };
+            let final: { id: string; time: number } | undefined;
+            for (let start = 0; start < part.bytes.length; start += IMAGE_CHUNK_BYTES) {
+              if (signal.aborted) throw new BridgeError('ERR_STOPPED', '图片上传已停止；已写出的分片不会自动重发');
+              if (t !== this.transport || !t.connected) throw new BridgeError('ERR_CONNECTION_CLOSED', '图片上传期间连接已断开，发送结果未知');
+              const chunk = part.bytes.subarray(start, start + IMAGE_CHUNK_BYTES);
+              const result = imageUploadResponse(await t.request(110, imageUploadRequest(upload, start, chunk)), upload, start, chunk.length);
+              // Do not discard a final server ACK if cancellation arrived while
+              // the request was in flight. Stop before the next request instead.
+              if (result.complete && result.id) final = { id: result.id, time: result.time };
+            }
+            if (!final) throw new BridgeError('ERR_PROTOCOL', '图片上传缺少最终确认，发送结果未知');
+            ack = final;
+          }
           ids.push(ack.id); this.sent++;
           const c = this.session.value!;
-          const message: BridgeMessage = { id: `wx:${p.peerId}:${ack.id}`, serverMessageId: ack.id, time: ack.time, chatType: p.chatType, peerId: p.peerId, sender: { id: c.wxid, nickname: c.nickname }, message: [{ type: 'text', data: { text: chunk } }], direction: 'outgoing', source: 'longlink:SendMsg', delivery: 'server-ack', observedAt: Date.now(), messageType: 1 };
+          // The durable cache stores only media metadata, never base64 payloads.
+          const message: BridgeMessage = { id: `wx:${p.peerId}:${ack.id}`, serverMessageId: ack.id, time: ack.time, chatType: p.chatType, peerId: p.peerId, sender: { id: c.wxid, nickname: c.nickname }, message: part.type === 'text' ? [{ type: 'text', data: { text: part.text } }] : [{ type: 'image', data: { file: 'unavailable', mediaType: part.mediaType, bytes: part.bytes.length, sha256: part.sha256 } }], direction: 'outgoing', source: part.type === 'text' ? 'longlink:SendMsg' : 'longlink:UploadMsgImg', delivery: 'server-ack', observedAt: Date.now(), messageType: part.type === 'text' ? 1 : 3 };
           this.remember(message); this.persist(); first ??= message; this.emit({ type: 'event.message', payload: structuredClone(message) });
         }
       } catch (error) {
@@ -264,7 +317,7 @@ export class ProtocolBackend implements Backend {
       return { ...first!, serverMessageIds: ids };
     });
     this.sendTail = task.catch(() => {});
-    return task.finally(() => { this.sendPending--; });
+    return task.finally(() => { this.sendPending--; this.queuedMediaBytes -= mediaBytes; });
   }
   async importSession(raw: unknown) {
     if (this.importing) throw new BridgeError('ERR_SESSION_BUSY', 'Session import is already in progress');
