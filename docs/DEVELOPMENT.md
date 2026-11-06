@@ -15,7 +15,7 @@ npm test
 
 `npm test` 构建服务端、管理页面和协议子进程，并运行插件回归测试；单独构建使用 `npm run build`。这两项不需要登录微信、安装 DSH 或准备微信二进制组件。测试数据写入本仓库的临时目录，不使用个人会话。
 
-本次验证结果及发布状态见 [0.2.0-preview.3 验证记录](docs/VERIFICATION-PREVIEW-2-2026-11-06.md)，此前的 [2026-11-06 验证记录](docs/VERIFICATION-2026-11-06.md) 继续保留。
+本次验证结果及发布状态见 [0.2.0-preview.4 验证记录](VERIFICATION-PREVIEW-4-2026-11-06.md)，此前的 [0.2.0-preview.3 验证记录](VERIFICATION-PREVIEW-3-2026-11-06.md)和 [2026-11-06 验证记录](VERIFICATION-2026-11-06.md)继续保留。
 
 可单独运行真实一分钟计时测试，使用本地模拟传输，不连接微信：
 
@@ -37,18 +37,18 @@ npm run pack:plugin
 npm run audit:package
 ```
 
-完整包输出到 `release/dsh-plugin-wechat-agent-0.2.0-preview.3.tgz`，同目录提供 `.sha256` 校验文件。打包脚本下载并校验 Python 3.13.9 嵌入版，安装 `runtime/requirements.txt` 中固定版本的依赖。只打包显式列出的运行文件、更新日志、说明和许可证，排除开发脚本、个人配置、登录资料、存储和测试入口。
+完整包输出到 `release/dsh-plugin-wechat-agent-0.2.0-preview.4.tgz`，同目录提供 `.sha256` 校验文件。打包脚本下载并校验 Python 3.13.9 嵌入版，安装 `runtime/requirements.txt` 中固定版本的依赖。只打包显式列出的运行文件、更新日志、说明和许可证，排除开发脚本、个人配置、登录资料、存储和测试入口。
 
 若 Python 自动下载超时，可将从 [Python 官网](https://www.python.org/ftp/python/3.13.9/python-3.13.9-embed-amd64.zip) 取得的 `python-3.13.9-embed-amd64.zip` 放入 `storage/cache/` 后重试；脚本会验证相同的固定 SHA-256。
 
 `lib/`、`release/`、`storage/`、`node_modules/`、本地 Python 和微信组件均被 Git 忽略。不要直接使用 `npm pack` 作为完整安装包；使用上面的 `pack:plugin` 命令准备全部运行资源。兼容命令 `dsh:build`、`dsh:test`、`dsh:pack` 仍可使用。
 
-本地未发布构建可使用 `npm run pack:plugin -- --output-dir release/unreleased`，再用 `npm run audit:package -- release/unreleased/dsh-plugin-wechat-agent-0.2.0-preview.3.tgz` 审计指定文件。输出目录与已发布包分开，打包不会自动发布或升级正在运行的插件。维护者可用 `node scripts/download-builtin-stickers.mjs` 从固定上游版本重新取得原图；常规构建只校验本地图片，不联网下载表情。
+本地未发布构建可使用 `npm run pack:plugin -- --output-dir release/unreleased`，再用 `npm run audit:package -- release/unreleased/dsh-plugin-wechat-agent-0.2.0-preview.4.tgz` 审计指定文件。输出目录与已发布包分开，打包不会自动发布或升级正在运行的插件。维护者可用 `node scripts/download-builtin-stickers.mjs` 从固定上游版本重新取得原图；常规构建只校验本地图片，不联网下载表情。
 
 发布时先完成测试、完整打包和包审计，再发布已验证的压缩包：
 
 ```powershell
-npm publish ./release/dsh-plugin-wechat-agent-0.2.0-preview.3.tgz --access public --tag latest --registry=https://registry.npmjs.org/
+npm publish ./release/dsh-plugin-wechat-agent-0.2.0-preview.4.tgz --access public --tag latest --registry=https://registry.npmjs.org/
 npm run verify:npm -- --wait --download --write-index
 ```
 
@@ -76,3 +76,5 @@ npm run test:ui -- 'D:\你的Electron目录\electron.exe'
 ```
 
 截图和结果保存在 `storage/logs/ui-preview/`，不访问真实微信账号。React 与 ReactDOM 是此测试的开发依赖，插件运行时仍使用 DSH 提供的 React。
+
+只检查全局视觉、动效偏好、明暗对比度及 320–1024 像素响应式布局时，可设置 `WECHAT_UI_TEST_VISUALS_ONLY=1` 后运行同一命令。此模式仍使用隔离会话，截图与结果保存到 `storage/logs/visual-refresh-preview/`；完成后清除该环境变量，再运行完整交互验收。

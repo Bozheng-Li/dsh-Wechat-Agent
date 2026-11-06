@@ -11,7 +11,7 @@ import { StateStore, WechatChannel, TaskScheduler, AgentIdentity, VERSION, ident
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const electron = process.argv[2] || process.env.ELECTRON_PATH;
 if (!electron || !path.isAbsolute(electron) || !fs.existsSync(electron)) throw new Error('Pass an Electron executable: npm run test:ui -- <absolute path to electron.exe>');
-const out = path.join(root, 'storage/logs', process.env.WECHAT_UI_TEST_TASKS_ONLY === '1' ? 'tasks-layout-preview' : 'ui-preview');
+const out = path.join(root, 'storage/logs', process.env.WECHAT_UI_TEST_VISUALS_ONLY === '1' ? 'visual-refresh-preview' : process.env.WECHAT_UI_TEST_TASKS_ONLY === '1' ? 'tasks-layout-preview' : 'ui-preview');
 fs.mkdirSync(out, { recursive: true });
 fs.mkdirSync(path.join(root, 'storage/tmp'), { recursive: true });
 const fixture = fs.mkdtempSync(path.join(root, 'storage/tmp/ui-preview-'));

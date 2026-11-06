@@ -65,10 +65,14 @@ export function PersonaLibrary({ draft, blocked, onBack, onLoad }) {
       </div>
     </div>
     <p className="wa-persona-results" role="status">{filtered.length} 套人设{category !== 'all' ? ' · ' + PERSONA_CATEGORIES.find(item => item.id === category)?.description : ' · 完整背景、互动习惯与语气示例'}</p>
-    <div className="wa-persona-grid">{filtered.map(preset => <button type="button" className="wa-persona-card" key={preset.id} data-preset-id={preset.id} aria-label={'预览' + preset.name + ' · ' + preset.role} onClick={() => setSelectedId(preset.id)}>
-      <div className="wa-persona-card-top"><Emblem preset={preset}/><span><strong>{preset.name}</strong><span className="wa-persona-role">{preset.role}</span></span><span className="wa-persona-arrow" aria-hidden="true">↗</span></div>
-      <p>{preset.summary}</p><div className="wa-persona-tags">{preset.tags.map(tag => <span key={tag}>{tag}</span>)}</div><span className="wa-persona-card-footer">查看完整人设与示例<span aria-hidden="true">→</span></span>
-    </button>)}</div>
+    <div className="wa-persona-grid">{filtered.map(preset => {
+      const group = PERSONA_CATEGORIES.find(item => item.id === preset.category);
+      return <button type="button" className="wa-persona-card" key={preset.id} data-preset-id={preset.id} aria-label={'预览' + preset.name + ' · ' + preset.role} onClick={() => setSelectedId(preset.id)}>
+        <div className="wa-persona-card-top"><span className="wa-persona-heading"><span className="wa-persona-category">{group.name}</span><strong>{preset.name}</strong><span className="wa-persona-role">{preset.role}</span></span><Emblem preset={preset}/></div>
+        <p>{preset.summary}</p>
+        <div className="wa-persona-card-meta"><div className="wa-persona-tags">{preset.tags.map(tag => <span key={tag}>{tag}</span>)}</div><span className="wa-persona-arrow" aria-hidden="true">↗</span></div>
+      </button>;
+    })}</div>
     {!filtered.length && <div className="wa-empty"><h3>没有找到匹配的人设</h3><p>可以换一个性格词，或查看全部类型。</p><button type="button" className="wa-button" onClick={() => { setQuery(''); setCategory('all'); }}>查看全部人设</button></div>}
   </div>;
 }

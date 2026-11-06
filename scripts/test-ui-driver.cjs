@@ -67,6 +67,83 @@ async function assertLayout(label) {
 function check(name) { report.assertions.push(name); }
 const peer = (state, id) => state.conversations.find(item => item.peerId === id);
 
+async function verifyVisualDesign() {
+  const originalSettings = (await fixture('state')).settings;
+  window.webContents.debugger.attach('1.3');
+  const emulateMotion = value => window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value }] });
+  try {
+    await emulateMotion('no-preference');
+    await waitFor(() => !document.querySelector('[data-testid="visual-motion-toggle"]').disabled);
+    if (await evaluate(() => document.querySelector('.wa-panel').dataset.motion === 'off')) await click('[data-testid="visual-motion-toggle"]');
+    const sculpture = await evaluate(() => {
+      const art = document.querySelector('[data-testid="conversation-sculpture"]');
+      return { hidden: art.getAttribute('aria-hidden'), interceptsPointer: getComputedStyle(art).pointerEvents, running: getComputedStyle(art.querySelector('.wa-sculpture-float')).animationName };
+    });
+    assert.equal(sculpture.hidden, 'true'); assert.equal(sculpture.interceptsPointer, 'none'); assert.notEqual(sculpture.running, 'none');
+    await click('[data-testid="visual-motion-toggle"]');
+    await waitFor(() => document.querySelector('.wa-panel').dataset.motion === 'off');
+    assert.equal(await evaluate(() => getComputedStyle(document.querySelector('.wa-sculpture-float')).animationName), 'none');
+    await new Promise(resolve => { window.webContents.once('did-finish-load', resolve); window.reload(); });
+    await waitFor(() => document.querySelector('.wa-account-name') && document.querySelector('.wa-panel').dataset.motion === 'off');
+    assert.equal(await evaluate(() => document.querySelector('[data-testid="visual-motion-toggle"]').getAttribute('aria-pressed')), 'false');
+    await click('[data-testid="visual-motion-toggle"]');
+    await emulateMotion('reduce');
+    await waitFor(() => document.querySelector('.wa-panel').dataset.motion === 'off' && document.querySelector('[data-testid="visual-motion-toggle"]').disabled);
+    assert.equal(await evaluate(() => getComputedStyle(document.querySelector('.wa-sculpture-float')).animationName), 'none');
+    await emulateMotion('no-preference');
+    await waitFor(() => document.querySelector('.wa-panel').dataset.motion === 'on');
+    assert.deepEqual((await fixture('state')).settings, originalSettings, 'Visual preferences must not mutate account settings');
+    check('decorative sculpture cannot intercept account actions; motion preference persists, follows live system changes, and leaves account settings intact');
+    await clickText('断开连接');
+    await waitFor(() => document.querySelector('.wa-login-state')?.textContent === '微信离线');
+    assert.equal((await fixture('state')).online, false);
+    assert.equal(await evaluate(() => !!document.querySelector('.wa-login-state .is-online')), false);
+    await screenshot('overview-disconnected-dark');
+    await clickText('重新连接');
+    await waitFor(() => document.querySelector('.wa-login-state')?.textContent.includes('已连接，正在同步新消息'));
+    check('disconnect clears the live status even if the previous login state remains online; reconnect restores the confirmed connection label');
+    window.setContentSize(1280, 1100);
+    for (const selectedTheme of ['dark', 'light']) {
+      await theme(selectedTheme);
+      const colors = await evaluate(() => {
+        const panel = getComputedStyle(document.querySelector('.wa-panel')), muted = getComputedStyle(document.querySelector('.wa-page-head .wa-muted'));
+        const luminance = color => { const channels = color.match(/[\d.]+/g).slice(0, 3).map(value => { const s = Number(value) / 255; return s <= .04045 ? s / 12.92 : ((s + .055) / 1.055) ** 2.4; }); return channels[0] * .2126 + channels[1] * .7152 + channels[2] * .0722; };
+        const contrast = foreground => { const values = [luminance(foreground), luminance(panel.backgroundColor)].sort((a, b) => b - a); return (values[0] + .05) / (values[1] + .05); };
+        return { background: panel.backgroundColor, text: contrast(panel.color), muted: contrast(muted.color), primaryBackground: getComputedStyle(document.querySelector('.wa-primary')).backgroundImage };
+      });
+      assert(colors.text >= 4.5 && colors.muted >= 4.5, selectedTheme + ' text contrast: ' + JSON.stringify(colors));
+      assert.notEqual(colors.primaryBackground, 'none');
+      await screenshot('overview-desktop-' + selectedTheme, selectedTheme);
+      await click('[data-testid="nav-settings"]'); await screenshot('settings-desktop-' + selectedTheme, selectedTheme);
+      await click('[data-testid="open-persona"]'); await click('[data-testid="browse-persona-presets"]');
+      await waitFor(() => document.querySelectorAll('.wa-persona-card').length === 18);
+      const searchClearance = await evaluate(() => {
+        const search = document.querySelector('.wa-persona-toolbar .wa-search'), input = search.querySelector('input'), icon = search.querySelector('svg');
+        return input.getBoundingClientRect().left + parseFloat(getComputedStyle(input).paddingLeft) - icon.getBoundingClientRect().right;
+      });
+      assert(searchClearance >= 5, 'Search copy must clear the leading icon');
+      await assertLayout('desktop persona collection'); await screenshot('personas-desktop-' + selectedTheme, selectedTheme);
+      await click('[data-testid="nav-assets"]'); await waitFor(() => document.querySelectorAll('.wa-pack-card').length === 3);
+      await screenshot('stickers-desktop-' + selectedTheme, selectedTheme);
+      await click('[data-testid="nav-overview"]');
+    }
+    check('light and dark palettes render real surfaces and gradients; primary text and explanatory copy meet 4.5:1 contrast');
+    for (const width of [1024, 768, 430, 360, 320]) {
+      window.setContentSize(width, 900);
+      for (const page of ['overview', 'authorization', 'records', 'memory', 'tasks', 'assets', 'settings']) {
+        await click('[data-testid="nav-' + page + '"]');
+        await waitFor(page => document.querySelector('.wa-panel').dataset.page === page, [page]);
+        await pause(150);
+        await assertLayout(width + 'px ' + page);
+        const navigation = await evaluate(() => Array.from(document.querySelectorAll('.wa-nav-button')).every(button => { const r = button.getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight; }));
+        assert(navigation, 'All navigation controls must remain reachable at ' + width + 'px');
+        if (page === 'overview' || width === 430 && ['settings', 'assets', 'authorization'].includes(page)) await screenshot(page + '-' + width + '-dark');
+      }
+    }
+    check('all seven pages and navigation fit 1024, 768, 430, 360 and 320px widths without horizontal overflow');
+  } finally { window.webContents.debugger.detach(); }
+}
+
 async function verifyTasks() {
     await click('[data-testid="nav-tasks"]');
     assert.equal(await evaluate(() => !!document.querySelector('[data-testid="task-create-form"]')), false);
@@ -152,6 +229,10 @@ app.whenReady().then(async () => {
     await window.loadURL(origin);
     await waitFor(() => typeof window.__uiFixture === 'function' && document.querySelector('.wa-account-name')?.textContent.includes('界面测试'));
     assert.equal((await fixture('state')).account.id, 'wxid_ui_fixture', 'Refuse to operate outside the synthetic fixture');
+    if (process.env.WECHAT_UI_TEST_VISUALS_ONLY === '1') {
+      await verifyVisualDesign();
+      assert.deepEqual(report.errors, [], 'Browser errors must be resolved'); report.ok = true; return;
+    }
     if (process.env.WECHAT_UI_TEST_TASKS_ONLY === '1') {
       await verifyTasks();
       await evaluate(() => document.querySelector('[data-testid="task-tab-current"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })));

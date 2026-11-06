@@ -28,12 +28,12 @@
 
 ## 开始使用
 
-当前公开预览版为 **`0.2.0-preview.3`**，已针对 **Windows x64 · DeepSeek Harness `0.2.1-rc.5`** 验证。模型使用你在 DSH 中配置的服务。
+当前公开预览版为 **`0.2.0-preview.4`**，已针对 **Windows x64 · DeepSeek Harness `0.2.1-rc.5`** 验证。模型使用你在 DSH 中配置的服务。
 
 在 DSH 插件管理页输入 `dsh-plugin-wechat-agent` 安装，或在 PowerShell 执行：
 
 ```powershell
-dsh plugin --profile desktop add dsh-plugin-wechat-agent@0.2.0-preview.3
+dsh plugin --profile desktop add dsh-plugin-wechat-agent@0.2.0-preview.4
 ```
 
 完整 npm 包包含微信认证组件、Python 与依赖，安装后即可打开侧栏 **微信 Agent**。
@@ -59,27 +59,27 @@ DSH `0.2.1-rc.5` 使用用户添加的自定义索引。索引提供版本目录
 
 ## 日常使用，在一个工作台里
 
-连接、会话授权、处理记录、记忆、任务和素材各有清晰的入口。运行、等待、失败与微信已确认的结果分别显示，能看清当前发生了什么。
+连接、会话授权、处理记录、记忆、任务和素材各有清晰的入口。玉色与墨绿界面跟随 DSH 明暗主题，工作台的立体气泡可以暂停动效，也会跟随系统的“减少动态效果”设置。运行、等待、失败与微信已确认的结果分别显示，能看清当前发生了什么。
 
-<img src="https://raw.githubusercontent.com/Bozheng-Li/dsh-Wechat-Agent/main/docs/images/product-overview.png" alt="微信 Agent 工作台：连接状态、授权会话、当前任务与快捷设置" width="100%" />
+<img src="https://raw.githubusercontent.com/Bozheng-Li/dsh-Wechat-Agent/main/docs/images/visual-refresh-overview-light.png" alt="微信 Agent 工作台：立体对话气泡、连接状态、授权会话与快捷设置" width="100%" />
 
 ## 角色可以不同，记忆各有归属
 
 内置人设库支持分类、搜索与全文预览，载入后继续编辑，保存才生效。每个会话分别积累记忆；自动提取的事实保留原会话来源，跨会话共同约定可以由你写入全局备注。
 
-<img src="https://raw.githubusercontent.com/Bozheng-Li/dsh-Wechat-Agent/main/docs/images/product-personas.png" alt="18 套内置人设的分类与预览界面" width="100%" />
+<img src="https://raw.githubusercontent.com/Bozheng-Li/dsh-Wechat-Agent/main/docs/images/visual-refresh-personas-dark.png" alt="深色主题中的 18 套内置人设分类与预览界面" width="100%" />
 
 ## 认真记下，也按时提醒
 
 “小胖，一分钟后提醒我吃饭。”保存成功后，约定进入当前任务列表。执行、取消与过期结果归入历史，每项一行，展开即可核对内容和真实回执。
 
-<img src="https://raw.githubusercontent.com/Bozheng-Li/dsh-Wechat-Agent/main/docs/images/product-tasks.png" alt="紧凑的定时任务历史，可展开查看执行结果和回执" width="100%" />
+<img src="https://raw.githubusercontent.com/Bozheng-Li/dsh-Wechat-Agent/main/docs/images/visual-refresh-tasks-light.png" alt="紧凑的定时任务历史，可展开查看执行结果和回执" width="100%" />
 
 ## 给聊天一点表情
 
 **猫咪心情 · 软萌动物 · 元气心情**，三组共 30 张 Microsoft Fluent Emoji 原图，随包提供来源和 MIT 许可证。可以整组启用、单张编辑，也能导入 ZIP 或自己的图片，调整使用概率与间隔。
 
-<img src="https://raw.githubusercontent.com/Bozheng-Li/dsh-Wechat-Agent/main/docs/images/builtin-stickers.png" alt="三组内置 3D 表情：猫咪心情、软萌动物与元气心情" width="100%" />
+<img src="https://raw.githubusercontent.com/Bozheng-Li/dsh-Wechat-Agent/main/docs/images/visual-refresh-stickers-light.png" alt="三组内置 3D 表情：猫咪心情、软萌动物与元气心情" width="100%" />
 
 以上应用截图使用隔离的合成账号与会话，展示实际插件界面。
 
@@ -100,6 +100,7 @@ DSH `0.2.1-rc.5` 使用用户添加的自定义索引。索引提供版本目录
 | [更新日志](https://github.com/Bozheng-Li/dsh-Wechat-Agent/blob/main/CHANGELOG.md) | 与应用内共用的版本记录。 |
 | [图片发送修复](https://github.com/Bozheng-Li/dsh-Wechat-Agent/blob/main/docs/IMAGE-HANDOFF-2026-11-06.md) | 反复扫码仍无法发图的原因、修复与验证范围。 |
 | [联网搜索](https://github.com/Bozheng-Li/dsh-Wechat-Agent/blob/main/docs/SEARCH-2026-11-06.md) | Tavily、DeepSeek 原生搜索、独立凭据与实际查询验证。 |
+| [界面与动效](https://github.com/Bozheng-Li/dsh-Wechat-Agent/blob/main/docs/VISUAL-REFRESH-2026-11-06.md) | 明暗配色、动效偏好、窄窗口预览与验证。 |
 | [第三方说明](https://github.com/Bozheng-Li/dsh-Wechat-Agent/blob/main/THIRD_PARTY_NOTICES.md) | 原项目、表情作品、运行环境与许可。 |
 
 源码仓库可独立构建与测试。Node.js **22.18+**，执行 `npm ci`、`npm test`；完整安装包的准备方法见开发文档。
