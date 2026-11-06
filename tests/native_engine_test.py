@@ -289,7 +289,8 @@ class NativeLogin(unittest.TestCase):
             (root / "WeChat.exe").write_bytes(b"fixture")
             manifest = {"files": [{"name": "WeChat.exe", "bytes": 7, "sha256": hashlib.sha256(b"fixture").hexdigest()}]}
             (root / "manifest.json").write_text(json.dumps(manifest))
-            self.assertEqual(native_engine.verify_engine(root), root)
+            # Windows runners may expose TEMP through an 8.3 path alias.
+            self.assertEqual(native_engine.verify_engine(root), root.resolve())
             (root / "WeChat.exe").write_bytes(b"changed")
             with self.assertRaises(ValueError):
                 native_engine.verify_engine(root)
