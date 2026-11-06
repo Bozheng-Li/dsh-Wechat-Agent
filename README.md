@@ -184,9 +184,12 @@ npm run audit:package
 
 ```powershell
 npm publish ./release/dsh-plugin-wechat-agent-0.2.0-preview.2.tgz --access public --tag latest --registry=https://registry.npmjs.org/
+npm run verify:npm -- --wait --download --write-index
 ```
 
 源码 `package.json` 保留 `private: true`，防止误把不含完整运行环境的源码目录直接发布；完整打包阶段会去除此标记与开发依赖、脚本。`latest` 指向当前公开预览版，版本名仍明确标记 `preview`。
+
+npm 返回接受上传后可能继续后台处理，版本元数据与下载节点也可能分批就绪。验证命令会等待正式版本、实际下载并比对完整压缩包，然后使用 npm 返回的真实发布时间更新 `market/index.json`；确认成功后再推送索引或升级正在运行的实例。
 
 ### 可选原生验证
 

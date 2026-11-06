@@ -33,6 +33,26 @@ assert(Number.isFinite(Date.parse(publishedAt)), 'Registry publication time is m
 const report = { ok: true, name: manifest.name, version: manifest.version, publishedAt, latest: metadata['dist-tags']?.latest,
   registry, tarball: published.dist.tarball, integrity, bytes: bytes.length,
   sha256: createHash('sha256').update(bytes).digest('hex'), verifiedAt: new Date().toISOString() };
+if (process.argv.includes('--download')) {
+  let archive;
+  do {
+    archive = await fetch(published.dist.tarball, { headers: { 'cache-control': 'no-cache' }, signal: AbortSignal.timeout(300000) });
+    if (archive.ok || archive.status !== 404 || Date.now() >= deadline) break;
+    await archive.body?.cancel();
+    await new Promise(resolve => setTimeout(resolve, 5000));
+  } while (true);
+  assert(archive.ok, `npm tarball returned HTTP ${archive.status}; do not start an upgrade yet`);
+  const downloaded = createHash('sha512'); let received = 0;
+  for await (const chunk of archive.body) {
+    received += chunk.byteLength;
+    assert(received <= bytes.length, 'Downloaded tarball exceeds the audited package size');
+    downloaded.update(chunk);
+  }
+  assert.equal(received, bytes.length);
+  assert.equal('sha512-' + downloaded.digest('base64'), integrity, 'Downloaded npm tarball integrity mismatch');
+  report.downloadVerified = true;
+  report.verifiedAt = new Date().toISOString();
+}
 if (process.argv.includes('--write-index')) {
   const indexFile = path.join(root, 'market/index.json');
   const index = fs.existsSync(indexFile) ? JSON.parse(fs.readFileSync(indexFile, 'utf8'))

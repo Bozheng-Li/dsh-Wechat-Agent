@@ -1,0 +1,43 @@
+{
+  "format": 1,
+  "title": {
+    "en": "WeChat Agent",
+    "zh": "微信 Agent 插件源"
+  },
+  "plugins": [
+    {
+      "name": "dsh-plugin-wechat-agent",
+      "title": {
+        "en": "WeChat Agent",
+        "zh": "微信 Agent"
+      },
+      "description": {
+        "en": "Personas, conversation and long-term memory, images and scheduled tasks for WeChat on Windows x64.",
+        "zh": "Windows x64 微信插件：丰富人设、会话与长期记忆、图片理解、表情素材回复和定时任务。"
+      },
+      "metadata": {
+        "keywords": [
+          "wechat",
+          "微信",
+          "小胖",
+          "agent",
+          "memory",
+          "定时任务"
+        ]
+      },
+      "versions": [
+        {
+          "version": "0.2.0-preview.2",
+          "publishTimestamp": 1793949160,
+          "engines": {
+            "dsh": "0.2.1-rc.5"
+          },
+          "source": {
+            "type": "npm",
+            "registry": "https://registry.npmjs.org/"
+          }
+        }
+      ]
+    }
+  ]
+}
