@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { rolldown } from 'rolldown';
+import { nativeQrSession, writeNativeQrRound } from './fixtures/native-qr-session.mjs';
 
 // Keep protocol fixtures isolated from the running worker and its credentials.
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -34,17 +35,18 @@ function textAck(body, id = '9007199254740901') {
   const f = fields(bytes(fields(body), 2));
   return Buffer.concat([ld(1, fv(1, 0)), fv(2, 1), ld(3, Buffer.concat([fv(4, num(f, 5)), fv(5, num(f, 4)), fv(6, 1700000000), fv(8, BigInt(id))]))]);
 }
-function fixture(t, respond = (cmd, body) => cmd === 110 ? imageAck(body) : textAck(body), withBase = true) {
+function fixture(t, respond = (cmd, body) => cmd === 110 ? imageAck(body) : textAck(body), withBase = true, qr) {
   const tempRoot = path.resolve(os.tmpdir()), dir = fs.mkdtempSync(path.join(tempRoot, 'wechat-outbound-test-'));
   const sessionFile = path.join(dir, 'session.json'), cacheDir = path.join(dir, 'cache');
-  fs.writeFileSync(sessionFile, JSON.stringify({ uin: 123, token: 'aa'.repeat(15), wxid: 'wxid_fixture', nickname: '测试账号', sync_key: fv(1, 0).toString('hex'), ...(withBase ? { heartbeat_base_request: Buffer.concat([ld(1, 'fake-session'), fv(2, 123)]).toString('hex') } : {}) }));
+  fs.writeFileSync(sessionFile, JSON.stringify(qr?.credential ?? { uin: 123, token: 'aa'.repeat(15), wxid: 'wxid_fixture', nickname: '测试账号', sync_key: fv(1, 0).toString('hex'), ...(withBase ? { heartbeat_base_request: Buffer.concat([ld(1, 'fake-session'), fv(2, 123)]).toString('hex') } : {}) }));
+  if (qr) writeNativeQrRound(dir, qr);
   const backend = new ProtocolBackend({ sessionFile, cacheDir, syncIntervalMs: 60000, heartbeatIntervalMs: 60000, requestTimeoutMs: 1000, reconnectMs: 1000, sendIntervalMs: 0, sendJitterMs: 0, segmentBytes: 4096 });
   const calls = [], events = [];
   backend.controller = new AbortController(); backend.online = true;
   backend.transport = { connected: true, tx: 0, rx: 0, request: async (cmd, body) => { calls.push({ cmd, body }); return respond(cmd, body, calls.length, backend); }, close() { this.connected = false; } };
   backend.subscribe(event => { if (event.type === 'event.message') events.push(event.payload); });
   t.after(async () => { await backend.close(); assert.equal(path.dirname(dir), tempRoot); assert.match(path.basename(dir), /^wechat-outbound-test-/); fs.rmSync(dir, { recursive: true, force: true }); });
-  return { backend, calls, events, cache: () => fs.readFileSync(path.join(cacheDir, '123.json'), 'utf8') };
+  return { backend, calls, events, cache: () => fs.readFileSync(path.join(cacheDir, `${backend.session.value.uin}.json`), 'utf8') };
 }
 
 test('UploadMsgImg uses command 9, exact wrappers, and complete-image identity', () => {
@@ -163,10 +165,24 @@ for (const [name, segment, code] of [
 
 test('missing image credential rejects a mixed reply before any text is sent', async t => {
   const f = fixture(t, undefined, false);
-  await assert.rejects(async () => f.backend.sendMessage(message(text('do not send first'), media())), { code: 'ERR_IMAGE_CREDENTIAL' });
+  await assert.rejects(async () => f.backend.sendMessage(message(text('do not send first'), media())), error => error.code === 'ERR_IMAGE_CREDENTIAL' && !error.message.includes('重新扫码') && error.details.delivery === 'rejected');
   assert.equal(f.calls.length, 0);
   const sent = await f.backend.sendMessage(message(text('text still works')));
   assert.equal(sent.messageType, 1);
+});
+
+test('a real native QR credential shape sends text and a multi-chunk image without a heartbeat capture', async t => {
+  const qr = nativeQrSession(api), f = fixture(t, undefined, false, qr);
+  assert.equal(f.backend.session.publicStatus().heartbeatAvailable, false);
+  assert.equal(f.backend.session.publicStatus().imageUploadAvailable, true);
+  const sent = await f.backend.sendMessage(message(text('前面的文字'), media(bigPng)));
+  assert.deepEqual(f.calls.map(call => call.cmd), [522, 110, 110, 110]);
+  assert.deepEqual(f.events.map(event => event.messageType), [1, 3]);
+  assert.equal(sent.delivery, 'server-ack'); assert.equal(sent.serverMessageIds.length, 2);
+  for (const call of f.calls.filter(call => call.cmd === 110)) {
+    const base = fields(bytes(fields(call.body), 1));
+    assert.deepEqual(bytes(base, 1), qr.key); assert.equal(num(base, 2), 42n); assert.deepEqual(bytes(base, 3), qr.deviceId);
+  }
 });
 
 test('an image cannot continue onto a replacement transport', async t => {

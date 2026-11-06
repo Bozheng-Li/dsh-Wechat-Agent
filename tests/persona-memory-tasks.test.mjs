@@ -22,6 +22,7 @@ function fixture(t) {
   const runner = { run: async input => { calls.push(input); return { text: '好，就按这个来。', sessionId: 'fixture-session-' + calls.length }; },
     summarize: async () => '阿禾喜欢猫，群里约定周五讨论产品。' };
   const transport = { status: () => structuredClone(state), send: async input => { sent.push(input); return { delivery: 'server-ack', serverMessageIds: ['fixture-ack-' + sent.length] }; } };
+  transport.call = async (operation, input) => { assert.equal(operation, 'members'); return { accountId: input.accountId, peerId: input.peerId, members: [{ id: 'alice', name: '阿禾' }, { id: 'bob', name: '阿青' }] }; };
   const channel = new WechatChannel({ store, runner, transport, now: () => now, random: () => 0 });
   const scheduler = new TaskScheduler({ store, channel, now: () => now }); channel.scheduler = scheduler;
   const scope = { accountId: owner, chatType: 'group', peerId: room };
@@ -136,7 +137,8 @@ test('a requested one-minute reminder is durable and runs once with real deliver
   assert.equal(new TaskScheduler({ store: f.store, channel: f.channel, now: f.now }).list(owner).tasks.length, 1);
   f.advance(59999); await f.scheduler.tick(); assert.equal(f.sent.length, 1);
   f.advance(1); await f.scheduler.tick(); assert.equal(f.sent.length, 2);
-  assert(f.sent[1].message[0].data.text.includes('吃饭'));
+  assert.deepEqual(f.sent[1].message[0], { type: 'at', data: { qq: 'alice', name: '阿禾' } });
+  assert(f.sent[1].message.find(segment => segment.type === 'text').data.text.includes('吃饭'));
   assert.equal(f.scheduler.list(owner).tasks[0].state, 'completed');
   assert.deepEqual(f.scheduler.list(owner).runs[0].acknowledgedMessageIds, ['fixture-ack-2']);
   await f.scheduler.tick(); assert.equal(f.sent.length, 2);
@@ -248,7 +250,35 @@ test('failed image understanding is explicitly retryable and successful retries 
   assert.equal(attempts, 2); assert.equal(doc.failedImages, 0); assert(doc.text.includes('打哈欠的猫') && !doc.text.includes('模型暂时不可用'));
 });
 
-test('global natural-reply rules follow any persona and mechanically worded chat is rewritten before delivery', async () => {
+test('thumbnail notes keep their limits across restart and explicit retries replace them with original-image notes', async t => {
+  const f = fixture(t), resourceId = createHash('sha256').update('thumbnail-upgrade-fixture').digest('hex');
+  let quality = 'thumbnail', descriptions = 0, downloads = 0;
+  f.transport.media = async input => { downloads++; if (downloads > 1) assert.equal(input.preferOriginal, true); return { data: 'fixture', mediaType: 'image/png', quality, bytes: quality === 'original' ? 200000 : 3000 }; };
+  f.runner.describeImage = async image => { descriptions++; return image.quality === 'thumbnail' ? '一张截图，小字看不清。' : '截图上明确写着“周五 14:30”。'; };
+  f.receive('', { message: [{ type: 'image', data: { resourceId } }] }); await f.channel.whenIdle();
+  assert.equal(f.channel.memory.view(f.scope).lowQualityImages, 1);
+  assert.match(new ConversationMemory(new StateStore(f.root)).view(f.scope).text, /缩略图/);
+  await f.channel.memory.enrich(f.scope, f.runner, f.transport, new AbortController().signal);
+  assert.equal(downloads, 1, 'normal messages do not continuously retry unavailable originals');
+  await f.channel.memory.enrich(f.scope, f.runner, f.transport, new AbortController().signal, { retryFailed: true });
+  assert.equal(descriptions, 1, 'an unchanged thumbnail does not consume another vision model request');
+  quality = 'original';
+  await f.channel.memory.enrich(f.scope, f.runner, f.transport, new AbortController().signal, { retryFailed: true });
+  const doc = new ConversationMemory(new StateStore(f.root)).view(f.scope), image = doc.entries[0].attachments[0];
+  assert.equal(doc.lowQualityImages, 0); assert.equal(image.quality, 'original'); assert.equal(image.imageBytes, 200000); assert.equal(image.error, undefined);
+  assert.match(doc.text, /14:30/); assert(!doc.text.includes('小字看不清')); assert.equal(descriptions, 2);
+});
+
+test('image understanding prompts identify each thumbnail without treating it as a verified original', async () => {
+  const runner = new DshAgentRunner({}), requests = [];
+  runner.run = async request => { requests.push(request); return { text: request.images.length === 1 ? '图像笔记' : '["原图笔记","缩略图笔记"]' }; };
+  await runner.describeImage({ quality: 'thumbnail' }, new AbortController().signal);
+  assert.match(requests[0].text, /仅取得微信缩略图/);
+  await runner.describeImages([{ quality: 'original' }, { quality: 'thumbnail' }], new AbortController().signal);
+  assert.match(requests[1].text, /第 1 张：已取得原图/); assert.match(requests[1].text, /第 2 张：仅取得微信缩略图/);
+});
+
+test('natural-reply defaults precede the persona and mechanically worded chat is rewritten before delivery', async () => {
   const prompts = [], messages = [], answers = ['按聊天里能确定的：阿禾就是刚才问问题的那位。', '刚才问问题的那位呀。'];
   const ctx = { agentDefaultModel: { currentSelection: () => ({ provider: 'fixture', model: 'chat' }) },
     agents: { create: async options => {
@@ -259,7 +289,7 @@ test('global natural-reply rules follow any persona and mechanically worded chat
     } } };
   const result = await new DshAgentRunner(ctx, () => null, () => ({ persona: { name: '阿衡', prompt: '每次都写一份正式报告' } })).run({ text: '阿禾是谁', memory: '阿禾刚才问过一个问题。', signal: new AbortController().signal });
   assert.equal(result.text, '刚才问问题的那位呀。'); assert.equal(messages.length, 2);
-  assert(prompts[0].endsWith(NATURAL_REPLY_RULES)); assert(prompts[0].indexOf(NATURAL_REPLY_RULES) > prompts[0].indexOf('每次都写一份正式报告'));
+  assert.equal(prompts[0].split(NATURAL_REPLY_RULES).length, 2); assert(prompts[0].indexOf(NATURAL_REPLY_RULES) < prompts[0].indexOf('每次都写一份正式报告'));
   assert.equal(needsConversationalRewrite('# 第一条\n你好'), true);
   assert.equal(needsConversationalRewrite('# 分析\n细节', '请给我分析和步骤'), false);
   assert.equal(needsConversationalRewrite('1. 可以确认的关系\n2. 未知的信息', '阿禾是谁'), true);

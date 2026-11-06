@@ -3,11 +3,13 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { BridgeError, object } from '@napcat-wechat/protocol';
 import { fields, num } from './wire.js';
+import { recoverImageBaseRequest, validateImageBaseRequest } from './image-session.js';
 
 export interface ProtocolEdge { host: string; port: number }
 export interface Credential {
   uin: number; token: string; wxid: string; nickname: string; sync_key: string;
   host: string; port: number; edges: ProtocolEdge[]; heartbeat_base_request?: string;
+  image_base_request?: string;
   // A QR login (ManualAuth -> SecAutoAuth) encrypts longlink bodies with its
   // per-login key (key = IV) and checksum material. Attached-token sessions
   // omit both and use the observed defaults.
@@ -62,7 +64,9 @@ export function validateCredential(raw: unknown): Credential {
   if (body_key && body_key.length !== 32) throw new BridgeError('ERR_CREDENTIAL', 'body_key must be 16 bytes');
   const s08 = c.s08 === undefined ? undefined : hex(c.s08, 's08', 512);
   if (!!body_key !== !!s08) throw new BridgeError('ERR_CREDENTIAL', 'QR session requires both body_key and s08');
-  return { uin: Number(c.uin), token, wxid: c.wxid, nickname: typeof c.nickname === 'string' && c.nickname.length <= 256 ? c.nickname : c.wxid, sync_key, host, port: Number(port), edges, ...(base ? { heartbeat_base_request: base } : {}), ...(body_key ? { body_key, s08 } : {}) };
+  const image = c.image_base_request === undefined ? undefined : hex(c.image_base_request, 'image_base_request', 8192);
+  if (image) validateImageBaseRequest(Buffer.from(image, 'hex'), { uin: Number(c.uin), body_key });
+  return { uin: Number(c.uin), token, wxid: c.wxid, nickname: typeof c.nickname === 'string' && c.nickname.length <= 256 ? c.nickname : c.wxid, sync_key, host, port: Number(port), edges, ...(base ? { heartbeat_base_request: base } : {}), ...(image ? { image_base_request: image } : {}), ...(body_key ? { body_key, s08 } : {}) };
 }
 export class SessionStore {
   value?: Credential;
@@ -72,10 +76,17 @@ export class SessionStore {
       try { this.value = validateCredential(readJson(file)); }
       catch (error) { this.error = error instanceof Error ? error.message : String(error); }
     }
+    if (this.value && !this.value.image_base_request) {
+      const image = recoverImageBaseRequest(this.value, file);
+      if (image) {
+        try { this.save({ ...this.value, image_base_request: image }); }
+        catch { /* Keep the original text session if the additive save fails. */ }
+      }
+    }
   }
   save(value: Credential) { const next = validateCredential(value); atomicJson(this.file, next); this.value = next; this.error = undefined; }
   publicStatus() {
     const c = this.value;
-    return { present: !!c, error: this.error, account: c ? { id: c.wxid, nickname: c.nickname, uin: c.uin } : null, cursorBytes: c ? c.sync_key.length / 2 : 0, heartbeatAvailable: !!c?.heartbeat_base_request, authentication: 'qrcode-or-import', credentialMode: c ? c.body_key ? 'qrcode-session' : 'attached-token' : null, restoreVerified: false, storage: 'local-plaintext' };
+    return { present: !!c, error: this.error, account: c ? { id: c.wxid, nickname: c.nickname, uin: c.uin } : null, cursorBytes: c ? c.sync_key.length / 2 : 0, heartbeatAvailable: !!c?.heartbeat_base_request, imageUploadAvailable: !!(c?.image_base_request || c?.heartbeat_base_request), authentication: 'qrcode-or-import', credentialMode: c ? c.body_key ? 'qrcode-session' : 'attached-token' : null, restoreVerified: false, storage: 'local-plaintext' };
   }
 }

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { StateStore, WechatChannel, createPluginService, rpcHandler, identity, availableModel, selectModel } from '../lib/testing.js';
+import { StateStore, WechatChannel, createPluginService, rpcHandler, identity, availableModel, selectModel, SearchService, SEARCH_CREDENTIALS } from '../lib/testing.js';
 
 const base = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../storage/tmp');
 const account = { id: 'wxid_service_owner', nickname: '测试账号' };
@@ -80,18 +80,66 @@ function blockRunner(f) {
   return { released, started, aborted };
 }
 
+for (const conflict of ['invalid', 'stale']) test(`${conflict} identity drafts are rejected without cancelling active or queued replies`, async t => {
+  const f = fixture(t), initial = await f.service.call('identity.get');
+  const current = '# 当前全局身份\n保留正在执行的回复。';
+  if (conflict === 'stale') fs.writeFileSync(path.join(f.root, 'AGENT.md'), current, 'utf8');
+  const gate = blockRunner(f);
+  f.receive(f.message('第一问')); await gate.started.promise;
+  f.receive(f.message('排队的第二问'));
+  const release = setTimeout(() => gate.released.resolve(), 100);
+  try {
+    await assert.rejects(f.service.call('identity.save', {
+      markdown: conflict === 'invalid' ? ' \n' : '# 过期的草稿', revision: initial.revision,
+    }), isCode(conflict === 'invalid' ? 'IDENTITY_INVALID' : 'IDENTITY_CHANGED'));
+    assert.equal(f.calls[0].signal.aborted, false, 'validation must happen before draining replies');
+    assert.equal(f.channel.summary().queued, 1);
+  } finally { clearTimeout(release); gate.released.resolve(); await f.channel.whenIdle(); }
+  assert.equal(f.sent.length, 2, 'both authorized replies complete normally');
+  assert.equal((await f.service.call('identity.get')).markdown, conflict === 'stale' ? current : initial.markdown);
+});
+
+test('saving identical identity content leaves active and queued replies running', async t => {
+  const f = fixture(t), initial = await f.service.call('identity.get'), gate = blockRunner(f);
+  f.receive(f.message('第一问')); await gate.started.promise;
+  f.receive(f.message('排队的第二问'));
+  const release = setTimeout(() => gate.released.resolve(), 100);
+  try {
+    await f.service.call('identity.save', { markdown: initial.markdown, revision: initial.revision });
+    assert.equal(f.calls[0].signal.aborted, false); assert.equal(f.channel.summary().queued, 1);
+  } finally { clearTimeout(release); gate.released.resolve(); await f.channel.whenIdle(); }
+  assert.equal(f.sent.length, 2); assert.deepEqual(await f.service.call('identity.get'), initial);
+});
+
 test('new configuration and records endpoints remain owner-only', async t => {
   const f = fixture(t), agent = { principal: { kind: 'agent' } };
-  for (const endpoint of ['changelog', 'model.configure', 'persona.save', 'storage.save', 'conversation.configure', 'records.list']) {
+  for (const endpoint of ['changelog', 'model.configure', 'search.credentials', 'persona.save', 'storage.save', 'conversation.configure', 'records.list']) {
     const response = await f.rpc(endpoint, {}, undefined, agent);
     assert.equal(response.ok, false); assert.equal(response.error.code, 'OWNER_REQUIRED');
   }
-  assert.deepEqual(f.store.modelConfig(), { maxTokens: 4096, temperature: null, vision: true, visionModel: null, webSearch: false });
+  assert.deepEqual(f.store.modelConfig(), { maxTokens: 4096, temperature: null, vision: true, visionModel: null, webSearch: false, searchProvider: 'tavily', tavilyBaseURL: 'https://api.tavily.com' });
   assert.equal(f.store.persona().name, '微信助手');
   assert.equal(f.workerCalls.length, 0);
   const owner = { principal: { kind: 'owner' } };
   const response = await f.rpc('model.configure', { modelConfig: { maxTokens: 1024, temperature: 0.6 } }, undefined, owner);
   assert.equal(response.ok, true); assert.equal(response.value.modelConfig.maxTokens, 1024);
+});
+
+test('owner search credential updates preserve active replies and never return the stored key', async t => {
+  const f = fixture(t), stored = new Map();
+  f.runner.search = new SearchService({ credentials: {
+    set: async (ref, value) => { stored.set(ref, value); },
+    describe: async ref => ({ configured: stored.has(ref) }),
+  } });
+  const gate = blockRunner(f); f.receive(f.message('正在回复')); await gate.started.promise;
+  try {
+    const result = await f.rpc('search.credentials', { provider: 'tavily', apiKey: 'fixture-owner-search-key' }, undefined, { principal: { kind: 'owner' } });
+    assert.equal(result.ok, true); assert.equal(result.value.search.credentials.tavily, true);
+    assert.equal(stored.get(SEARCH_CREDENTIALS.tavily), 'fixture-owner-search-key');
+    assert(!JSON.stringify(result).includes('fixture-owner-search-key'));
+    assert.equal(f.calls[0].signal.aborted, false); assert.equal(f.workerCalls.length, 0);
+  } finally { gate.released.resolve(); await f.channel.whenIdle(); }
+  assert.equal(f.sent.length, 1);
 });
 
 test('configuration rejects stale accounts and invalid conversation identities before changing settings', async t => {
@@ -144,13 +192,13 @@ test('model parameters persist without cancelling an inference that already capt
   const f = fixture(t), block = blockRunner(f);
   f.receive(f.message()); await block.started.promise;
   const result = await f.service.call('model.configure', { modelConfig: { maxTokens: 2048, temperature: 0 } });
-  assert.deepEqual(result.modelConfig, { maxTokens: 2048, temperature: 0, vision: true, visionModel: null, webSearch: false });
+  assert.deepEqual(result.modelConfig, { maxTokens: 2048, temperature: 0, vision: true, visionModel: null, webSearch: false, searchProvider: 'tavily', tavilyBaseURL: 'https://api.tavily.com' });
   assert.equal(f.calls[0].signal.aborted, false);
   block.released.resolve(); await f.channel.whenIdle();
   assert.equal(f.sent.length, 1);
-  assert.deepEqual(new StateStore(f.root).modelConfig(), { maxTokens: 2048, temperature: 0, vision: true, visionModel: null, webSearch: false });
+  assert.deepEqual(new StateStore(f.root).modelConfig(), { maxTokens: 2048, temperature: 0, vision: true, visionModel: null, webSearch: false, searchProvider: 'tavily', tavilyBaseURL: 'https://api.tavily.com' });
   await assert.rejects(f.service.call('model.configure', { modelConfig: { maxTokens: 1, temperature: 5 } }), isCode('INVALID_MODEL_CONFIG'));
-  assert.deepEqual(f.store.modelConfig(), { maxTokens: 2048, temperature: 0, vision: true, visionModel: null, webSearch: false });
+  assert.deepEqual(f.store.modelConfig(), { maxTokens: 2048, temperature: 0, vision: true, visionModel: null, webSearch: false, searchProvider: 'tavily', tavilyBaseURL: 'https://api.tavily.com' });
 });
 
 test('cancelling follow-default selection before or during validation preserves the saved model', async t => {

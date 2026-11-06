@@ -127,10 +127,24 @@ export function decodeFrame(frame: Buffer, key?: Buffer, s08?: Buffer): { cmd: n
   if (sum !== 0n && Number(sum) !== checksum(body, uin, selected.checksumMaterial)) fail('Longlink checksum mismatch');
   return { cmd: frame.readUInt32BE(8), seq: frame.readUInt32BE(12), uin, innerCmd, body };
 }
+// Shortlink HTTP carries the same authenticated/encrypted CGI envelope without
+// the 16-byte TCP routing header. Reuse the checked body codec for both routes.
+export function encodeCgiBody(cmd: number, body: Buffer, uin: number, token: string, key?: Buffer, s08?: Buffer) {
+  return encodeFrame(cmd, body, uin, token, 0, key, s08).subarray(16);
+}
+export function decodeCgiBody(body: Buffer, key?: Buffer, s08?: Buffer) {
+  const frame = Buffer.concat([u32(body.length + 16), u32(MAGIC), u32(0), u32(0), body]);
+  const decoded = decodeFrame(frame, key, s08);
+  return { uin: decoded.uin, innerCmd: decoded.innerCmd, body: decoded.body };
+}
 const MSG_SOURCE = '<msgsource>\n    <sec_msg_node>\n        <alnode>\n            <fr>1</fr>\n        </alnode>\n    </sec_msg_node>\n    <pua>1</pua>\n</msgsource>\n';
-export function sendRequest(peer: string, text: string) {
+export function sendRequest(peer: string, text: string, mentions: readonly string[] = []) {
+  if (!Array.isArray(mentions) || mentions.length > 20 || mentions.some(id => typeof id !== 'string' || !/^[\w@.:-]{1,256}$/.test(id) || id.endsWith('@chatroom') || /^(?:all|@all|notify@all)$/i.test(id)) || mentions.length && !peer.endsWith('@chatroom'))
+    throw new BridgeError('ERR_INVALID_PARAMS', '真正 @ 只支持指定群成员，不支持私聊或 @所有人', { delivery: 'rejected' });
+  const ids = [...new Set(mentions)];
+  const source = ids.length ? MSG_SOURCE.replace('<msgsource>\n', `<msgsource>\n    <atuserlist><![CDATA[${ids.join(',')}]]></atuserlist>\n`) : MSG_SOURCE;
   const f4 = Date.now() >>> 0, f5 = randomBytes(4).readUInt32BE();
-  return { f4, f5, body: Buffer.concat([fv(1, 1), ld(2, Buffer.concat([ld(1, ld(1, peer)), ld(2, text), fv(3, 1), fv(4, f4), fv(5, f5), ld(6, MSG_SOURCE)]))]) };
+  return { f4, f5, body: Buffer.concat([fv(1, 1), ld(2, Buffer.concat([ld(1, ld(1, peer)), ld(2, text), fv(3, 1), fv(4, f4), fv(5, f5), ld(6, source)]))]) };
 }
 export function sendResponse(body: Buffer, f4: number, f5: number) {
   const fs = fields(body), base = fields(bytes(fs, 1)), message = fields(bytes(fs, 3));
@@ -145,6 +159,39 @@ export function sendResponse(body: Buffer, f4: number, f5: number) {
 // ThePeppy/wechat-api-ipad (see THIRD_PARTY_NOTICES.md). A chunk ACK alone is
 // never reported as delivery of the whole image.
 export const IMAGE_CHUNK_BYTES = 50_000;
+export const IMAGE_DOWNLOAD_CHUNK_BYTES = 65_536;
+export const MAX_DOWNLOAD_IMAGE_BYTES = 10 * 1024 * 1024;
+export interface ImageDownload {
+  messageId: string; from: string; to: string; total: number; baseRequest: Buffer; compressType: 0 | 1;
+}
+/** GetMsgImg CGI 109, using the observed message's server ID and authenticated account. */
+export function imageDownloadRequest(image: ImageDownload, start: number): Buffer {
+  if (!/^[1-9]\d{0,19}$/.test(image.messageId) || BigInt(image.messageId) > 0xffffffffffffffffn ||
+      !Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(image.total) || image.total < 0 || image.total > MAX_DOWNLOAD_IMAGE_BYTES ||
+      (image.total > 0 ? start >= image.total : start !== 0) || ![0, 1].includes(image.compressType))
+    throw new BridgeError('ERR_IMAGE_REQUEST', '图片下载的消息或分片参数无效');
+  const length = image.total ? Math.min(IMAGE_DOWNLOAD_CHUNK_BYTES, image.total - start) : IMAGE_DOWNLOAD_CHUNK_BYTES;
+  return Buffer.concat([ld(1, image.baseRequest), fv(2, 0), ld(3, ld(1, image.from)), ld(4, ld(1, image.to)),
+    fv(5, image.total), fv(6, start), fv(7, length), fv(8, image.compressType), fv(9, BigInt(image.messageId))]);
+}
+export function imageDownloadResponse(body: Buffer, image: ImageDownload, start: number): { content: Buffer; total: number } {
+  const fs = fields(body), ret = signed(num(fields(bytes(fs, 1)), 1));
+  if (ret === undefined) fail('图片下载响应缺少状态');
+  if (ret !== 0) throw new BridgeError('ERR_IMAGE_DOWNLOAD_REJECTED', '微信暂未提供这张高清图片，资源可能已过期', { ret });
+  const id = num(fs, 9) || num(fs, 2);
+  if (id !== BigInt(image.messageId) || unstring(bytes(fs, 3)) !== image.from || unstring(bytes(fs, 4)) !== image.to)
+    fail('图片下载响应不属于本次消息或账号，未使用返回内容');
+  const total = Number(num(fs, 5)), position = num(fs, 6), length = Number(num(fs, 7));
+  const wrapped = fields(bytes(fs, 8)), content = bytes(wrapped, 2);
+  if (!Number.isSafeInteger(total) || total <= 0) fail('图片下载响应缺少有效的完整大小');
+  if (total > MAX_DOWNLOAD_IMAGE_BYTES)
+    throw new BridgeError('ERR_IMAGE_TOO_LARGE', '高清图片超过 10 MiB，未继续下载');
+  if (image.total && total !== image.total || !content.length || content.length > IMAGE_DOWNLOAD_CHUNK_BYTES ||
+      length !== content.length || num(wrapped, 1) !== BigInt(content.length) || start + content.length > total ||
+      position !== BigInt(start) && position !== BigInt(start + content.length))
+    fail('图片下载分片的大小或位置不匹配，未拼接错误图片');
+  return { content, total };
+}
 export interface ImageUpload {
   clientId: string; from: string; to: string; total: number; time: number;
   baseRequest: Buffer; extension: 'png' | 'jpg';

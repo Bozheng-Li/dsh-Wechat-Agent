@@ -6,15 +6,17 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { deflateSync } from 'node:zlib';
 import { rolldown } from 'rolldown';
-import { StateStore, WechatChannel, TaskScheduler, VERSION, identity, createPluginService, rpcHandler, ChannelError } from '../lib/testing.js';
+import { StateStore, WechatChannel, TaskScheduler, AgentIdentity, VERSION, identity, createPluginService, rpcHandler, ChannelError, describeWorkspace, migrateWorkspaceRoot, SearchService } from '../lib/testing.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const electron = process.argv[2] || process.env.ELECTRON_PATH;
 if (!electron || !path.isAbsolute(electron) || !fs.existsSync(electron)) throw new Error('Pass an Electron executable: npm run test:ui -- <absolute path to electron.exe>');
-const out = path.join(root, 'storage/logs/ui-preview');
+const out = path.join(root, 'storage/logs', process.env.WECHAT_UI_TEST_TASKS_ONLY === '1' ? 'tasks-layout-preview' : 'ui-preview');
 fs.mkdirSync(out, { recursive: true });
 fs.mkdirSync(path.join(root, 'storage/tmp'), { recursive: true });
 const fixture = fs.mkdtempSync(path.join(root, 'storage/tmp/ui-preview-'));
+const bootstrap = path.join(fixture, 'initial');
+const paths = { bootstrap, basePath: path.join(fixture, 'relocated'), workspacePath: path.join(fixture, 'custom-workspace'), recordsPath: path.join(fixture, 'custom-records'), conversationPath: path.join(fixture, 'custom-alpha') };
 const token = randomBytes(24).toString('hex');
 const accountId = 'wxid_ui_fixture';
 const crc32 = data => { let value = 0xffffffff; for (const byte of data) { value ^= byte; for (let bit = 0; bit < 8; bit++) value = (value >>> 1) ^ (value & 1 ? 0xedb88320 : 0); } return (value ^ 0xffffffff) >>> 0; };
@@ -36,9 +38,11 @@ function fixtureZip(items) {
 }
 // An ancillary PNG chunk makes the ZIP cross the real 256 KiB upload boundary.
 const assetZip = fixtureZip([{ name: '赞同/红色方块.png', data: fixturePng([220, 66, 66], 300 * 1024) }, { name: '冷静/绿色方块.png', data: fixturePng([44, 168, 112]) }]);
-const store = new StateStore(fixture);
+let store = new StateStore(bootstrap), activeRoot = bootstrap;
 store.ensureWorkspace();
+store.setStorageSettings({ workspacePath: paths.workspacePath, recordsPath: paths.recordsPath });
 store.configure(accountId, { enabled: true, privatePeers: ['wxid_alice'], groups: ['group_alpha@chatroom', 'group_beta@chatroom'], prompt: '回答清楚、简洁。' });
+store.setConversationSettings(accountId, 'group', 'group_alpha@chatroom', { ...store.conversationSettings(accountId, 'group', 'group_alpha@chatroom'), recordsPath: paths.conversationPath });
 store.setPersona({ name: '小胖', aliases: ['胖胖'], background: '一起讨论产品与日常生活的 AI 同事。', personality: '友好、坦诚、有好奇心。', style: '自然简洁，不机械复述。' });
 const contacts = {
   privatePeers: [
@@ -64,10 +68,26 @@ for (const [chatType, peerId, count, label] of [['group', 'group_alpha@chatroom'
   }
 }
 let state = { account: { id: accountId, nickname: '小胖·界面测试' }, online: true, state: 'online', runtimeReady: true, login: { state: 'online', running: false } };
+const memberRequests = [], migrations = [];
+const members = {
+  'group_alpha@chatroom': [
+    { id: 'wxid_alice', name: 'Alice·产品同事', card: 'Alice·产品同事', nickname: 'Alice', remark: '产品负责人' },
+    { id: 'wxid_bob', name: 'Bob·设计同事', card: 'Bob·设计同事', nickname: 'Bob', remark: '视觉设计' },
+    { id: 'wxid_li_ming_a', name: '李明', card: '李明', nickname: '明同学', remark: '研发同事' },
+    { id: 'wxid_li_ming_b', name: '李明', card: '李明', nickname: '小明', remark: '设计同事' },
+  ],
+  'group_beta@chatroom': [{ id: 'wxid_weekend', name: '周末小伙伴', card: '周末小伙伴', nickname: '周末同学' }],
+  'group_gamma@chatroom': [],
+};
 const worker = {
   status: () => structuredClone(state),
-  async call(endpoint) {
+  async call(endpoint, payload = {}) {
     if (endpoint === 'contacts') return structuredClone(contacts);
+    if (endpoint === 'members') {
+      if (payload.accountId !== state.account?.id || !Object.hasOwn(members, payload.peerId)) throw new Error('Unexpected synthetic member scope');
+      memberRequests.push(structuredClone(payload));
+      return { accountId: payload.accountId, peerId: payload.peerId, scope: 'protocol-observed-only', members: (members[payload.peerId] || []).map(member => ({ ...member, groupId: payload.peerId })) };
+    }
     if (endpoint === 'connect') state.online = true;
     if (endpoint === 'disconnect') state.online = false;
     return structuredClone(state);
@@ -78,11 +98,42 @@ const assetAnalysisRequests = [];
 const runner = { selection: () => store.modelChoice() || { provider: 'fixture', model: 'alpha' }, defaultSelection: () => ({ provider: 'fixture', model: 'alpha' }),
   async describeImages(images, signal) { signal.throwIfAborted(); assetAnalysisRequests.push(images.length); return images.map(() => '合成方块，用于表达赞同或让讨论冷静下来。'); },
   async run() { throw new Error('The UI fixture must never generate a model response'); } };
-const channel = new WechatChannel({ store, runner, transport: worker });
+let channel = new WechatChannel({ store, runner, transport: worker });
 // This fixture checks owner UI/RPC and durable files. Automatic extraction must not
 // drain its deliberately queued cancellation samples or call a real model.
 channel.maintainMemory = () => {};
-const scheduler = new TaskScheduler({ store, channel }); channel.scheduler = scheduler;
+let scheduler = new TaskScheduler({ store, channel }); channel.scheduler = scheduler;
+let agentIdentity = new AgentIdentity(activeRoot);
+const preservedFiles = Object.fromEntries(Object.entries(describeWorkspace(activeRoot, store)).filter(([key]) => ['workspacePath', 'recordsPath', 'memoryPath', 'assetsPath', 'tasksPath', 'loginPath', 'cachePath'].includes(key)).map(([key, directory]) => {
+  fs.mkdirSync(directory, { recursive: true }); const file = path.join(directory, 'ui-preserved.txt'), content = 'Synthetic data preserved for ' + key;
+  fs.writeFileSync(file, content); return [key, { file, content }];
+}));
+function openFixtureRuntime(nextRoot) {
+  const nextStore = new StateStore(nextRoot); nextStore.ensureWorkspace();
+  const nextChannel = new WechatChannel({ store: nextStore, runner, transport: worker }); nextChannel.maintainMemory = () => {};
+  const nextScheduler = new TaskScheduler({ store: nextStore, channel: nextChannel }); nextChannel.scheduler = nextScheduler;
+  return { root: nextRoot, store: nextStore, channel: nextChannel, scheduler: nextScheduler, identity: new AgentIdentity(nextRoot), worker, runner };
+}
+function installFixtureRuntime(runtime) {
+  ({ root: activeRoot, store, channel, scheduler, identity: agentIdentity } = runtime);
+  service.replaceRuntime(runtime);
+}
+async function relocateWorkspace(targetRoot, signal) {
+  signal?.throwIfAborted();
+  const previous = { root: activeRoot, store, channel, scheduler };
+  await previous.scheduler.close(); await previous.channel.close();
+  let transfer, next;
+  try {
+    signal?.throwIfAborted();
+    transfer = migrateWorkspaceRoot({ bootstrap, store: previous.store, targetRoot });
+    next = openFixtureRuntime(transfer.root); signal?.throwIfAborted();
+    transfer.commit(); transfer = undefined;
+    installFixtureRuntime(next); migrations.push({ from: previous.root, to: activeRoot });
+  } catch (error) {
+    await next?.scheduler.close(); await next?.channel.close(); transfer?.rollback();
+    installFixtureRuntime(openFixtureRuntime(previous.root)); throw error;
+  }
+}
 function appendFixtureRecord(peerId, queued = false) {
   if (!['group_alpha@chatroom', 'group_beta@chatroom'].includes(peerId)) throw new Error('Unknown synthetic conversation');
   const id = `ui-live-${++sequence}`, chatType = 'group', key = identity([accountId, chatType, peerId, id]);
@@ -97,11 +148,16 @@ function appendFixtureRecord(peerId, queued = false) {
   else store.update(record, { state: 'sent', reply: '仅用于离线界面验证的合成回复。', acknowledgedMessageIds: [`fixture-ack-${sequence}`] });
   return key;
 }
-const ctx = { llm: { listProviders: () => [{ id: 'fixture' }], listModels: async () => [{ id: 'alpha' }, { id: 'beta' }] } };
-const service = createPluginService({ ctx, root: fixture, store, worker, runner, channel, dshSessionPath: path.join(fixture, 'host-sessions') });
-const rpc = rpcHandler(service), failures = new Set(), cancelRequests = [], assetUploadRequests = [];
+const searchKeys = new Map();
+const ctx = { llm: { listProviders: () => [{ id: 'fixture' }], listModels: async () => [{ id: 'alpha' }, { id: 'beta' }] }, credentials: {
+  set: async (ref, value) => { searchKeys.set(ref, value); },
+  resolve: async ref => searchKeys.has(ref) ? { value: searchKeys.get(ref) } : undefined,
+  describe: async ref => ({ configured: searchKeys.has(ref) }),
+} };
+runner.search = new SearchService(ctx, { fetchImpl: async () => { throw new Error('UI fixture must not call a real search endpoint'); } });
+const service = createPluginService({ ctx, root: activeRoot, store, worker, runner, channel, scheduler, identity: agentIdentity, relocateWorkspace, dshSessionPath: path.join(fixture, 'host-sessions') });
+const rpc = rpcHandler(service), failures = new Set(), cancelRequests = [], assetUploadRequests = [], storageRequests = [], identityRequests = [];
 let lastHistoryRequest = null;
-const paths = { workspacePath: path.join(fixture, 'custom-workspace'), recordsPath: path.join(fixture, 'custom-records'), conversationPath: path.join(fixture, 'custom-alpha') };
 const build = await rolldown({ input: path.join(root, 'tests/fixtures/ui-entry.jsx'), platform: 'browser', transform: { define: { 'process.env.NODE_ENV': JSON.stringify('production') } } });
 let script;
 try { script = (await build.generate({ format: 'iife' })).output.find(item => item.type === 'chunk').code; }
@@ -118,11 +174,39 @@ const server = http.createServer(async (req, res) => {
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     if (req.url === '/fixture') {
       if (body.command === 'state') { json(res, service.call('status')); return; }
+      if (body.command === 'searchFailure') { runner.searchStatus = () => ({ ok: false, provider: 'tavily', code: 'WEB_SEARCH_AUTH_FAILED', message: 'Tavily 搜索接口返回 HTTP 401，请检查 Tavily API Key 与访问权限。', checkedAt: new Date().toISOString() }); json(res, { ok: true }); return; }
       if (body.command === 'paths') { json(res, paths); return; }
-      if (body.command === 'stats') { json(res, { lastHistoryRequest, cancelRequests, tasks: scheduler.list(accountId).tasks, assetUploadRequests, assetAnalysisRequests }); return; }
+      if (body.command === 'stats') { json(res, { lastHistoryRequest, cancelRequests, tasks: scheduler.list(accountId).tasks, assetUploadRequests, assetAnalysisRequests, memberRequests, migrations, storageRequests, identityRequests, activeRoot, storeFile: store.file, identityPath: agentIdentity.file, preservedFiles }); return; }
+      if (body.command === 'identity') { json(res, agentIdentity.view()); return; }
+      if (body.command === 'editIdentityExternally') {
+        const markdown = body.payload?.markdown;
+        if (typeof markdown !== 'string' || !markdown.trim() || markdown.length > 32000 || markdown.includes('\0')) throw new Error('Invalid synthetic identity Markdown');
+        fs.writeFileSync(agentIdentity.file, markdown, 'utf8'); json(res, agentIdentity.view()); return;
+      }
       if (body.command === 'assetZip') { json(res, { name: '界面测试表情.zip', data: assetZip.toString('base64'), bytes: assetZip.length }); return; }
       if (body.command === 'assets') { json(res, channel.library.list(state.account.id)); return; }
       if (body.command === 'globalMemory') { json(res, channel.longMemory.view(state.account.id)); return; }
+      if (body.command === 'taskHistory') {
+        if (scheduler.data.tasks.some(task => task.id === 'ui-history-completed-0')) throw new Error('Task history fixture already seeded');
+        const stamp = Date.now(), planned = stamp - 3600000;
+        const base = { accountId, chatType: 'group', peerId: 'group_alpha@chatroom', senderId: accountId, senderName: '管理员', source: 'owner', kind: 'message',
+          schedule: { kind: 'once', at: planned }, nextRunAt: planned, createdAt: planned - 3600000, updatedAt: stamp, revision: 1, lastError: null };
+        const append = (id, patch, runs = []) => { scheduler.data.tasks.push({ ...base, id, ...patch }); scheduler.data.runs.push(...runs.map(run => ({ accountId, taskId: id, scheduledAt: planned, startedAt: planned + 1000, ...run }))); };
+        for (let index = 0; index < 24; index++) {
+          const id = 'ui-history-completed-' + index, finishedAt = stamp - index * 60000;
+          append(id, { content: `已完成的合成提醒 ${index + 1}：按时喝水`, peerId: index % 2 ? 'group_beta@chatroom' : base.peerId, state: 'completed', lastState: 'sent', runId: id + '-run', updatedAt: finishedAt + 15000 },
+            [{ id: id + '-run', state: 'sent', finishedAt, acknowledgedMessageIds: ['fixture-history-ack-' + index] }]);
+        }
+        append('ui-history-daily', { content: '每日合成提醒：汇总今天的行动项', kind: 'agent', schedule: { kind: 'daily', time: '18:00', timeZone: 'Asia/Shanghai' }, nextRunAt: stamp + 86400000, state: 'pending', lastState: 'sent', runId: 'daily-run-0' },
+          [0, 1, 2].map(index => ({ id: 'daily-run-' + index, state: 'sent', finishedAt: stamp - index * 86400000 - 5000, acknowledgedMessageIds: ['fixture-daily-ack-' + index] })));
+        append('ui-history-pending', { content: '待执行的合成提醒：十分钟后休息一下', state: 'pending', lastState: null, nextRunAt: stamp + 600000 });
+        append('ui-history-unknown', { content: '需要核对的合成提醒：结果不明', state: 'paused', lastState: 'unknown', lastError: '没有收到微信确认，请先核对记录，不自动重发。', runId: 'unknown-run' },
+          [{ id: 'unknown-run', state: 'unknown', reason: '没有收到微信确认，请先核对记录，不自动重发。', finishedAt: stamp, acknowledgedMessageIds: [] }]);
+        append('ui-history-expired', { content: '已过期的合成提醒：无需补发', state: 'expired', lastState: 'expired', lastError: '超过计划时间十分钟，已跳过。' });
+        append('ui-history-late-ack', { content: '取消后的合成提醒：保留真实回执', state: 'cancelled', lastState: 'sent', runId: 'late-ack-run', updatedAt: stamp + 1000 },
+          [{ id: 'late-ack-run', state: 'sent', finishedAt: stamp + 2000, acknowledgedMessageIds: ['fixture-late-ack'] }]);
+        scheduler.save(); json(res, { completedAt: stamp, plannedAt: planned }); return;
+      }
       if (body.command === 'appendRecords') {
         const count = body.payload?.count;
         if (!Number.isSafeInteger(count) || count < 1 || count > 10) throw new Error('Invalid fixture count');
@@ -139,6 +223,8 @@ const server = http.createServer(async (req, res) => {
       }
       throw new Error('Unsupported fixture command');
     }
+    if (body.endpoint === 'storage.save') storageRequests.push(structuredClone(body.payload));
+    if (body.endpoint === 'identity.save') identityRequests.push(structuredClone(body.payload));
     if (failures.delete(body.endpoint)) { json(res, { ok: false, error: { code: 'FIXTURE_FAILURE', message: '界面测试：模拟保存失败，原设置保留' } }); return; }
     if (body.endpoint === 'records.list') lastHistoryRequest = body.payload;
     if (body.endpoint === 'cancel') cancelRequests.push(body.payload);
@@ -158,6 +244,6 @@ try {
   const env = { ...process.env, WECHAT_UI_TEST_ORIGIN: origin }; delete env.ELECTRON_RUN_AS_NODE;
   const child = spawn(electron, [path.join(root, 'scripts/test-ui-driver.cjs'), 'ui-fixture', out], { cwd: root, windowsHide: true, stdio: 'inherit', env });
   const exit = await new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', code => resolve(code)); });
-  if (exit !== 0) throw new Error(`UI verification failed (${exit}); see storage/logs/ui-preview/report.json`);
+  if (exit !== 0) throw new Error(`UI verification failed (${exit}); see ${path.join(out, 'report.json')}`);
   fs.writeFileSync(path.join(out, 'fixture-summary.json'), JSON.stringify({ ok: true, root: fixture, version: VERSION, actualWeChatMessages: 0, actualModelRequests: 0 }, null, 2));
 } finally { await scheduler.close(); await channel.close(); await new Promise(resolve => server.close(resolve)); }

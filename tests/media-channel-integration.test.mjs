@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { deflateSync } from 'node:zlib';
-import { StateStore, WechatChannel, createPluginService, ChannelError } from '../lib/testing.js';
+import { StateStore, WechatChannel, createPluginService, rpcHandler, ChannelError } from '../lib/testing.js';
 
 const accountId = 'media-integration-owner', peerId = 'media-integration@chatroom';
 const scope = { accountId, chatType: 'group', peerId };
@@ -126,4 +126,57 @@ test('removing an unselected asset does not cancel an unrelated text reply', asy
   assert.equal(cancelled, false); assert.equal(f.record().state, 'sending');
   gate.complete.resolve({ delivery: 'server-ack', serverMessageIds: ['9007199254740999'] }); await f.channel.whenIdle();
   assert.equal(f.record().state, 'sent'); assert.equal(f.outgoing()[0].text, '正常的文字回复');
+});
+
+for (const phase of ['before-prepare', 'after-prepare']) test(`disabling a selected media group ${phase} prevents its image from crossing the send boundary`, async t => {
+  const f = fixture(t), packId = f.asset.packId;
+  if (phase === 'before-prepare') {
+    const original = f.runner.run;
+    f.runner.run = async input => { const result = await original(input); f.channel.library.configurePack(accountId, packId, false); return result; };
+  } else {
+    const original = f.channel.library.prepareSendContent.bind(f.channel.library);
+    f.channel.library.prepareSendContent = async (...args) => { const image = await original(...args); f.channel.library.configurePack(accountId, packId, false); return image; };
+  }
+  f.receive(); await f.channel.whenIdle();
+  assert.equal(f.sent.length, 0); assert.equal(f.outgoing().length, 0); assert.equal(f.record().state, 'failed');
+  assert.equal(f.channel.library.resolveAsset(accountId, f.asset.id, { enabledOnly: false }).enabled, true);
+});
+
+test('disabling a group reconciles an in-flight ACK before saving the disabled state', async t => {
+  const f = fixture(t), gate = holdSend(f); f.receive(); await gate.started.promise;
+  let saved = false;
+  const disabling = f.service.call('assets.packs.configure', { accountId, packId: f.asset.packId, enabled: false }).then(result => { saved = true; return result; });
+  await gate.cancelled.promise; assert.equal(saved, false);
+  gate.complete.resolve({ delivery: 'server-ack', serverMessageIds: ['9007199254740999'] });
+  await disabling; await f.channel.whenIdle();
+  assert.equal(f.record().state, 'sent'); assert.equal(f.outgoing().length, 1);
+  assert.equal(f.channel.library.packs(accountId).find(pack => pack.id === f.asset.packId).enabled, false);
+  assert.deepEqual(f.channel.library.search(accountId), []);
+});
+
+test('group switches leave unrelated text replies running and reject stale accounts and non-owner RPC peers', async t => {
+  const f = fixture(t); f.runner.run = async () => ({ text: '普通文字回复' });
+  const gate = holdSend(f); f.receive(); await gate.started.promise;
+  let cancelled = false; gate.cancelled.promise.then(() => { cancelled = true; });
+  await f.service.call('assets.packs.configure', { accountId, packId: f.asset.packId, enabled: false });
+  assert.equal(cancelled, false);
+  await assert.rejects(f.service.call('assets.packs.configure', { accountId: 'other-owner', packId: f.asset.packId, enabled: true }), { code: 'ACCOUNT_CHANGED' });
+  const builtin = f.channel.library.builtins.packs[0], rpc = rpcHandler(f.service);
+  for (const endpoint of ['assets.packs.content', 'assets.packs.configure']) {
+    const result = await rpc(endpoint, { accountId, packId: builtin.id, assetId: builtin.items[0].id, enabled: true }, undefined, { principal: { kind: 'guest' } });
+    assert.equal(result.ok, false); assert.equal(result.error.code, 'OWNER_REQUIRED');
+  }
+  assert.throws(() => f.service.call('assets.packs.content', { accountId: 'other-owner', packId: builtin.id, assetId: builtin.items[0].id }), { code: 'ACCOUNT_CHANGED' });
+  gate.complete.resolve({ delivery: 'server-ack', serverMessageIds: ['9007199254740999'] }); await f.channel.whenIdle();
+  assert.equal(f.record().state, 'sent');
+});
+
+test('cancelling a group change during drain leaves the previous group state saved', async t => {
+  const f = fixture(t), gate = holdSend(f), controller = new AbortController(); f.receive(); await gate.started.promise;
+  const disabling = f.service.call('assets.packs.configure', { accountId, packId: f.asset.packId, enabled: false }, controller.signal);
+  const rejected = assert.rejects(disabling, { name: 'AbortError' });
+  await gate.cancelled.promise; controller.abort();
+  gate.complete.resolve({ delivery: 'server-ack', serverMessageIds: ['9007199254740999'] }); await rejected; await f.channel.whenIdle();
+  assert.equal(f.channel.library.packs(accountId).find(pack => pack.id === f.asset.packId).enabled, true);
+  assert.equal(f.record().state, 'sent'); assert.equal(f.channel.pauses.size, 0);
 });

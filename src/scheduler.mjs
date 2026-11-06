@@ -6,6 +6,23 @@ import { ChannelError, eligible } from './contracts.mjs';
 
 const clone = value => structuredClone(value);
 const active = new Set(['pending', 'running']);
+const MAX_TASK_TARGETS = 20;
+const memberId = value => typeof value === 'string' && /^[\w@.:-]{1,256}$/.test(value) && !value.endsWith('@chatroom') && !/^(?:all|@all|notify@all)$/i.test(value);
+const memberName = value => typeof value === 'string' && !!value.trim() && value.length <= 256 && !/[\u0000-\u001f\u007f]/.test(value);
+const searchName = value => String(value || '').normalize('NFKC').trim().replace(/^@/, '').replace(/\s+/gu, ' ').toLocaleLowerCase('zh-CN');
+const everyoneName = value => /^(?:all|notify@all|所有人|全体成员|全体|大家|我们)$/i.test(searchName(value));
+function savedTargets(value, scope) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > MAX_TASK_TARGETS) throw new ChannelError('INVALID_TASK_TARGET', '每个任务最多选择 20 位提醒对象');
+  if (value.length && scope.chatType !== 'group') throw new ChannelError('TASK_TARGET_GROUP_ONLY', '真正 @ 只支持群聊；私聊任务不需要选择提醒对象');
+  const targets = new Map();
+  for (const target of value) {
+    if (!target || typeof target !== 'object' || Array.isArray(target) || !memberId(target.id) || !memberName(target.name))
+      throw new ChannelError('INVALID_TASK_TARGET', '提醒对象必须是已核对的群成员，请重新按名称选择；不支持 @所有人');
+    targets.set(target.id, { id: target.id, name: target.name.trim() });
+  }
+  return [...targets.values()];
+}
 export function nextDaily(time, after, timeZone = 'Asia/Shanghai') {
   if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) throw new ChannelError('INVALID_TASK', '每日时间请填写 00:00–23:59');
   let format;
@@ -50,6 +67,10 @@ export class TaskScheduler {
     this.data ??= { version: 1, ownerStoreId: store.data.storeId, tasks: [], runs: [] };
     if (this.data.version !== 1 || this.data.ownerStoreId !== store.data.storeId || !Array.isArray(this.data.tasks) || !Array.isArray(this.data.runs))
       throw new ChannelError('TASKS_INVALID', '定时任务数据格式或归属有误，未执行任务');
+    for (const task of this.data.tasks) {
+      try { task.targets = savedTargets(task.targets, task); }
+      catch { throw new ChannelError('TASKS_INVALID', '定时任务中的提醒对象无效，已停止调度；请保留文件并核对任务数据'); }
+    }
     for (const task of this.data.tasks) if (task.state === 'running') {
       const record = store.data.records.find(record => record.key === task.recordKey);
       task.state = record?.state === 'sent' && task.schedule.kind === 'once' ? 'completed' : 'paused';
@@ -69,11 +90,62 @@ export class TaskScheduler {
     if (fromChat && this.store.conversationSettings(selector.accountId, selector.chatType, selector.peerId).allowChatTasks === false)
       throw new ChannelError('TASK_NOT_AUTHORIZED', '管理员已关闭这个会话的聊天定时任务');
   }
+  async resolveTargets(value, scope, signal) {
+    if (value === undefined || Array.isArray(value) && !value.length) return [];
+    if (!Array.isArray(value) || value.length > MAX_TASK_TARGETS) throw new ChannelError('INVALID_TASK_TARGET', '每个任务最多选择 20 位提醒对象');
+    if (scope.chatType !== 'group' || typeof scope.peerId !== 'string' || !scope.peerId.endsWith('@chatroom'))
+      throw new ChannelError('TASK_TARGET_GROUP_ONLY', '真正 @ 只支持群聊；私聊任务不需要选择提醒对象');
+    const requests = value.map(target => {
+      if (typeof target === 'string') target = { name: target };
+      if (!target || typeof target !== 'object' || Array.isArray(target) || target.id !== undefined && !memberId(target.id) || target.id === undefined && (!memberName(target.name) || !searchName(target.name) || everyoneName(target.name)))
+        throw new ChannelError('INVALID_TASK_TARGET', '请按群成员名称选择提醒对象；不支持 @所有人');
+      return target.id === undefined ? { name: target.name.trim() } : { id: target.id };
+    });
+    const assertScope = () => {
+      signal?.throwIfAborted();
+      this.authorized(scope, scope.source === 'chat');
+      const current = this.channel.transport.status();
+      if (current.account?.id !== scope.accountId) throw new ChannelError('ACCOUNT_CHANGED', '微信账号已变化，未读取其他账号的群成员');
+      if (!current.online) throw new ChannelError('TASK_MEMBERS_UNAVAILABLE', '微信当前离线，无法核对提醒对象；尚未创建或发送提醒');
+    };
+    assertScope();
+    if (typeof this.channel.transport.call !== 'function') throw new ChannelError('TASK_MEMBERS_UNAVAILABLE', '当前微信组件无法读取群成员，尚未创建或发送 @ 提醒');
+    const response = await this.channel.transport.call('members', { accountId: scope.accountId, peerId: scope.peerId }, { signal });
+    assertScope();
+    if (response?.accountId !== scope.accountId || response?.peerId !== scope.peerId || !Array.isArray(response.members))
+      throw new ChannelError('TASK_MEMBERS_UNAVAILABLE', '群成员名单的账号或会话不匹配，尚未创建或发送 @ 提醒');
+    const members = new Map();
+    for (const member of response.members) {
+      if (!member || !memberId(member.id) || member.groupId !== undefined && member.groupId !== scope.peerId) continue;
+      const names = [member.card, member.nickname, member.name, member.remark, member.alias].filter(memberName);
+      const name = names[0]?.trim() || member.id;
+      members.set(member.id, { id: member.id, name, names: new Set([...names, member.id].map(searchName)) });
+    }
+    const targets = new Map();
+    for (const request of requests) {
+      let matches;
+      if (request.id) matches = members.has(request.id) ? [members.get(request.id)] : [];
+      else {
+        const query = searchName(request.name), all = [...members.values()];
+        const exact = all.filter(member => member.names.has(query));
+        matches = exact.length ? exact : all.filter(member => [...member.names].some(name => name.includes(query)));
+      }
+      if (!matches.length) throw new ChannelError('TASK_TARGET_NOT_FOUND', request.id
+        ? '提醒对象已不在当前群的已同步成员名单中，尚未创建或发送 @ 提醒；请重新核对成员'
+        : `已同步群成员中找不到“${request.name}”，请核对群昵称；尚未创建或发送 @ 提醒`);
+      if (matches.length > 1) throw new ChannelError('TASK_TARGET_AMBIGUOUS', `“${request.name}”匹配到 ${matches.length} 位群成员，请提供更完整的群昵称，或在当前消息中真正 @ 目标成员`, { candidates: matches.map(({ id, name }) => ({ id, name })) });
+      const { id, name } = matches[0]; targets.set(id, { id, name });
+    }
+    return [...targets.values()];
+  }
   create(input, scope) {
     this.authorized(scope, scope.source === 'chat');
     if (!['message', 'agent'].includes(input.kind) || typeof input.content !== 'string' || !input.content.trim() || input.content.length > 4000 || /\u0000/.test(input.content))
       throw new ChannelError('INVALID_TASK', '请选择发送消息或执行 Agent 任务，并填写 1–4000 字的内容');
-    const requestKey = scope.requestKey ? createHash('sha256').update(JSON.stringify([scope.accountId, scope.chatType, scope.peerId, scope.requestKey, scope.senderId, input.kind, input.content.trim(), input.schedule])).digest('hex') : null;
+    const targets = savedTargets(input.targets, scope);
+    const identity = [scope.accountId, scope.chatType, scope.peerId, scope.requestKey, scope.senderId, input.kind, input.content.trim(), input.schedule];
+    if (targets.length) identity.push(targets.map(target => target.id).sort());
+    const requestKey = scope.requestKey ? createHash('sha256').update(JSON.stringify(identity)).digest('hex') : null;
     if (requestKey) { const previous = this.data.tasks.find(task => task.requestKey === requestKey); if (previous) return clone(previous); }
     const schedule = validateSchedule(input.schedule, this.now());
     if (this.data.tasks.filter(task => task.accountId === scope.accountId && active.has(task.state)).length >= 100)
@@ -82,7 +154,7 @@ export class TaskScheduler {
       throw new ChannelError('TASK_LIMIT', '你在这个会话中已有 20 个活动任务，请先取消不再需要的任务');
     const task = { id: randomUUID(), accountId: scope.accountId, chatType: scope.chatType, peerId: scope.peerId,
       senderId: scope.senderId || scope.accountId, senderName: scope.senderName || '管理员', source: scope.source || 'owner', requestKey,
-      kind: input.kind, content: input.content.trim(), schedule, nextRunAt: scheduleNext(schedule, this.now()),
+      kind: input.kind, content: input.content.trim(), schedule, targets, nextRunAt: scheduleNext(schedule, this.now()),
       state: 'pending', createdAt: this.now(), updatedAt: this.now(), revision: 1, lastState: null, lastError: null };
     this.data.tasks.push(task);
     try { this.save(); } catch (error) { this.data.tasks.pop(); throw error; }
@@ -177,8 +249,9 @@ function chineseNumber(value) {
 export function simpleReminder(text, names, now) {
   let normalized = String(text).trim();
   if (/(?:顺便|同时|再|并且|然后).{0,20}(?:发|表情|图片)/u.test(normalized)) return null;
+  if (/(?:提醒我|叫我)\s*(?:和|、|以及|跟(?!进|踪|上|着|随))/u.test(normalized)) return null;
   for (const name of [...names].filter(Boolean).sort((a, b) => b.length - a.length)) if (normalized.startsWith(name)) { normalized = normalized.slice(name.length).replace(/^[，,：:\s]+/, ''); break; }
-  const match = /^(?:请|帮我|请帮我|麻烦你|请你|能不能)?\s*(?:在|过)?\s*([\d.一二两三四五六七八九十半]+)\s*个?\s*(秒钟?|分钟?|小时|天)(?:之|以)?后(?:请)?(提醒我|叫我|提醒大家|提醒我们)([^\r\n]{1,500})[。！!]?$/u.exec(normalized);
+  const match = /^(?:请|帮我|请帮我|麻烦你|请你|能不能)?\s*(?:在|过)?\s*([\d.一二两三四五六七八九十半]+)\s*个?\s*(秒钟?|分钟?|小时|天)(?:之|以)?后(?:请)?(提醒大家|提醒我们|提醒我|叫我)([^\r\n]{1,500})[。！!]?$/u.exec(normalized);
   if (!match) return null;
   const amount = chineseNumber(match[1]), multiplier = match[2].startsWith('秒') ? 1000 : match[2].startsWith('分') ? 60000 : match[2] === '小时' ? 3600000 : 86400000;
   if (!Number.isFinite(amount) || amount <= 0 || amount * multiplier > 366 * 86400000) return null;

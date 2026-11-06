@@ -11,8 +11,11 @@ import { WechatChannel } from './channel.mjs';
 import { selectModel, availableModel } from './models.mjs';
 import { absoluteDirectory, sameDirectory } from './storage-paths.mjs';
 import { TaskScheduler } from './scheduler.mjs';
+import { AgentIdentity } from './agent-identity.mjs';
+import { WechatRuntime } from './runtime.mjs';
+import { readWorkspaceLocation, describeWorkspace, migrateWorkspaceRoot } from './workspace-root.mjs';
 
-export const inject = ['connection', 'webServer', 'agents', 'agentDefaultModel', 'llm', 'tools', 'systemPrompt', 'sessionPersistence', 'attachments', 'web'];
+export const inject = ['connection', 'webServer', 'agents', 'agentDefaultModel', 'llm', 'tools', 'systemPrompt', 'sessionPersistence', 'attachments', 'web', 'credentials'];
 
 export function rpcHandler(service, isDisposed = () => false) {
   return async (endpoint, payload, signal, peer) => {
@@ -20,11 +23,12 @@ export function rpcHandler(service, isDisposed = () => false) {
       if (peer?.principal?.kind !== 'owner') throw new ChannelError('OWNER_REQUIRED', '只有 DSH 本机所有者可以管理微信插件');
       if (isDisposed()) throw new ChannelError('PLUGIN_STOPPING', '微信插件正在停止，请稍后重试');
       signal?.throwIfAborted();
-      if (!['status', 'changelog', 'settings', 'model.select', 'model.configure', 'persona.save', 'storage.save', 'conversation.configure', 'records.list', 'contacts', 'connect', 'disconnect', 'login.start', 'login.cancel', 'cancel',
+      if (!['status', 'changelog', 'identity.get', 'identity.save', 'settings', 'model.select', 'model.configure', 'search.credentials', 'persona.save', 'storage.save', 'conversation.configure', 'records.list', 'contacts', 'members', 'connect', 'disconnect', 'login.start', 'login.cancel', 'cancel',
         'memory.list', 'memory.get', 'memory.configure', 'memory.edit', 'memory.clear', 'memory.compress', 'memory.retryImages',
         'memory.global.get', 'memory.global.edit', 'memory.global.clear', 'memory.global.extract',
         'assets.list', 'assets.content', 'assets.import', 'assets.edit', 'assets.delete', 'assets.configure', 'assets.describe',
         'assets.upload.start', 'assets.upload.chunk', 'assets.upload.finish', 'assets.upload.abort',
+        'assets.packs.configure', 'assets.packs.content',
         'tasks.list', 'tasks.create', 'tasks.cancel', 'tasks.pause', 'tasks.resume'].includes(endpoint))
         throw new ChannelError('UNKNOWN_OPERATION', '不支持的微信插件操作');
       return { ok: true, value: await service.call(endpoint, payload ?? {}, signal) };
@@ -32,9 +36,11 @@ export function rpcHandler(service, isDisposed = () => false) {
   };
 }
 
-export function createPluginService({ ctx, root, store, worker, runner, channel, scheduler = channel?.scheduler, startupError, isDisposed = () => false, lifetime = new AbortController().signal, dshSessionPath = null }) {
+export function createPluginService({ ctx, root, store, worker, runner, channel, scheduler = channel?.scheduler, identity, relocateWorkspace, startupError, isDisposed = () => false, lifetime = new AbortController().signal, dshSessionPath = null }) {
   let mutations = Promise.resolve();
   let discovered;
+  let relocating = false;
+  identity ??= store ? new AgentIdentity(root) : undefined;
   const assertLive = signal => {
     if (isDisposed() || lifetime.aborted) throw new ChannelError('PLUGIN_STOPPING', '微信插件正在停止');
     signal?.throwIfAborted();
@@ -58,9 +64,11 @@ export function createPluginService({ ctx, root, store, worker, runner, channel,
     return { version: VERSION, ...state, model, defaultModel, modelChoice: store?.modelChoice() ?? null, startupError,
       persona: store?.persona() ?? emptyPersona(), modelConfig: store?.modelConfig() ?? { maxTokens: 4096, temperature: null },
       capabilities: { vision: !!ctx?.attachments?.admitPromptContent, webSearch: !!ctx?.web?.search },
+      lastSearch: runner?.searchStatus?.() ?? null,
+      search: runner?.search?.status?.() ?? { credentialStore: false, credentials: { dsh: false, tavily: false } },
       memory: { windowChars: channel?.memory?.index.windowChars ?? 32000, path: channel?.memory?.root || null },
       scheduler: { enabled: !!scheduler && !scheduler.stopped, error: scheduler?.error || null },
-      storage: { ...(store?.storageSettings() ?? {}), loginPath: path.join(root, 'storage/private'), dshSessionPath, observedMessageLimit: 1000 },
+      storage: { ...describeWorkspace(root, store), identityPath: identity?.file || null, dshSessionPath, observedMessageLimit: 1000, relocating },
       settings: state.account && store ? store.settings(state.account.id) : emptySettings(),
       conversations: state.account && store ? store.conversations(state.account.id).map(peer => ({ ...peer,
         processing: channel?.summary(peer) ?? { queued: 0, active: null, fault: null } })) : [], records: [],
@@ -79,6 +87,16 @@ export function createPluginService({ ctx, root, store, worker, runner, channel,
     assertLive(signal);
     if (startupError) throw new ChannelError(startupError.code, startupError.message);
     switch (endpoint) {
+      case 'search.credentials': {
+        if (!runner?.search) throw new ChannelError('WEB_SEARCH_CREDENTIAL_STORE_MISSING', '搜索组件尚未就绪，密钥未保存。');
+        await runner.search.configureCredential(payload.provider, payload.apiKey, AbortSignal.any([lifetime, ...(signal ? [signal] : [])]));
+        break;
+      }
+      case 'identity.save': {
+        const current = identity.validateEdit(payload.markdown, payload.revision);
+        if (current.markdown !== payload.markdown) await paused('正在应用全局身份，旧任务已取消', () => { signal?.throwIfAborted(); identity.edit(payload.markdown, payload.revision); });
+        break;
+      }
       case 'model.select':
         await selectModel(ctx, store, payload.selection, AbortSignal.any([lifetime, ...(signal ? [signal] : [])])); break;
       case 'model.configure': {
@@ -113,6 +131,12 @@ export function createPluginService({ ctx, root, store, worker, runner, channel,
         if (payload.settings?.enabled === false) return paused('正在停用图片回复', () => { currentAccount(payload); return channel.library.configure(account.id, payload.settings); }, { accountId: account.id, mediaOnly: true }, { resetProgress: false });
         return channel.library.configure(account.id, payload.settings);
       }
+      case 'assets.packs.configure': {
+        const account = currentAccount(payload), pack = channel.library.validatePackSetting(account.id, payload.packId, payload.enabled);
+        const apply = () => { currentAccount(payload); assertLive(signal); return channel.library.configurePack(account.id, pack.id, payload.enabled); };
+        if (!payload.enabled) return paused('正在停用素材分组', apply, { accountId: account.id, assetIds: pack.assetIds }, { resetProgress: false });
+        return apply();
+      }
       case 'assets.edit': {
         const account = currentAccount(payload);
         if (payload.patch?.enabled === false) {
@@ -144,7 +168,7 @@ export function createPluginService({ ctx, root, store, worker, runner, channel,
       case 'memory.retryImages':
       case 'memory.compress': {
         const selector = conversation(payload);
-        await paused(endpoint === 'memory.clear' ? '正在清空此会话记忆' : '正在压缩此会话记忆', async () => {
+        await paused(endpoint === 'memory.clear' ? '正在清空此会话记忆' : endpoint === 'memory.retryImages' ? '正在重新获取清晰图片并理解' : '正在压缩此会话记忆', async () => {
           currentAccount(payload);
           if (endpoint === 'memory.clear') { channel.memory.clear(selector); store.resetSessions(selector); }
           else {
@@ -162,7 +186,10 @@ export function createPluginService({ ctx, root, store, worker, runner, channel,
         const selector = conversation(payload);
         if (!scheduler) throw new ChannelError('TASKS_UNAVAILABLE', '定时任务组件尚未启动');
         if (payload.requestId !== undefined && (typeof payload.requestId !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(payload.requestId))) throw new ChannelError('INVALID_TASK', '任务请求标识无效，请重新打开任务表单');
-        scheduler.create(payload.task, { ...selector, source: 'owner', senderId: selector.accountId, senderName: '管理员', requestKey: payload.requestId ? 'owner:' + selector.accountId + ':' + payload.requestId : undefined }); break;
+        const scope = { ...selector, source: 'owner', senderId: selector.accountId, senderName: '管理员', requestKey: payload.requestId ? 'owner:' + selector.accountId + ':' + payload.requestId : undefined };
+        const targets = await scheduler.resolveTargets(payload.task?.targets || [], scope, signal);
+        assertLive(signal); currentAccount(payload);
+        scheduler.create({ ...payload.task, targets }, scope); break;
       }
       case 'tasks.cancel':
       case 'tasks.pause':
@@ -183,6 +210,14 @@ export function createPluginService({ ctx, root, store, worker, runner, channel,
         break;
       }
       case 'storage.save': {
+        if (payload.storage && Object.hasOwn(payload.storage, 'basePath')) {
+          if (Object.keys(payload.storage).some(key => key !== 'basePath')) throw new ChannelError('INVALID_STORAGE_PATH', '只需指定全局工作目录，其他路径由它自动生成');
+          const target = absoluteDirectory(payload.storage.basePath, '全局工作目录');
+          if (!relocateWorkspace) throw new ChannelError('WORKSPACE_UNAVAILABLE', '当前实例暂不支持完整目录迁移，请重新启用插件');
+          relocating = true;
+          try { await relocateWorkspace(target, signal); discovered = undefined; } finally { relocating = false; }
+          break;
+        }
         if (!payload.storage || typeof payload.storage !== 'object' || Array.isArray(payload.storage)) throw new ChannelError('INVALID_STORAGE_PATH', '请填写工作空间和会话记录目录');
         const input = { workspacePath: absoluteDirectory(payload.storage.workspacePath, '工作空间路径'), recordsPath: absoluteDirectory(payload.storage.recordsPath, '会话记录路径') };
         const before = store.storageSettings();
@@ -224,7 +259,7 @@ export function createPluginService({ ctx, root, store, worker, runner, channel,
         }
         break;
       }
-      case 'connect': store.data.connectionWanted = true; store.save(); await worker.call('connect'); break;
+      case 'connect': store.data.connectionWanted = true; store.save(); await worker.call('connect'); if (scheduler?.stopped) { scheduler.error = null; scheduler.start(); } break;
       case 'disconnect':
         store.data.connectionWanted = false; store.save();
         await paused('微信已断开，任务已取消', () => { assertLive(signal); return worker.call('disconnect'); }); break;
@@ -243,11 +278,23 @@ export function createPluginService({ ctx, root, store, worker, runner, channel,
     assertLive(signal);
     return status();
   };
-  return { drain: () => mutations, call(endpoint, payload = {}, signal) {
+  return { drain: () => mutations,
+    replaceRuntime(next) {
+      ({ root, store, worker, runner, channel, scheduler, identity } = next); startupError = next.startupError; discovered = undefined;
+    },
+    setStartupError(error) { startupError = publicError(error, '目录切换后未能重新启动，请保留数据并重新启用插件'); },
+    call(endpoint, payload = {}, signal) {
     assertLive(signal);
     if (endpoint === 'status') return status();
+    if (relocating) throw new ChannelError('WORKSPACE_MOVING', '正在切换全局工作目录，请等待完成后重试');
     if (endpoint === 'changelog') return { markdown: fs.readFileSync(new URL('../CHANGELOG.md', import.meta.url), 'utf8') };
     if (startupError) throw new ChannelError(startupError.code, startupError.message);
+    if (endpoint === 'identity.get') return identity.view();
+    if (endpoint === 'members') {
+      const scope = conversation(payload);
+      if (scope.chatType !== 'group' || !store.settings(scope.accountId).groups.includes(scope.peerId)) throw new ChannelError('TASK_NOT_AUTHORIZED', '请从已授权群聊中选择提醒对象');
+      return worker.call('members', { accountId: scope.accountId, peerId: scope.peerId }, { signal }).then(result => { assertLive(signal); currentAccount(payload); return result; });
+    }
     if (endpoint === 'memory.list') {
       const account = currentAccount(payload);
       return { conversations: channel.memory.list(account.id), windowChars: channel.memory.index.windowChars, path: channel.memory.root };
@@ -256,6 +303,7 @@ export function createPluginService({ ctx, root, store, worker, runner, channel,
     if (endpoint === 'memory.global.get') return channel.longMemory.view(currentAccount(payload).id);
     if (endpoint === 'assets.list') return channel.library.list(currentAccount(payload).id, payload);
     if (endpoint === 'assets.content') return channel.library.getContent(currentAccount(payload).id, payload.assetId, { enabledOnly: false });
+    if (endpoint === 'assets.packs.content') { currentAccount(payload); return channel.library.builtins.preview(payload.packId, payload.assetId); }
     if (endpoint === 'tasks.list') {
       const account = currentAccount(payload), selector = payload.peerId ? conversation(payload) : undefined;
       return scheduler?.list(account.id, selector) ?? { tasks: [], runs: [], error: '定时任务组件尚未启动' };
@@ -282,54 +330,80 @@ export function createPluginService({ ctx, root, store, worker, runner, channel,
 export async function apply(ctx) {
   const configuredHome = process.env.DSH_HOME?.trim();
   const dshHome = configuredHome?.startsWith('~/') || configuredHome?.startsWith('~\\') ? path.join(homedir(), configuredHome.slice(2)) : configuredHome || path.join(homedir(), '.dsh');
-  const root = path.resolve(dshHome, 'wechat-agent');
+  const bootstrap = path.resolve(dshHome, 'wechat-agent');
+  let resolvedRoot = bootstrap;
   const resources = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-  let lock, store, worker, runner, channel, scheduler, service, startupError, disposed = false, closing;
+  let lock, current, service, startupError, disposed = false, closing;
+  const runtimes = new Set();
   const lifetime = new AbortController();
   const close = () => closing ??= (async () => {
     disposed = true;
     lifetime.abort();
-    try { const stoppingScheduler = scheduler?.close(); await channel?.close(); await stoppingScheduler; }
-    finally { try { try { await service?.drain(); channel?.library?.close(); } finally { await worker?.close(); } } finally { lock?.release(); } }
+    try {
+      await Promise.allSettled([...runtimes].map(runtime => runtime.close()));
+      await service?.drain();
+      await Promise.allSettled([...runtimes].map(runtime => runtime.close()));
+    } finally { lock?.release(); }
   })();
   // Cordis runs sibling disposers concurrently. This one owns the complete
   // drain -> child exit -> exclusive-lock release sequence.
   ctx.effect(() => close, 'wechat-agent shutdown');
-  try {
-    lock = acquireLock(root);
-    protectStorage(root);
-    store = new StateStore(root);
-    store.ensureWorkspace();
-    runner = new DshAgentRunner(ctx, () => store.modelChoice(), () => ({ persona: store.persona(), modelConfig: store.modelConfig(), workspacePath: store.storageSettings().workspacePath }));
-    worker = new WorkerClient(root, resources);
-    lock.worker(worker.child.pid);
-    channel = new WechatChannel({ store, runner, transport: worker });
-    scheduler = new TaskScheduler({ store, channel }); channel.scheduler = scheduler;
-    worker.on('message', (message, accountId) => channel.receive(message, accountId));
-    let wasOnline = false;
-    worker.on('status', () => {
-      const online = worker.status().online;
-      // Startup/offline snapshots and our own worker shutdown are not a new
-      // disconnection. Preserve saved partial counts across a normal restart.
-      if (!disposed && !channel.closed && wasOnline && !online) {
-        try { channel.cancel('微信连接已断开，未继续回复'); } catch (error) { channel.fail(error); }
+  const open = async root => {
+    lifetime.signal.throwIfAborted();
+    const runtime = new WechatRuntime({ ctx, root, bootstrap, resources, ownerLock: lock, signal: lifetime.signal });
+    runtimes.add(runtime);
+    try { await runtime.ready(); return runtime; }
+    catch (error) { try { await runtime.close(); } finally { runtimes.delete(runtime); } throw error; }
+  };
+  const relocateWorkspace = async (target, signal) => {
+    signal?.throwIfAborted(); lifetime.signal.throwIfAborted();
+    const previous = current;
+    if (sameDirectory(previous.root, target) && !describeWorkspace(previous.root, previous.store).legacyPaths.length) return;
+    let transfer, next;
+    try {
+      await previous.stop();
+      signal?.throwIfAborted(); lifetime.signal.throwIfAborted();
+      transfer = migrateWorkspaceRoot({ bootstrap, store: previous.store, targetRoot: target });
+      next = await open(transfer.root);
+      signal?.throwIfAborted(); lifetime.signal.throwIfAborted();
+      transfer.commit(); transfer = undefined;
+    } catch (error) {
+      try { await next?.close(); } catch { /* Worker close is still awaited in its finally. */ }
+      if (next) runtimes.delete(next);
+      try {
+        transfer?.rollback();
+        previous.releaseLock(); runtimes.delete(previous);
+        if (!disposed) {
+          current = await open(previous.root); service.replaceRuntime(current); await current.activate();
+        }
+      } catch (recoveryError) {
+        service.setStartupError(recoveryError);
+        throw new ChannelError('WORKSPACE_RECOVERY_FAILED', '目录切换未完成，原数据和已复制的数据均保留；恢复连接失败，请检查目录后重新启用插件');
       }
-      wasOnline = online;
-    });
-    await worker.ready;
-    if (disposed) return;
-    if (store.data.connectionWanted) await worker.call('connect');
-    if (!disposed) scheduler.start();
+      throw error;
+    }
+    current = next; service.replaceRuntime(next);
+    try { previous.releaseLock(); runtimes.delete(previous); }
+    catch { next.scheduler.error = '新目录已生效，旧目录锁暂未能清理；请保留旧目录并检查文件占用'; }
+    // No new message is admitted to the network until the pointer and all
+    // root-bound services agree on the committed destination.
+    await current.activate();
+  };
+  try {
+    lock = acquireLock(bootstrap);
+    resolvedRoot = readWorkspaceLocation(bootstrap);
+    current = await open(resolvedRoot);
+    await current.activate();
   } catch (error) {
     startupError = publicError(error, '微信插件启动失败，请检查安装包或重新启用插件');
-    try { await worker?.close(); } finally { lock?.release(); lock = undefined; }
+    try { await current?.close(); } finally { lock?.release(); lock = undefined; }
   }
   let dshSessionPath = null;
   try {
     const persistence = ctx.sessionPersistence;
     if (persistence?.name === 'session-persistence-jsonl' && typeof persistence.root === 'string' && path.isAbsolute(persistence.root)) dshSessionPath = persistence.root;
   } catch {}
-  service = createPluginService({ ctx, root, store, worker, runner, channel, scheduler, startupError, isDisposed: () => disposed, lifetime: lifetime.signal, dshSessionPath });
+  service = createPluginService({ ctx, root: current?.root || resolvedRoot, ...current, relocateWorkspace, startupError, isDisposed: () => disposed, lifetime: lifetime.signal, dshSessionPath });
   // rc.5's rpc getter retains the Connection service's dependency shadow;
   // register with our explicit owner so webServer and teardown belong here.
   if (!disposed) ctx.connection.register(ctx, CHANNEL, rpcHandler(service, () => disposed));

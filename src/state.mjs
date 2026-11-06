@@ -17,7 +17,7 @@ export function conversationFolder(conversation, name) {
 
 const defaults = {
   persona: () => ({ name: '微信助手', aliases: [], background: '', personality: '', style: '' }),
-  model: () => ({ maxTokens: 4096, temperature: null, vision: true, visionModel: null, webSearch: false }),
+  model: () => ({ maxTokens: 4096, temperature: null, vision: true, visionModel: null, webSearch: false, searchProvider: 'tavily', tavilyBaseURL: 'https://api.tavily.com' }),
   conversation: () => validateConversationSettings({ mode: 'default', minMessages: 5, maxMessages: 20, recordsPath: '' }),
 };
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -109,7 +109,7 @@ export class StateStore {
     this.data.storageSettings.recordsPath = absoluteDirectory(this.data.storageSettings.recordsPath, '会话记录路径');
     if (this.data.modelChoice !== undefined) this.data.modelChoice = validateModelChoice(this.data.modelChoice);
     if (this.data.persona !== undefined) this.data.persona = validatePersona(this.data.persona);
-    if (this.data.modelConfig !== undefined) this.data.modelConfig = validateModelConfig(this.data.modelConfig);
+    if (this.data.modelConfig !== undefined) this.data.modelConfig = validateModelConfig({ ...this.data.modelConfig, searchProvider: this.data.modelConfig.searchProvider ?? 'dsh' });
     for (const settings of Object.values(this.data.accounts)) validateSettings(settings);
     for (const [key, config] of Object.entries(this.data.conversationConfigs)) this.data.conversationConfigs[key] = validateConversationSettings(config);
     if (migrating) {
@@ -297,6 +297,7 @@ export class StateStore {
   settings(accountId) { return clone(this.data.accounts[accountId] ?? emptySettings()); }
   modelChoice() { return clone(this.data.modelChoice ?? null); }
   persona() { return clone(this.data.persona ?? defaults.persona()); }
+  conversationPersona(accountId, chatType, peerId) { return this.conversationSettings(accountId, chatType, peerId).persona || this.persona(); }
   modelConfig() { return clone(this.data.modelConfig ?? defaults.model()); }
   storageSettings() { return clone(this.data.storageSettings); }
   ensureWorkspace() {

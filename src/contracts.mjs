@@ -1,9 +1,18 @@
 export const CHANNEL = '/wechat-agent';
-export const VERSION = '0.2.0-preview.2';
+export const VERSION = '0.2.0-preview.3';
 export const MAX_TEXT = 12000;
+export const DEFAULT_TAVILY_URL = 'https://api.tavily.com';
 
 export class ChannelError extends Error {
   constructor(code, message, details = {}) { super(message); this.name = 'ChannelError'; this.code = code; this.details = details; }
+}
+
+export function searchBaseURL(input = DEFAULT_TAVILY_URL) {
+  let url;
+  try { url = new URL(input); } catch { throw new ChannelError('INVALID_SEARCH_CONFIG', '请输入 Tavily 服务的 HTTPS 地址。'); }
+  if (typeof input !== 'string' || url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || input.length > 2048)
+    throw new ChannelError('INVALID_SEARCH_CONFIG', 'Tavily 地址必须使用 HTTPS，且不能包含账号、密码、查询参数或片段。');
+  return url.href.replace(/\/+$/, '');
 }
 
 export function emptySettings() { return { enabled: false, privatePeers: [], groups: [], prompt: '' }; }
@@ -36,7 +45,10 @@ export function validateModelConfig(input) {
     throw new ChannelError('INVALID_MODEL_CONFIG', '温度应在 0–2 之间，留空表示跟随模型默认');
   for (const key of ['vision', 'webSearch']) if (input[key] !== undefined && typeof input[key] !== 'boolean')
     throw new ChannelError('INVALID_MODEL_CONFIG', '图像理解和联网搜索需要选择开启或关闭');
-  return { maxTokens: input.maxTokens, temperature: input.temperature, vision: input.vision ?? true, visionModel: validateModelChoice(input.visionModel ?? null), webSearch: input.webSearch ?? false };
+  const searchProvider = input.searchProvider ?? 'tavily';
+  if (!['dsh', 'tavily'].includes(searchProvider)) throw new ChannelError('INVALID_SEARCH_CONFIG', '请选择 DeepSeek 原生搜索或 Tavily。');
+  return { maxTokens: input.maxTokens, temperature: input.temperature, vision: input.vision ?? true, visionModel: validateModelChoice(input.visionModel ?? null), webSearch: input.webSearch ?? false,
+    searchProvider, tavilyBaseURL: searchBaseURL(input.tavilyBaseURL) };
 }
 
 export function validateConversationSettings(input) {
@@ -53,7 +65,10 @@ export function validateConversationSettings(input) {
     throw new ChannelError('INVALID_MEMORY_SETTINGS', '会话记忆窗口应为 1000–200000 字，留空使用记忆库默认值');
   if (input.allowChatTasks !== undefined && typeof input.allowChatTasks !== 'boolean')
     throw new ChannelError('INVALID_CONVERSATION', '请选择是否允许会话创建定时任务');
-  return { mode: input.mode, intervalMode, fixedMessages, minMessages: input.minMessages, maxMessages: input.maxMessages, recordsPath: input.recordsPath.trim(), memoryWindowChars, allowChatTasks: input.allowChatTasks ?? true };
+  const memoryMode = input.memoryMode ?? 'always';
+  if (!['always', 'on-demand'].includes(memoryMode)) throw new ChannelError('INVALID_MEMORY_SETTINGS', '请选择每轮读取或按需读取长期记忆');
+  return { mode: input.mode, intervalMode, fixedMessages, minMessages: input.minMessages, maxMessages: input.maxMessages, recordsPath: input.recordsPath.trim(), memoryWindowChars, allowChatTasks: input.allowChatTasks ?? true,
+    persona: input.persona == null ? null : validatePersona(input.persona), memoryMode };
 }
 
 export function validateModelChoice(value) {

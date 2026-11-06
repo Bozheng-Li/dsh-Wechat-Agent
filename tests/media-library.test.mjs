@@ -48,6 +48,20 @@ test('ZIP imports keep original images, account isolation, deduplication and des
   assert.equal(f.import(data, '重复.zip').duplicates, 3);
 });
 
+test('ZIP groups can be disabled independently and later same-name imports keep the saved group switch', t => {
+  const f = fixture(t);
+  f.import(zip([{ name: '点头.png', data: png() }]), '可爱猫猫.zip');
+  const group = f.library.packs(f.owner).find(pack => pack.name === '可爱猫猫');
+  assert(group?.enabled); f.library.configurePack(f.owner, group.id, false);
+  f.import(zip([{ name: '微笑.png', data: png([0, 255, 0]) }]), '可爱猫猫.zip');
+  f.import(zip([{ name: '企鹅.png', data: png([0, 0, 255]) }]), '小企鹅.zip');
+  const members = f.library.list(f.owner, { packId: group.id });
+  assert.equal(members.total, 2); assert(members.items.every(item => item.enabled && !item.effectiveEnabled));
+  assert.equal(f.library.search(f.owner).length, 1); assert.equal(f.library.search(f.owner)[0].name, '企鹅');
+  const restored = new MediaLibrary(f.store); assert.equal(restored.packs(f.owner).find(pack => pack.id === group.id).enabled, false);
+  restored.configurePack(f.owner, group.id, true); assert.equal(restored.search(f.owner).length, 3);
+});
+
 test('ZIP rejects traversal, symlinks, executables, corrupt CRC and inflated data before publishing any asset', t => {
   const f = fixture(t);
   for (const bad of [

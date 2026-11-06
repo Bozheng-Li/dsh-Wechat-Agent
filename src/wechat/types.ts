@@ -9,7 +9,7 @@ export type Segment =
   | { type: 'text'; data: { text: string } }
   | { type: 'image'; data: MediaData }
   | { type: 'face'; data: MediaData }
-  | { type: 'at'; data: { qq: string } }
+  | { type: 'at'; data: { qq: string; name?: string } }
   | { type: 'reply'; data: { id?: string; messageType?: number; senderId?: string; senderName?: string; content?: string } };
 
 export interface Contact { id: string; nickname: string; remark?: string; avatar?: string; alias?: string }
@@ -79,7 +79,11 @@ export function segments(value: unknown): Segment[] {
         }
         return { type: s.type, data: { file: string(d.file, `${s.type}.file`), ...(d.url === undefined ? {} : { url: string(d.url, `${s.type}.url`) }), ...(d.resourceId === undefined ? {} : { resourceId: string(d.resourceId, `${s.type}.resourceId`) }) } };
       }
-      case 'at': return { type: 'at', data: { qq: string(String(d.qq ?? ''), 'at.qq') } };
+      case 'at': {
+        if (d.name !== undefined && (typeof d.name !== 'string' || !d.name.trim() || d.name.length > 256 || /[\u0000-\u001f\u007f]/.test(d.name)))
+          throw new BridgeError('ERR_INVALID_PARAMS', '@ 对象昵称无效');
+        return { type: 'at', data: { qq: string(String(d.qq ?? ''), 'at.qq'), ...(d.name === undefined ? {} : { name: String(d.name).trim() }) } };
+      }
       case 'reply': return { type: 'reply', data: { id: string(String(d.id ?? ''), 'reply.id') } };
     }
     throw new BridgeError('ERR_INVALID_PARAMS', `Unsupported or invalid segment ${String(s.type)}`);

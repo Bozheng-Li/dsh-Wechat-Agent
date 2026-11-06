@@ -5,6 +5,7 @@ import { inflateRawSync } from 'node:zlib';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { ChannelError } from './contracts.mjs';
+import { BuiltinStickerCatalog } from './builtin-stickers.mjs';
 
 const MiB = 1024 * 1024;
 export const MEDIA_LIBRARY_LIMITS = Object.freeze({ uploadBytes: 32 * MiB, imageBytes: 10 * MiB, expandedBytes: 64 * MiB,
@@ -13,6 +14,9 @@ const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp
 const IMAGE_EXTENSIONS = /\.(?:png|jpe?g|gif|webp)$/i;
 const UNSAFE_EXTENSIONS = /\.(?:exe|com|dll|scr|msi|msp|bat|cmd|ps1|vbs|vbe|js|jse|mjs|cjs|hta|html?|svg|sh|py|jar|lnk|url|reg|app|dmg)$/i;
 const SETTINGS = Object.freeze({ enabled: true, probability: 20, minGapMessages: 3 });
+const UPLOADED_PACK = 'user-uploads';
+const assetPack = asset => asset.packId || UPLOADED_PACK;
+const validPackId = value => typeof value === 'string' && /^[a-z0-9][a-z0-9-]{0,79}$/.test(value);
 const clone = value => structuredClone(value);
 const sha = data => createHash('sha256').update(data).digest('hex');
 const error = (code, message) => new ChannelError(code, message);
@@ -153,8 +157,9 @@ function settings(input) {
 }
 
 export class MediaLibrary {
-  constructor(store, { now = Date.now, pythonPath, conversionTimeoutMs = 15000 } = {}) {
+  constructor(store, { now = Date.now, pythonPath, conversionTimeoutMs = 15000, builtinCatalog } = {}) {
     this.store = store; this.now = now; this.root = path.resolve(store.root, 'storage/assets'); this.indexFile = path.join(this.root, 'index.json'); this.uploads = new Map(); this.completedUploads = new Map(); this.jobs = new Map();
+    this.builtins = builtinCatalog ?? new BuiltinStickerCatalog();
     this.runtimePath = fileURLToPath(new URL('../runtime/', import.meta.url)); this.pythonPath = pythonPath || path.join(this.runtimePath, 'python/python.exe'); this.conversionTimeoutMs = conversionTimeoutMs;
     fs.mkdirSync(this.root, { recursive: true, mode: 0o700 }); this.assertLocal(this.root);
     try { this.assertLocal(this.indexFile, false); this.data = JSON.parse(fs.readFileSync(this.indexFile, 'utf8')); }
@@ -164,7 +169,8 @@ export class MediaLibrary {
     for (const record of Object.values(this.data.accounts)) {
       if (!record || !Array.isArray(record.assets)) throw error('ASSET_INDEX_INVALID', '素材库条目格式有误');
       settings(record.settings);
-      for (const asset of record.assets) if (!/^[a-f0-9]{64}$/.test(asset.id) || !IMAGE_TYPES.has(asset.mediaType) || !['png', 'jpg', 'gif', 'webp'].includes(asset.extension) || typeof asset.enabled !== 'boolean' || typeof asset.name !== 'string' || typeof asset.description !== 'string' || !Array.isArray(asset.tags)) throw error('ASSET_INDEX_INVALID', '素材条目损坏，未读取任意路径');
+      if (record.packs !== undefined && (!record.packs || typeof record.packs !== 'object' || Array.isArray(record.packs) || Object.entries(record.packs).some(([id, pack]) => !validPackId(id) || !pack || typeof pack.enabled !== 'boolean' || typeof pack.name !== 'string'))) throw error('ASSET_INDEX_INVALID', '素材分组设置损坏，未重置已有设置');
+      for (const asset of record.assets) if (!/^[a-f0-9]{64}$/.test(asset.id) || !IMAGE_TYPES.has(asset.mediaType) || !['png', 'jpg', 'gif', 'webp'].includes(asset.extension) || typeof asset.enabled !== 'boolean' || typeof asset.name !== 'string' || typeof asset.description !== 'string' || !Array.isArray(asset.tags) || asset.packId !== undefined && !validPackId(asset.packId)) throw error('ASSET_INDEX_INVALID', '素材条目损坏，未读取任意路径');
     }
   }
   assertLocal(file, required = true) {
@@ -189,13 +195,50 @@ export class MediaLibrary {
     const next = clone(this.data); const result = action(next); next.revision++;
     this.assertLocal(this.indexFile, false); atomic(this.indexFile, next); this.data = next; return result;
   }
+  packEnabled(record, packId) {
+    return record.packs?.[packId]?.enabled ?? !packId.startsWith('builtin-');
+  }
+  assetEnabled(record, asset) { return asset.enabled && this.packEnabled(record, assetPack(asset)); }
+  packs(id) {
+    const record = this.account(id);
+    const known = new Set(this.builtins.packs.map(pack => pack.id));
+    const imported = new Map(Object.entries(record.packs || {}).filter(([id]) => !known.has(id) && !id.startsWith('builtin-')));
+    for (const asset of record.assets) if (!known.has(assetPack(asset)) && !imported.has(assetPack(asset))) imported.set(assetPack(asset), { name: '我导入的图片', enabled: true });
+    const counts = packId => {
+      const assets = record.assets.filter(asset => assetPack(asset) === packId);
+      return { installed: assets.length, enabledAssets: assets.filter(asset => this.assetEnabled(record, asset)).length };
+    };
+    return [
+      ...this.builtins.packs.map(pack => ({ id: pack.id, name: pack.name, description: pack.description, builtin: true, enabled: this.packEnabled(record, pack.id),
+        total: pack.items.length, ...counts(pack.id), source: this.builtins.source, previews: pack.items.slice(0, 3).map(({ id, name }) => ({ id, name })) })),
+      ...[...imported].map(([id, pack]) => ({ id, name: pack.name, builtin: false, enabled: this.packEnabled(record, id), ...counts(id) }))
+    ];
+  }
+  validatePackSetting(id, packId, enabled) {
+    if (!validPackId(packId) || typeof enabled !== 'boolean') throw error('ASSET_PACK_INVALID', '请选择素材分组并设置是否启用');
+    const pack = this.packs(id).find(value => value.id === packId);
+    if (!pack) throw error('ASSET_PACK_NOT_FOUND', '这组素材不存在，请刷新后重试');
+    return { ...pack, assetIds: this.account(id).assets.filter(asset => assetPack(asset) === packId).map(asset => asset.id) };
+  }
+  configurePack(id, packId, enabled) {
+    const pack = this.validatePackSetting(id, packId, enabled);
+    if (pack.builtin && enabled) {
+      const images = this.builtins.get(packId).items.map(item => {
+        const { content } = this.builtins.read(packId, item.id);
+        return { name: path.basename(item.file), data: content, info: inspectAssetImage(content), metadata: { name: item.name, description: item.description, tags: item.tags } };
+      });
+      return { ...this.importImages(id, { images, kind: 'sticker', pack, enablePack: true }), packId, enabled: true };
+    }
+    this.mutate(data => { const record = this.account(id, true, data); record.packs ??= {}; record.packs[packId] = { name: pack.name, enabled }; });
+    return { packId, enabled };
+  }
   configure(id, input) { const next = settings(input); this.mutate(data => { this.account(id, true, data).settings = next; }); return this.list(id); }
-  list(id, { query = '', kind, enabled, offset = 0, limit = 24 } = {}) {
+  list(id, { query = '', kind, packId, enabled, offset = 0, limit = 24 } = {}) {
     const record = this.account(id), normalized = String(query).normalize('NFKC').trim().toLocaleLowerCase();
     if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 100) throw error('ASSET_PAGE_INVALID', '素材分页范围无效');
-    const matching = record.assets.filter(asset => (!kind || asset.kind === kind) && (enabled === undefined || asset.enabled === enabled) && (!normalized || [asset.name, asset.description, ...asset.tags].join('\n').normalize('NFKC').toLocaleLowerCase().includes(normalized))).sort((a, b) => b.createdAt - a.createdAt || a.name.localeCompare(b.name, 'zh-CN'));
-    return { items: matching.slice(offset, offset + limit).map(clone), total: matching.length, offset, limit, settings: clone(record.settings), revision: this.data.revision,
-      counts: { all: record.assets.length, enabled: record.assets.filter(asset => asset.enabled).length, described: record.assets.filter(asset => asset.description).length, bytes: record.assets.reduce((sum, asset) => sum + asset.bytes, 0) },
+    const matching = record.assets.filter(asset => (!kind || asset.kind === kind) && (!packId || assetPack(asset) === packId) && (enabled === undefined || this.assetEnabled(record, asset) === enabled) && (!normalized || [asset.name, asset.description, ...asset.tags].join('\n').normalize('NFKC').toLocaleLowerCase().includes(normalized))).sort((a, b) => b.createdAt - a.createdAt || a.name.localeCompare(b.name, 'zh-CN'));
+    return { items: matching.slice(offset, offset + limit).map(asset => ({ ...clone(asset), packId: assetPack(asset), packEnabled: this.packEnabled(record, assetPack(asset)), effectiveEnabled: this.assetEnabled(record, asset) })), total: matching.length, offset, limit, settings: clone(record.settings), revision: this.data.revision, packs: clone(this.packs(id)),
+      counts: { all: record.assets.length, enabled: record.assets.filter(asset => this.assetEnabled(record, asset)).length, described: record.assets.filter(asset => asset.description).length, bytes: record.assets.reduce((sum, asset) => sum + asset.bytes, 0) },
       progress: clone(this.jobs.get(id) || null), path: this.folder(id), limits: MEDIA_LIBRARY_LIMITS };
   }
   search(id, query = '', { kind, limit = 12 } = {}) {
@@ -205,7 +248,7 @@ export class MediaLibrary {
   resolveAsset(id, assetId, { enabledOnly = true } = {}) {
     if (!/^[a-f0-9]{64}$/.test(assetId || '')) throw error('ASSET_NOT_FOUND', '这张素材不存在');
     const record = this.account(id), asset = record.assets.find(value => value.id === assetId);
-    if (!asset || enabledOnly && (!record.settings.enabled || !asset.enabled)) throw error('ASSET_NOT_FOUND', '这张素材不存在、已停用或不属于当前账号');
+    if (!asset || enabledOnly && (!record.settings.enabled || !this.assetEnabled(record, asset))) throw error('ASSET_NOT_FOUND', '这张素材不存在、所属分组或素材已停用，或不属于当前账号');
     return clone(asset);
   }
   getContent(id, assetId, options) {
@@ -252,14 +295,19 @@ export class MediaLibrary {
     accountId(id); const name = plain(input?.name, '文件名', 1000, false), kind = normalizeKind(input.kind), data = decodeBase64(input.data, MEDIA_LIBRARY_LIMITS.uploadBytes);
     if (!/\.zip$/i.test(name) && !IMAGE_EXTENSIONS.test(name)) throw error('ASSET_IMAGE_INVALID', '请选择 ZIP、PNG、JPEG、GIF 或 WebP 文件');
     const bundle = /\.zip$/i.test(name) ? readAssetZip(data) : { images: [{ name, data, info: inspectAssetImage(data) }], skipped: 0 };
+    const packName = name.replaceAll('\\', '/').split('/').at(-1).replace(/\.zip$/i, '').trim().slice(0, 120) || '导入的表情包';
+    const pack = /\.zip$/i.test(name) ? { id: 'import-' + sha(packName.normalize('NFKC')).slice(0, 24), name: packName } : { id: UPLOADED_PACK, name: '我导入的图片' };
+    return this.importImages(id, { ...bundle, kind, pack });
+  }
+  importImages(id, { images, skipped = 0, kind, pack, enablePack }) {
     const previous = this.account(id), known = new Set(previous.assets.map(asset => asset.id)), added = [], duplicateIds = [];
     let bytes = previous.assets.reduce((sum, asset) => sum + asset.bytes, 0);
-    for (const image of bundle.images) {
+    for (const image of images) {
       const hash = sha(image.data); if (known.has(hash)) { duplicateIds.push(hash); continue; }
       known.add(hash); bytes += image.data.length;
       const basename = image.name.replaceAll('\\', '/').split('/').at(-1).replace(/\.[^.]+$/, '').trim().slice(0, 120) || '未命名图片';
       const folders = image.name.replaceAll('\\', '/').split('/').slice(0, -1).filter(Boolean).slice(-3).map(value => value.slice(0, 40));
-      added.push({ content: image.data, asset: { id: hash, name: basename, description: '', tags: [...new Set(folders)], kind, enabled: true, ...image.info,
+      added.push({ content: image.data, asset: { id: hash, name: image.metadata?.name ?? basename, description: image.metadata?.description ?? '', tags: image.metadata?.tags ?? [...new Set(folders)], kind, enabled: true, packId: pack.id, ...image.info,
         bytes: image.data.length, originalName: image.name.slice(0, 1000), createdAt: this.now(), updatedAt: this.now(), revision: 1, descriptionError: null } });
     }
     if (bytes > MEDIA_LIBRARY_LIMITS.accountBytes || previous.assets.length + added.length > MEDIA_LIBRARY_LIMITS.accountAssets) throw error('ASSET_QUOTA', '当前账号素材库最多 2000 张、512 MiB，请先清理不再使用的素材');
@@ -270,9 +318,13 @@ export class MediaLibrary {
         if (fs.existsSync(file)) { if (sha(fs.readFileSync(file)) !== asset.id) throw error('ASSET_CONTENT_INVALID', '同名素材文件内容异常，未覆盖'); }
         else { fs.writeFileSync(file, content, { flag: 'wx', mode: 0o600 }); created.push(file); }
       }
-      if (added.length) this.mutate(next => { this.account(id, true, next).assets.push(...added.map(value => value.asset)); });
+      if (added.length || enablePack !== undefined) this.mutate(next => {
+        const record = this.account(id, true, next); record.packs ??= {};
+        record.packs[pack.id] = { name: pack.name, enabled: enablePack ?? this.packEnabled(record, pack.id) };
+        record.assets.push(...added.map(value => value.asset));
+      });
     } catch (failure) { for (const file of created) { try { this.assertLocal(file); fs.unlinkSync(file); } catch {} } throw failure; }
-    return { imported: added.length, duplicates: duplicateIds.length, skipped: bundle.skipped, assetIds: added.map(value => value.asset.id), duplicateIds, total: this.account(id).assets.length };
+    return { imported: added.length, duplicates: duplicateIds.length, skipped, assetIds: added.map(value => value.asset.id), duplicateIds, total: this.account(id).assets.length };
   }
   edit(id, assetId, patch) {
     const previous = this.resolveAsset(id, assetId, { enabledOnly: false });

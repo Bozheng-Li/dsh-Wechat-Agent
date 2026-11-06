@@ -75,6 +75,17 @@ test('runtime and model settings are snapshotted before asynchronous model valid
   assert.equal(f.dispatched[1].temperature, 0.8); assert(f.scopes[1].prompt.text.includes('新的名字'));
 });
 
+test('global identity is reloaded each turn and a conversation persona overrides only the default persona', async () => {
+  const f = fixture();
+  let markdown = '# GLOBAL_ONE\n简短接话。';
+  const runner = new DshAgentRunner(f.ctx, () => null, () => ({ identityMarkdown: markdown, persona: { name: '默认名字', aliases: [], prompt: 'DEFAULT_ONLY' } }));
+  await runner.run({ text: '你好', persona: { name: '会话小圆', aliases: [], prompt: 'ROOM_A_ONLY' }, signal: signal() });
+  assert(f.scopes[0].prompt.text.startsWith(markdown)); assert(f.scopes[0].prompt.text.includes('ROOM_A_ONLY')); assert(!f.scopes[0].prompt.text.includes('DEFAULT_ONLY'));
+  markdown = '# GLOBAL_TWO\n自然一些。';
+  await runner.run({ text: '你好', signal: signal() });
+  assert(f.scopes[1].prompt.text.startsWith(markdown)); assert(f.scopes[1].prompt.text.includes('DEFAULT_ONLY')); assert(!f.scopes[1].prompt.text.includes('ROOM_A_ONLY'));
+});
+
 test('null temperature preserves host controls and the old constructor keeps compatible defaults', async () => {
   const f = fixture({ hostTemperature: 0.65 });
   await new DshAgentRunner(f.ctx, () => null, () => ({ modelConfig: { maxTokens: 256, temperature: null } })).run({ text: '简短回答', signal: signal() });

@@ -5,6 +5,8 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { BridgeError, object } from "@napcat-wechat/protocol";
 import { ProtocolBackend } from "./backend.js";
+import { validateCredential } from './session.js';
+import { imageBaseRequestFromQrRound } from './image-session.js';
 import { workerEnvironment, resourcePath } from '../paths.js';
 
 export class QrLoginManager {
@@ -181,6 +183,8 @@ export class QrLoginManager {
   }
   private async accept(file: string) {
     const c = object(JSON.parse(readFileSync(file, "utf8")));
+    const credential = validateCredential({ ...c, ...(c.body_key === undefined && c.session_key !== undefined ? { body_key: c.session_key } : {}) });
+    const image = credential.image_base_request ?? imageBaseRequestFromQrRound(credential, path.dirname(file));
     const session = this.backend.session;
     if (existsSync(session.file))
       copyFileSync(
@@ -200,6 +204,7 @@ export class QrLoginManager {
       edges: c.edges ?? [],
       ...(c.contacts === undefined ? {} : { contacts: c.contacts }),
       ...(c.heartbeat_base_request === undefined ? {} : { heartbeat_base_request: c.heartbeat_base_request }),
+      ...(image === undefined ? {} : { image_base_request: image }),
     });
   }
   private stopChild(child: ChildProcess) {

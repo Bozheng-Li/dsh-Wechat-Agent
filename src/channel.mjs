@@ -5,6 +5,7 @@ import { simpleReminder } from './scheduler.mjs';
 import { conversationTaskTool, mediaReplyTool } from './conversation-tools.mjs';
 import { LongTermMemory } from './long-term-memory.mjs';
 import { MediaLibrary } from './media-library.mjs';
+import { conversationMemoryTool } from './memory-tool.mjs';
 
 const matches = (record, selector) => !selector || ['accountId', 'chatType', 'peerId'].every(field => selector[field] === undefined || record[field] === selector[field]) &&
   (!selector.mediaOnly || !!record.replyMedia) && (!selector.assetIds || selector.assetIds.includes(record.replyMedia?.id));
@@ -44,7 +45,7 @@ export class WechatChannel {
       if (!eligible(settings, message)) { this.store.remember(key, this.now()); return; }
       const config = this.store.conversationSettings(account.id, message.chatType, message.peerId);
       const mode = message.chatType === 'group' ? config.mode : 'default';
-      const persona = this.store.persona();
+      const persona = this.store.conversationPersona(account.id, message.chatType, message.peerId);
       const contextKey = identity([account.id, message.chatType, message.peerId, mode === 'participate' ? '__group_participation__' : message.sender.id]);
       const record = { key, contextKey, accountId: account.id, messageId: message.id, peerId: message.peerId,
         senderId: message.sender.id, sender: message.sender.nickname || message.sender.id, chatType: message.chatType, mode, agentName: persona.name,
@@ -197,14 +198,16 @@ export class WechatChannel {
       this.store.update(record, { state: 'generating' });
       let result;
       let selectedMedia;
+      const persona = this.store.conversationPersona(record.accountId, record.chatType, record.peerId);
       const scope = { accountId: record.accountId, chatType: record.chatType, peerId: record.peerId, senderId: record.senderId,
-        senderName: record.sender, source: 'chat', requestKey: record.key, requestedAt: record.createdAt };
+        senderName: record.sender, source: 'chat', requestKey: record.key, requestedAt: record.createdAt,
+        incomingMentions: (item.message.message || []).filter(segment => segment.type === 'at' && segment.data.qq !== record.accountId).map(segment => ({ id: segment.data.qq, name: segment.data.name || '' })) };
       const reminder = !item.ambient && !item.scheduled && item.config.allowChatTasks !== false && this.scheduler
-        ? simpleReminder(item.text, [this.store.persona().name, ...this.store.persona().aliases], record.createdAt) : null;
+        ? simpleReminder(item.text, [persona.name, ...persona.aliases], record.createdAt) : null;
       if (item.scheduled?.kind === 'message') result = { text: item.scheduled.content };
       else if (reminder) {
         this.assertAllowed(item); controller.signal.throwIfAborted();
-        if (record.chatType === 'group' && reminder.audience === 'sender' && record.sender !== record.senderId) reminder.content = `${record.sender}，${reminder.content}`;
+        if (record.chatType === 'group' && reminder.audience === 'sender') reminder.targets = await this.scheduler.resolveTargets([{ id: record.senderId, name: record.sender }], scope, controller.signal);
         const task = this.scheduler.create(reminder, scope);
         this.store.update(record, { createdTaskIds: [task.id] });
         const when = this.now() - record.createdAt < 5000 ? reminder.delayLabel + '后' : new Date(task.nextRunAt).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
@@ -229,6 +232,7 @@ export class WechatChannel {
           const preceding = this.store.history(record.accountId, record.chatType, record.peerId, 1000).filter(entry => entry.direction === 'outgoing' && keys.has(entry.sourceKey) && !keys.has(entry.key));
           doc.entries.push(...preceding);
         }
+        const lookupSnapshot = doc;
         doc = await this.memory.fitSnapshot(doc, this.runner, controller.signal);
         const currentImage = currentMemory.entries.find(entry => entry.key === record.key);
         const imageContext = currentImage?.attachments?.map(image => image.description || image.error || '图像理解已关闭或尚未完成，不能猜测画面').join('\n');
@@ -242,13 +246,15 @@ export class WechatChannel {
           tools.push(mediaReplyTool(this.library, scope, () => { controller.signal.throwIfAborted(); this.assertAllowed(item); }, value => {
             selectedMedia = value; this.store.update(record, { replyMedia: { id: value.asset.id, name: value.asset.name, kind: value.asset.kind, description: value.asset.description } });
           }));
-        const longMemory = this.longMemory.prompt(record);
+        const onDemand = item.config.memoryMode === 'on-demand';
+        if (onDemand) tools.push(conversationMemoryTool(this.memory, this.longMemory, scope, () => { controller.signal.throwIfAborted(); this.assertAllowed(item); }, { snapshot: lookupSnapshot }));
+        const longMemory = onDemand ? '' : this.longMemory.prompt(record);
         result = await this.runner.run({ text: item.text + (imageContext ? `\n\n当前消息的图像理解：\n${imageContext}` : ''),
-          group: item.message.chatType === 'group', mode: item.mode, prompt: item.prompt, history, memory: [longMemory, memoryText(doc)].filter(Boolean).join('\n\n'), tools,
+          group: item.message.chatType === 'group', mode: item.mode, prompt: item.prompt, persona, history, memory: [longMemory, memoryText(doc)].filter(Boolean).join('\n\n'), tools,
           speaker: { id: record.senderId, name: record.sender }, account: this.transport.status().account,
           allowEmptyReply: () => !!selectedMedia,
           signal: controller.signal, onSession: id => this.store.update(record, { sessionId: id }) });
-        if (selectedMedia) result.text = typeof this.runner.polishReply === 'function' ? await this.runner.polishReply(selectedMedia.caption, item.text, controller.signal) : selectedMedia.caption;
+        if (selectedMedia) result.text = typeof this.runner.polishReply === 'function' ? await this.runner.polishReply(selectedMedia.caption, item.text, controller.signal, persona, { prompt: item.prompt }) : selectedMedia.caption;
       }
       clearTimeout(timeout);
       controller.signal.throwIfAborted();
@@ -263,8 +269,12 @@ export class WechatChannel {
       if (!message.length) throw new ChannelError('MODEL_EMPTY', '本轮没有可发送的文字或图片');
       controller.signal.throwIfAborted();
       this.assertAllowed(item);
+      const targets = item.scheduled?.targets?.length ? await this.scheduler.resolveTargets(item.scheduled.targets, scope, controller.signal) : [];
+      if (targets.length) message.unshift(...targets.map(target => ({ type: 'at', data: { qq: target.id, name: target.name } })));
+      controller.signal.throwIfAborted(); this.assertAllowed(item);
+      if (replyMedia) this.library.resolveAsset(record.accountId, replyMedia.id);
       // Commit intent before crossing the side-effect boundary.
-      this.store.update(record, { state: 'sending', reply: result.text, ...(replyMedia ? { replyMedia } : {}) });
+      this.store.update(record, { state: 'sending', reply: result.text, ...(targets.length ? { replyMentions: targets } : {}), ...(replyMedia ? { replyMedia } : {}) });
       const sent = await this.transport.send({ accountId: record.accountId, chatType: item.message.chatType, peerId: item.message.peerId,
         message }, controller.signal);
       const ids = sent?.serverMessageIds;

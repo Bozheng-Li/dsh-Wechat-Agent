@@ -14,10 +14,14 @@ function write(file, data) {
   try { atomicJson(file, data); }
   catch { throw new ChannelError('STATE_WRITE_FAILED', '记忆未能保存，请检查磁盘空间和记忆目录权限'); }
 }
+const needsClearerImage = image => image.type === 'image' && !!image.description && !['original', 'full'].includes(image.quality);
 export function memoryText(doc) {
   const rows = doc.entries.map(entry => JSON.stringify({ time: entry.time, speaker: entry.senderName || entry.senderId,
     direction: entry.direction, text: entry.text,
-    ...(entry.attachments?.length ? { images: entry.attachments.map(image => ({ type: image.type, description: image.description || image.error || '图像待理解' })) } : {}) }));
+    ...(entry.attachments?.length ? { images: entry.attachments.map(image => ({ type: image.type, description: image.description || image.error || '图像待理解',
+      ...(image.quality ? { quality: image.quality } : {}),
+      ...(image.quality === 'thumbnail' ? { sourceNote: '仅有微信缩略图，小字和画面细节未核实。' }
+        : needsClearerImage(image) ? { sourceNote: '旧图像笔记的清晰度未核实，可重新获取清晰图片后理解。' } : {}) })) } : {}) }));
   return [doc.summary && `已保存的会话记忆（压缩摘要，可能有信息损耗）：\n${doc.summary}`, rows.length && `最近的会话原文（按接收顺序）：\n${rows.join('\n')}`].filter(Boolean).join('\n\n');
 }
 
@@ -98,6 +102,7 @@ export class ConversationMemory {
     const doc = this.load(input);
     return { ...doc, seen: undefined, path: this.file(doc), text: memoryText(doc), chars: memoryText(doc).length,
       failedImages: doc.entries.reduce((count, entry) => count + (entry.attachments || []).filter(image => image.error && !image.description).length, 0),
+      lowQualityImages: doc.entries.reduce((count, entry) => count + (entry.attachments || []).filter(needsClearerImage).length, 0),
       windowChars: this.windowChars(input), compacting: this.compacting.has(doc.key), error: this.errors.get(doc.key) || null };
   }
   list(accountId) {
@@ -144,12 +149,15 @@ export class ConversationMemory {
   async enrich(input, runner, transport, signal, { retryFailed = false } = {}) {
     const initial = this.load(input), generation = initial.generation;
     if (this.store.modelConfig().vision === false || typeof transport.media !== 'function' || typeof runner.describeImage !== 'function') return;
-    const pending = initial.entries.flatMap(entry => (entry.attachments || []).filter(attachment => !attachment.description && (!attachment.error || retryFailed)).map(attachment => ({ entry, attachment })));
+    const pending = initial.entries.flatMap(entry => (entry.attachments || []).filter(attachment =>
+      !attachment.description && (!attachment.error || retryFailed) || retryFailed && needsClearerImage(attachment)).map(attachment => ({ entry, attachment })));
     for (let offset = 0; offset < pending.length; offset += 4) {
       const batch = pending.slice(offset, offset + 4);
-      const acquired = await Promise.allSettled(batch.map(({ entry, attachment }) => transport.media({ accountId: input.accountId, peerId: input.peerId, messageId: entry.messageId, resourceId: attachment.resourceId }, signal)));
+      const acquired = await Promise.allSettled(batch.map(({ entry, attachment }) => transport.media({ accountId: input.accountId, peerId: input.peerId, messageId: entry.messageId, resourceId: attachment.resourceId, preferOriginal: retryFailed }, signal)));
       signal.throwIfAborted();
-      const valid = acquired.flatMap((result, i) => result.status === 'fulfilled' ? [{ image: result.value, i }] : []);
+      const unchanged = new Set(acquired.flatMap((result, i) => result.status === 'fulfilled' && result.value.quality === 'thumbnail' &&
+        batch[i].attachment.description && batch[i].attachment.quality === 'thumbnail' ? [i] : []));
+      const valid = acquired.flatMap((result, i) => result.status === 'fulfilled' && !unchanged.has(i) ? [{ image: result.value, i }] : []);
       let descriptions = [], modelError;
       if (valid.length) {
         try { descriptions = typeof runner.describeImages === 'function' ? await runner.describeImages(valid.map(item => item.image), signal) : await Promise.all(valid.map(item => runner.describeImage(item.image, signal))); }
@@ -164,7 +172,12 @@ export class ConversationMemory {
         const description = descriptions[valid.findIndex(item => item.i === index)];
         const failure = result.status === 'rejected' ? result.reason : modelError;
         target.lastAttemptAt = this.now(); target.attempts = (target.attempts || 0) + 1;
-        if (description) { target.description = description; delete target.error; }
+        if (description) {
+          target.description = description; delete target.error;
+          target.quality = ['original', 'full', 'thumbnail'].includes(result.value.quality) ? result.value.quality : 'unknown';
+          if (Number.isSafeInteger(result.value.bytes) && result.value.bytes > 0) target.imageBytes = result.value.bytes;
+        }
+        else if (unchanged.has(index)) target.error = '仍只取得微信缩略图，保留已有笔记；请发送原图后再理解细节';
         else target.error = failure instanceof ChannelError ? failure.message : '图片未能完成理解，不能根据占位文字猜测内容';
       }
       this.save(current);

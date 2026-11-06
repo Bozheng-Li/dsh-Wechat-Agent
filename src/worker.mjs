@@ -56,6 +56,19 @@ async function perform(id, op, args) {
       privatePeers: (await backend.call('action.get_friend_list', {})).map(c => ({ id: c.id, name: c.remark || c.nickname || c.id, remark: c.remark || '', nickname: c.nickname || '' })),
       groups: (await backend.call('action.get_group_list', {})).map(g => ({ id: g.id, name: g.name || g.id }))
     };
+    case 'members': {
+      const account = backend.session.value;
+      if (!account || args?.accountId !== account.wxid) throw new ChannelError('ACCOUNT_CHANGED', '微信账号已变化，未读取其他账号的群成员');
+      const accountUin = account.uin;
+      if (typeof args?.peerId !== 'string' || args.peerId.length > 256 || !/^[\w.:-]+@chatroom$/.test(args.peerId)) throw new ChannelError('INVALID_GROUP', '请选择需要读取成员的群聊');
+      const members = await backend.call('action.get_group_member_list', { groupId: args.peerId });
+      if (backend.session.value?.wxid !== args.accountId || backend.session.value?.uin !== accountUin)
+        throw new ChannelError('ACCOUNT_CHANGED', '读取成员期间微信账号已变化，未返回其他账号的群成员');
+      return { accountId: args.accountId, peerId: args.peerId, scope: 'protocol-observed-only', members: members.filter(member => member.groupId === args.peerId).map(member => ({
+        id: member.id, name: member.card || member.nickname || member.remark || member.id, groupId: args.peerId,
+        card: member.card || '', nickname: member.nickname || '', remark: member.remark || '', alias: member.alias || ''
+      })) };
+    }
     case 'send': {
       const account = backend.session.value;
       if (!account || args?.accountId !== account.wxid) throw new ChannelError('ACCOUNT_CHANGED', '微信账号已变化或发送账号不匹配，消息尚未发送', { delivery: 'rejected' });
@@ -68,7 +81,15 @@ async function perform(id, op, args) {
       const account = backend.session.value;
       if (!account || args.accountId !== account.wxid) throw new ChannelError('ACCOUNT_CHANGED', '微信账号已变化，未读取其他账号的图片');
       const controller = new AbortController(); sending.set(id, controller);
-      try { return await loadObservedMedia({ directory: path.join(dirs.cache, 'protocol/media', String(account.uin)), peerId: args.peerId, messageId: args.messageId, resourceId: args.resourceId, signal: controller.signal }); }
+      try {
+        const image = await loadObservedMedia({ directory: path.join(dirs.cache, 'protocol/media', String(account.uin)), peerId: args.peerId, messageId: args.messageId, resourceId: args.resourceId, signal: controller.signal,
+          preferOriginal: args.preferOriginal === true,
+          downloadOriginal: ({ signal, ...input }) => backend.downloadImage(input, signal) });
+        const current = backend.session.value;
+        if (!current || ['uin', 'wxid', 'token', 'body_key', 's08'].some(key => current[key] !== account[key]))
+          throw new ChannelError('ACCOUNT_CHANGED', '读取图片期间微信账号已变化，未返回旧账号图片');
+        return image;
+      }
       finally { sending.delete(id); }
     }
     case 'close': await close(); return null;
@@ -84,7 +105,7 @@ process.on('message', async message => {
     const details = error?.details || {};
     send({ type: 'result', id: message.id, ok: false, error: {
       code: error?.code || 'WECHAT_FAILED',
-      message: error instanceof ChannelError || ['ERR_LOGIN_BUSY', 'ERR_SESSION_EXISTS', 'ERR_LOGIN_HANDOFF', 'ERR_IMAGE_FORMAT', 'ERR_IMAGE_CREDENTIAL', 'ERR_UNSUPPORTED_IMAGE'].includes(error?.code)
+      message: error instanceof ChannelError || ['ERR_LOGIN_BUSY', 'ERR_SESSION_EXISTS', 'ERR_LOGIN_HANDOFF', 'ERR_IMAGE_FORMAT', 'ERR_IMAGE_CREDENTIAL', 'ERR_UNSUPPORTED_IMAGE', 'ERR_MENTION_TARGET', 'ERR_MENTION_LIMIT'].includes(error?.code)
         ? error.message : message.op === 'send' ? '微信发送失败，请检查连接及回执记录' : '微信操作失败，请检查连接状态',
       details: {
         ...['unknown', 'partially-acknowledged', 'rejected'].includes(details.delivery) ? { delivery: details.delivery } : {},

@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { rolldown } from 'rolldown';
+import { BuiltinStickerCatalog } from '../src/builtin-stickers.mjs';
+import { inspectAssetImage } from '../src/media-library.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const pkg = root;
@@ -11,6 +13,12 @@ const manifest = JSON.parse(fs.readFileSync(path.join(pkg, 'package.json'), 'utf
 const alias = { '@napcat-wechat/protocol': path.join(root, 'src/wechat/types.ts') };
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const bundledPackages = new Set();
+const builtinStickers = new BuiltinStickerCatalog();
+for (const pack of builtinStickers.packs) for (const item of pack.items) {
+  const image = inspectAssetImage(builtinStickers.read(pack.id, item.id).content);
+  if (image.mediaType !== item.mediaType || image.width !== item.width || image.height !== item.height) throw new Error(`Invalid built-in sticker: ${item.file}`);
+}
+if (!fs.readFileSync(builtinStickers.localFile(builtinStickers.source.licenseFile), 'utf8').includes('Copyright (c) Microsoft Corporation.')) throw new Error('Missing built-in sticker attribution');
 function recordModules(output) {
   for (const chunk of output) {
     if (chunk.type !== 'chunk') continue;
@@ -91,6 +99,9 @@ if (process.argv.includes('--pack')) {
   fs.writeFileSync(path.join(stage, 'package.json'), JSON.stringify(distribution, null, 2) + '\n');
   for (const file of ['lib/index.js', 'lib/client.js', 'lib/worker.cjs', 'cordis.patch.yml', 'README.md']) copy(path.join(pkg, file), path.join(stage, file));
   for (const file of ['LICENSE', 'THIRD_PARTY_NOTICES.md', 'CHANGELOG.md']) copy(path.join(root, file), path.join(stage, file));
+  // Ship only catalogued artwork and its original license, never cached downloads.
+  for (const file of ['manifest.json', builtinStickers.source.licenseFile, ...builtinStickers.packs.flatMap(pack => pack.items.map(item => item.file))])
+    copy(builtinStickers.localFile(file), path.join(stage, 'assets/stickers', file));
   for (const directory of bundledPackages) {
     const dependency = JSON.parse(fs.readFileSync(path.join(directory, 'package.json'), 'utf8'));
     // This npm version omits its upstream license; retain the matching gitHead copy.
@@ -115,7 +126,9 @@ if (process.argv.includes('--pack')) {
   copy(python, path.join(stage, 'runtime/python'));
   fs.unlinkSync(path.join(stage, 'runtime/python/ready.json'));
   run(path.join(stage, 'runtime/python/python.exe'), ['-B', path.join(stage, 'runtime/native_login_worker.py'), '--help'], stage);
-  const release = path.join(root, 'release'); fs.mkdirSync(release, { recursive: true });
+  const outputFlag = process.argv.indexOf('--output-dir');
+  if (outputFlag >= 0 && (!process.argv[outputFlag + 1] || process.argv[outputFlag + 1].startsWith('--'))) throw new Error('--output-dir requires a directory');
+  const release = outputFlag >= 0 ? path.resolve(root, process.argv[outputFlag + 1]) : path.join(root, 'release'); fs.mkdirSync(release, { recursive: true });
   if (!process.env.npm_execpath) throw new Error('Run packaging through npm run pack:plugin so the current npm executable is explicit');
   run(process.execPath, [process.env.npm_execpath, 'pack', '--silent', '--ignore-scripts', '--pack-destination', release], stage);
   const tarball = path.join(release, `${manifest.name}-${manifest.version}.tgz`);

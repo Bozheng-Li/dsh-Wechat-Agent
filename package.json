@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-wechat-agent",
-  "version": "0.2.0-preview.2",
-  "description": "DeepSeek Harness 微信 Agent：丰富人设、会话与长期记忆、图像理解、表情素材回复和定时任务",
+  "version": "0.2.0-preview.3",
+  "description": "DeepSeek Harness 微信 Agent：独立人设、持久记忆、图片与表情回复、定时提醒、Tavily 与 DeepSeek 原生搜索",
   "keywords": [
     "dsh-plugin",
     "deepseek-harness",
@@ -24,6 +24,7 @@
     "lib/index.js",
     "lib/client.js",
     "lib/worker.cjs",
+    "assets/stickers",
     "runtime",
     "cordis.patch.yml",
     "README.md",

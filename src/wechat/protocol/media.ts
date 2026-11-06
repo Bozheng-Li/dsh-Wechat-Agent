@@ -6,6 +6,8 @@ import { bytes, fields, num, type Field } from "./wire.js";
 
 export interface ImageDescriptor {
   messageId: string;
+  kind?: 'image' | 'emoji';
+  download?: { originalBytes?: number; fullBytes?: number };
   observedAt: number;
   inlineBytes: number;
   resources: {
@@ -48,14 +50,18 @@ export function observedImage(
   mkdirSync(dir, { recursive: true });
   const attrs: Record<string, string> = {};
   let xml = content;
-  for (let n = 0; n < 2 && xml.includes("&lt;"); n++)
-    xml = xml
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/&quot;/g, '"')
-      .replace(/&amp;/g, "&");
+  for (let n = 0; n < 4; n++) {
+    const previous = xml;
+    xml = xml.replace(/&(?:amp|lt|gt|quot|apos|#\d{1,7}|#x[\da-f]{1,6});/gi, entity => {
+      const known: Record<string, string> = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'" };
+      if (known[entity.toLowerCase()]) return known[entity.toLowerCase()];
+      const value = entity.slice(2, -1), point = value[0].toLowerCase() === 'x' ? parseInt(value.slice(1), 16) : Number(value);
+      return point > 0 && point <= 0x10ffff && !(point >= 0xd800 && point <= 0xdfff) ? String.fromCodePoint(point) : entity;
+    });
+    if (xml === previous) break;
+  }
   const emoji = /<emoji\b/i.test(xml);
-  const tag = /<(?:img|emoji)\b([^>]{0,32768})\/?\s*>/i.exec(xml)?.[1] ?? "";
+  const tag = /<(?:img|imgmsg|emoji)\b([^>]{0,32768})\/?\s*>/i.exec(xml)?.[1] ?? "";
   for (const m of tag.matchAll(
     /([\w]+)\s*=\s*(?:"([^"\r\n]*)"|'([^'\r\n]*)')/g,
   ))
@@ -64,20 +70,24 @@ export function observedImage(
       .replace(/&quot;/g, '"');
   const descriptor: ImageDescriptor = {
     messageId,
+    kind: emoji ? 'emoji' : 'image',
     observedAt: Date.now(),
     inlineBytes: 0,
     attributes: Object.keys(attrs),
     resources: [],
-    contentEncoding: /<img\b/i.test(xml)
+    contentEncoding: /<(?:img|imgmsg)\b/i.test(xml)
       ? xml === content
         ? "xml"
         : "escaped-xml"
       : "other",
     contentBytes: Buffer.byteLength(content),
   };
+  const fullBytes = Number(attrs.length), originalBytes = Number(attrs.hdlength);
+  descriptor.download = { ...(Number.isSafeInteger(fullBytes) && fullBytes > 0 ? { fullBytes } : {}),
+    ...(Number.isSafeInteger(originalBytes) && originalBytes > 0 ? { originalBytes } : {}) };
   for (const [quality, field, length] of [
-    ["original", "cdnbigimgurl", "length"],
-    ["medium", "cdnmidimgurl", "cdnmidimgsize"],
+    ["original", "cdnbigimgurl", attrs.hdlength ? "hdlength" : "length"],
+    ["medium", "cdnmidimgurl", attrs.cdnmidimgsize ? "cdnmidimgsize" : "length"],
     ["thumbnail", "cdnthumburl", "cdnthumblength"],
   ] as const) {
     if (!attrs[field]) continue;
@@ -88,13 +98,13 @@ export function observedImage(
       ...(Number.isSafeInteger(size) && size > 0 ? { size } : {}),
       ...(attrs.aeskey ? { aesKey: attrs.aeskey } : {}),
       ...(quality === "original" && /^[a-f0-9]{32}$/i.test(attrs.md5 ?? "")
-        ? { md5: attrs.md5 }
+        ? { md5: attrs.md5.toLowerCase() }
         : {}),
     });
   }
   if (emoji) for (const field of ['cdnurl', 'thumburl', 'externurl']) {
     if (attrs[field]) descriptor.resources.push({ quality: field === 'thumburl' ? 'thumbnail' : 'original', reference: attrs[field],
-      ...(field === 'cdnurl' && /^[a-f0-9]{32}$/i.test(attrs.md5 || '') ? { md5: attrs.md5 } : {}) });
+      ...(field === 'cdnurl' && /^[a-f0-9]{32}$/i.test(attrs.md5 || '') ? { md5: attrs.md5.toLowerCase() } : {}) });
   }
   const wrapped = bytes(fs, 8);
   if (wrapped.length) {

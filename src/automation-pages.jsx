@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { conversationKey, matchesSearch, peerId, peerName, peerType } from './client-utils.mjs';
+import { conversationKey, formatTime, matchesSearch, peerId, peerName, peerType, searchText } from './client-utils.mjs';
+import { taskViews } from './task-history.mjs';
 
 const samePeer = (left, right) => left && right && conversationKey(left) === conversationKey(right);
 const selector = (status, peer) => ({ accountId: status.account.id, chatType: peerType(peer), peerId: peerId(peer) });
@@ -15,6 +16,46 @@ function RoomPicker({ rows, value, onChange, authorizedOnly = false }) {
       <option value="">请选择一个会话</option>{value && !filtered.some(peer => samePeer(value, peer)) && <option value={conversationKey(value)}>{peerName(value)}</option>}
       {filtered.map(peer => <option key={conversationKey(peer)} value={conversationKey(peer)}>{peerType(peer) === 'group' ? '群聊' : '私聊'} · {peerName(peer)}{peer.authorized ? '' : ' · 已撤销授权'}</option>)}
     </select></div>;
+}
+
+function TaskRecipients({ rpc, accountId, peer, value, onChange, disabled }) {
+  const [members, setMembers] = useState([]), [query, setQuery] = useState(''), [error, setError] = useState('');
+  const [loading, setLoading] = useState(false), [loaded, setLoaded] = useState(false), [revision, setRevision] = useState(0);
+  const groupId = peer && peerType(peer) === 'group' ? peerId(peer) : '';
+  useEffect(() => {
+    if (!accountId || !groupId) return;
+    const controller = new AbortController(); setLoading(true); setError('');
+    void (async () => {
+      try {
+        const result = await rpc('members', { accountId, chatType: 'group', peerId: groupId }, controller.signal);
+        if (controller.signal.aborted) return;
+        if (result?.accountId !== accountId || result?.peerId !== groupId || !Array.isArray(result.members)) throw new Error('群成员名单与当前账号或会话不匹配，请刷新后重试');
+        const unique = new Map(result.members.filter(member => member?.id && (!member.groupId || member.groupId === groupId)).map(member => [member.id, member]));
+        setMembers([...unique.values()].sort((left, right) => (left.name || left.id).localeCompare(right.name || right.id, 'zh-CN'))); setLoaded(true);
+      } catch (failure) { if (!controller.signal.aborted) setError(failure.message); }
+      finally { if (!controller.signal.aborted) setLoading(false); }
+    })();
+    return () => controller.abort();
+  }, [accountId, groupId, revision]);
+  if (!groupId) return peer ? <p className="wa-help">私聊任务会直接发送给对方，无需选择 @ 对象。</p> : null;
+  const words = searchText(query).split(' ').filter(Boolean);
+  const matching = members.filter(member => words.every(word => searchText([member.name, member.card, member.nickname, member.remark, member.alias].join(' ')).includes(word)));
+  const duplicate = name => members.filter(member => (member.name || member.id) === name).length > 1;
+  const toggle = member => onChange(value.some(target => target.id === member.id) ? value.filter(target => target.id !== member.id) : [...value, { id: member.id, name: member.name || member.id }]);
+  const missing = loaded && value.some(target => !members.some(member => member.id === target.id));
+  return <div className="wa-field wa-automation-field" data-testid="task-recipients"><div className="wa-between"><span className="wa-label">提醒对象（可选，可多选）</span><Button disabled={disabled || loading} onClick={() => setRevision(revision + 1)}>{loading ? '正在读取…' : '刷新成员'}</Button></div>
+    <p className="wa-help">按群昵称、微信昵称或备注搜索，选中后到期会真正 @ 对方。不选择则发送普通消息，不 @ 所有人。</p>
+    <input className="wa-input" aria-label="按名称查找提醒对象" placeholder="输入成员姓名，可模糊查找" value={query} disabled={disabled} onChange={event => setQuery(event.target.value)}/>
+    <Alert text={error}/>
+    <div role="group" aria-label="群成员提醒对象" style={{ maxHeight: 240, overflowY: 'auto' }}>
+      {matching.slice(0, 60).map(member => { const name = member.name || member.id, checked = value.some(target => target.id === member.id); return <label className="wa-row" key={member.id} data-member-id={member.id}><input type="checkbox" checked={checked} disabled={disabled || !checked && value.length >= 20} onChange={() => toggle(member)}/><span>{name}{member.remark && member.remark !== name ? ` · 备注：${member.remark}` : ''}{duplicate(name) ? <small className="wa-help"> · 成员标识：{member.id}</small> : null}</span></label>; })}
+      {!loading && !matching.length && <p className="wa-help">{query ? '已同步名单中没有匹配成员，请换个名字或刷新。' : '暂未同步到群成员。'}</p>}
+    </div>
+    {matching.length > 60 && <p className="wa-help">还有 {matching.length - 60} 位匹配成员，请输入更完整的名字缩小范围。</p>}
+    <div aria-live="polite"><p className="wa-help">已选提醒对象：{value.length ? `${value.length} / 20 位` : '未选择'}</p>{value.length > 0 && <div className="wa-row">{value.map(target => <Button key={target.id} disabled={disabled} aria-label={'移除提醒对象 ' + target.name} onClick={() => onChange(value.filter(item => item.id !== target.id))}>@{members.find(member => member.id === target.id)?.name || target.name} ×</Button>)}</div>}</div>
+    {missing && <p className="wa-task-warning">有已选成员暂不在这份名单中，请刷新并核对；保存时不会忽略失效对象。</p>}
+    <p className="wa-help">这里只显示当前账号在此群已同步的成员，名单可能不完整。未出现的成员可先在群内发言，等待同步后刷新。发送前会再次核对。</p>
+  </div>;
 }
 
 export function MemoryPage({ rpc, status, rows, initialPeer }) {
@@ -57,7 +98,12 @@ export function MemoryPage({ rpc, status, rows, initialPeer }) {
       {doc ? <div className="wa-memory-content" data-testid="memory-document">
         <div className="wa-between wa-section-space"><div><h2>{peerName(selected)}</h2><p className="wa-help">{doc.chars} / {doc.windowChars} 字 · {doc.entries.length} 条近期消息 · 已压缩 {doc.compressions} 次{doc.compacting ? ' · 正在压缩' : ''}</p></div><Button disabled={!!busy} onClick={() => { void reload(true).catch(failure => setError(failure.message)); }}>重新读取记忆</Button></div>
         <Alert text={doc.error}/>
-        {doc.failedImages > 0 && <div className="wa-note-box"><p>{doc.failedImages} 张图片暂未理解，记忆中保留了失败原因。</p><Button disabled={!!busy || status.modelConfig.vision === false || !selected.authorized} onClick={() => act('memory.retryImages', selector(status, selected), '已重试图片理解，仍未能识别的图片会继续标注原因。')}>{busy === 'memory.retryImages' ? '正在重新理解…' : '重试图片理解'}</Button>{status.modelConfig.vision === false && <p className="wa-help">请先在模型的高级设置中启用图像理解。</p>}</div>}
+        {(doc.failedImages > 0 || doc.lowQualityImages > 0) && <div className="wa-note-box">
+          {doc.failedImages > 0 && <p>{doc.failedImages} 张图片暂未理解，记忆中保留了失败原因。</p>}
+          {doc.lowQualityImages > 0 && <p>{doc.lowQualityImages} 张图片仅有缩略图笔记或尚未核实清晰度，可以重新获取清晰图片后理解。</p>}
+          <Button disabled={!!busy || status.modelConfig.vision === false || !selected.authorized} onClick={() => act('memory.retryImages', selector(status, selected), '已重新获取图片并重试理解，未取得清晰图片的笔记会保留清晰度提示。')}>{busy === 'memory.retryImages' ? '正在重新理解…' : '重试图片理解'}</Button>
+          {status.modelConfig.vision === false && <p className="wa-help">请先在模型的高级设置中启用图像理解。</p>}
+        </div>}
         <Field label="已保存的记忆摘要" help="可以纠正记忆或补充长期信息。近期原文会继续附在后面。"><textarea className="wa-textarea" aria-label="记忆摘要" rows={10} maxLength={100000} value={summary} disabled={!!busy} onChange={event => setSummary(event.target.value)}/></Field>
         <div className="wa-row"><Button primary disabled={!!busy || summary === base?.summary} onClick={() => act('memory.edit', { ...selector(status, selected), summary, revision: base.revision }, '记忆摘要已保存。')}>保存记忆</Button><Button disabled={!!busy || doc.compacting || doc.chars <= doc.windowChars || !selected.authorized} onClick={() => act('memory.compress', selector(status, selected), '记忆已压缩，原文快照已保留。')}>{busy === 'memory.compress' || doc.compacting ? '正在压缩…' : '立即压缩'}</Button></div>
         <details className="wa-subsection"><summary>查看本次会带给 Agent 的完整记忆</summary><pre className="wa-memory-preview">{doc.text || '暂时没有记忆，新的授权会话消息会自动写入。'}</pre></details>
@@ -68,17 +114,37 @@ export function MemoryPage({ rpc, status, rows, initialPeer }) {
   </>;
 }
 
-const taskStates = { pending: '等待执行', running: '正在执行', paused: '已暂停', completed: '已完成', cancelled: '已取消', expired: '已过期', sent: '微信已确认', failed: '失败', unknown: '结果不明', partial: '部分已确认', queued: '等待处理' };
+const taskStates = { pending: '等待执行', running: '正在执行', paused: '已暂停', completed: '已完成', cancelled: '已取消', expired: '已过期', sent: '微信已确认', failed: '失败', unknown: '结果不明', partial: '部分已确认', queued: '等待处理', settling: '等待最终结果' };
 function localDateInput(ms) { const time = new Date(ms); return new Date(ms - time.getTimezoneOffset() * 60000).toISOString().slice(0, 16); }
 function scheduleLabel(schedule) { return schedule.kind === 'once' ? '一次性' : schedule.kind === 'daily' ? '每天 ' + schedule.time + '（北京时间）' : '每 ' + schedule.minutes + ' 分钟'; }
+function TaskBadge({ state }) { return <span className={'wa-task-badge is-' + state}>{taskStates[state] || state}</span>; }
+function TaskDetails({ task, runs = [] }) {
+  return <div className="wa-task-detail-content"><p className="wa-task-content">{task.content}</p><div className="wa-task-facts">
+    <span>{task.kind === 'agent' ? 'Agent 任务' : '发送消息'} · {scheduleLabel(task.schedule)}</span><span>{task.source === 'chat' ? task.senderName + ' 在聊天中创建' : '管理员创建'}</span>
+    {task.targets?.length > 0 && <span>提醒对象：{task.targets.map(target => '@' + target.name).join('、')}</span>}
+    <span>创建时间：{date(task.createdAt)}</span><span>{task.state === 'pending' ? '下次计划' : '计划时间'}：{date(task.nextRunAt)}</span>
+    {task.state === 'cancelled' && <span>状态更新：{date(task.updatedAt)}</span>}
+  </div>{task.lastError && <p className="wa-task-warning">{task.lastError}</p>}
+    {runs.length > 0 && <div className="wa-task-executions"><h3>最近执行记录</h3>{runs.map(run => <div className="wa-task-execution" key={run.id}>
+      <div className="wa-row"><TaskBadge state={run.state}/><span>{run.finishedAt ? '结束时间：' + date(run.finishedAt) : '开始时间：' + date(run.startedAt)}</span></div>
+      <p className="wa-help">本次计划：{date(run.scheduledAt)}{run.acknowledgedMessageIds?.length ? ` · 微信确认 ${run.acknowledgedMessageIds.length} 条` : ''}</p>
+      {run.reason && <p className="wa-task-warning">{run.reason}</p>}{run.acknowledgedMessageIds?.length > 0 && <p className="wa-help wa-task-receipts">回执：{run.acknowledgedMessageIds.join('、')}</p>}
+    </div>)}</div>}
+  </div>;
+}
 export function TasksPage({ rpc, status, rows, initialPeer }) {
   const peers = rows.filter(peer => peer.authorized), accountId = status.account?.id;
   const [selected, setSelected] = useState(() => initialPeer?.authorized ? initialPeer : peers[0] || null), [data, setData] = useState({ tasks: [], runs: [] });
   const [content, setContent] = useState(''), [kind, setKind] = useState('message'), [scheduleKind, setScheduleKind] = useState('once');
   const [at, setAt] = useState(() => localDateInput(Date.now() + 5 * 60000)), [dailyTime, setDailyTime] = useState('09:00'), [minutes, setMinutes] = useState('60');
   const [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState(''), [filter, setFilter] = useState('all');
+  const [view, setView] = useState('current'), [query, setQuery] = useState(''), [page, setPage] = useState(0), [showCreate, setShowCreate] = useState(false), [loaded, setLoaded] = useState(false);
+  const [targets, setTargets] = useState([]);
   const request = useRef({ signature: '', id: '' });
-  const reload = async signal => { if (accountId) { const result = await rpc('tasks.list', { accountId }, signal); if (!signal?.aborted) setData(result); } };
+  const mounted = useRef(true), actionController = useRef(null);
+  const reload = async signal => { if (accountId) { const result = await rpc('tasks.list', { accountId }, signal); if (!signal?.aborted && mounted.current) { setData(result); setLoaded(true); } } };
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; actionController.current?.abort(); }; }, []);
+  useEffect(() => { setPage(0); }, [view, query, filter]);
   useEffect(() => {
     const controller = new AbortController(); let timer;
     const poll = async () => { try { await reload(controller.signal); } catch (failure) { if (!controller.signal.aborted) setError(failure.message); } if (!controller.signal.aborted) timer = setTimeout(poll, 2000); };
@@ -86,35 +152,57 @@ export function TasksPage({ rpc, status, rows, initialPeer }) {
   }, [accountId]);
   const act = async (endpoint, payload, success) => {
     if (busy) return false; setBusy(endpoint); setError(''); setNotice('');
-    try { await rpc(endpoint, payload); await reload(); setNotice(success); return true; } catch (failure) { setError(failure.message); return false; } finally { setBusy(''); }
+    const controller = new AbortController(); actionController.current = controller;
+    try { await rpc(endpoint, payload, controller.signal); await reload(controller.signal); if (!mounted.current || controller.signal.aborted) return false; setNotice(success); return true; }
+    catch (failure) { if (mounted.current) setError(failure.message); return false; } finally { if (mounted.current) setBusy(''); if (actionController.current === controller) actionController.current = null; }
   };
   const create = async event => {
     event.preventDefault();
+    if (!selected || busy) return;
     const schedule = scheduleKind === 'once' ? { kind: 'once', at: new Date(at).getTime() } : scheduleKind === 'daily' ? { kind: 'daily', time: dailyTime, timeZone: 'Asia/Shanghai' } : { kind: 'interval', minutes: Number(minutes) };
-    const task = { kind, content, schedule }, target = selector(status, selected), signature = JSON.stringify({ target, task });
+    const task = { kind, content, schedule, targets }, target = selector(status, selected), signature = JSON.stringify({ target, task });
     if (signature !== request.current.signature) request.current = { signature, id: crypto.randomUUID() };
-    if (await act('tasks.create', { ...target, task, requestId: request.current.id }, '任务已保存，到期后向选定会话执行。')) { setContent(''); request.current = { signature: '', id: '' }; }
+    if (await act('tasks.create', { ...target, task, requestId: request.current.id }, '任务已保存，到期后向选定会话执行。')) { setContent(''); setTargets([]); setShowCreate(false); setView('current'); setFilter('all'); setQuery(''); request.current = { signature: '', id: '' }; }
   };
-  const visible = data.tasks.filter(task => filter !== 'current' || selected && task.chatType === peerType(selected) && task.peerId === peerId(selected));
-  return <><header className="wa-page-head"><div><p className="wa-eyebrow">SCHEDULED TASKS</p><h1>定时任务</h1><p className="wa-muted">安排消息或 Agent 任务，也可以在聊天中说“小胖，一分钟后提醒我吃饭”。</p></div></header>
+  const words = searchText(query).split(' ').filter(Boolean);
+  const visible = data.tasks.filter(task => (filter === 'all' || conversationKey(task) === filter) && words.every(word => searchText([task.name, task.content, task.senderName, ...(task.targets || []).map(target => target.name)].join(' ')).includes(word)));
+  const views = taskViews(visible, data.runs), entries = views[view], pageCount = Math.max(1, Math.ceil(entries.length / 20)), currentPage = Math.min(page, pageCount - 1);
+  const pageEntries = entries.slice(currentPage * 20, currentPage * 20 + 20);
+  const rooms = [...new Map(data.tasks.map(task => [conversationKey(task), task])).values()];
+  return <><header className="wa-page-head"><div><p className="wa-eyebrow">SCHEDULED TASKS</p><h1>定时任务</h1><p className="wa-muted">查看接下来要做的事，已结束的任务归入历史记录。</p></div>{accountId && <Button primary data-testid="task-create-toggle" aria-expanded={showCreate} aria-controls="wa-task-create" disabled={!!busy} onClick={() => setShowCreate(value => !value)}>{showCreate ? '收起新增' : '新增任务'}</Button>}</header>
     <Alert text={error || data.error}/>{notice && <p className="wa-alert" role="status">{notice}</p>}
     {!accountId ? <div className="wa-empty"><h3>先连接微信账号</h3><p>连接并授权会话后即可安排任务。</p></div> : <>
-      <form className="wa-card wa-content-narrow" onSubmit={create} data-testid="task-create-form"><h2>新增任务</h2><p className="wa-help">任务保存在本地。插件运行、微信在线且会话获授权时执行；超过时间十分钟会跳过，避免补发过期提醒。</p>
-        <RoomPicker rows={peers} value={selected} onChange={setSelected} authorizedOnly/>
+      {showCreate && <form id="wa-task-create" className="wa-card wa-task-create" onSubmit={create} data-testid="task-create-form"><h2>安排一个任务</h2><p className="wa-help">插件运行、微信在线且会话获授权时执行；超过时间十分钟会跳过。</p><fieldset disabled={!!busy} className="wa-task-fields">
+        <RoomPicker rows={peers} value={selected} onChange={peer => { setSelected(peer); setTargets([]); }} authorizedOnly/>
+        <TaskRecipients key={accountId + ':' + (selected ? conversationKey(selected) : '')} rpc={rpc} accountId={accountId} peer={selected} value={targets} onChange={setTargets} disabled={!!busy}/>
         <Field label="做什么"><select className="wa-select" aria-label="任务类型" value={kind} onChange={event => setKind(event.target.value)}><option value="message">发送这段消息</option><option value="agent">让 Agent 执行任务并回复</option></select></Field>
         <Field label={kind === 'message' ? '发送内容' : '任务要求'} help={kind === 'agent' ? '到期后结合该会话记忆、人设与已开启的能力执行。' : '到期后原样发送这段文字。'}><textarea className="wa-textarea" aria-label="定时任务内容" rows={4} maxLength={4000} value={content} onChange={event => setContent(event.target.value)} placeholder={kind === 'agent' ? '例如：总结群里今天讨论的行动项。' : '例如：该吃饭啦。'}/></Field>
         <div className="wa-form-grid"><Field label="什么时候"><select className="wa-select" aria-label="任务执行方式" value={scheduleKind} onChange={event => setScheduleKind(event.target.value)}><option value="once">指定时间，仅一次</option><option value="daily">每天固定时间</option><option value="interval">按间隔重复</option></select></Field>
           {scheduleKind === 'once' ? <Field label="执行时间（当前设备时区）"><input className="wa-input" aria-label="任务执行时间" type="datetime-local" value={at} onChange={event => setAt(event.target.value)}/></Field> : scheduleKind === 'daily' ? <Field label="每天几点（北京时间）"><input className="wa-input" aria-label="每日执行时间" type="time" value={dailyTime} onChange={event => setDailyTime(event.target.value)}/></Field> : <Field label="每隔多少分钟"><input className="wa-input" aria-label="重复间隔分钟" type="number" min="1" max="525600" value={minutes} onChange={event => setMinutes(event.target.value)}/></Field>}
-        </div><Button type="submit" primary disabled={!!busy || !selected || !content.trim() || !status.settings.enabled}>{busy === 'tasks.create' ? '正在保存…' : '保存定时任务'}</Button>{!status.settings.enabled && <p className="wa-help">请先在会话页开启自动回复。</p>}
-      </form>
-      <section className="wa-card wa-section-space"><div className="wa-between"><h2>已保存的任务</h2><select className="wa-select" aria-label="定时任务筛选" value={filter} onChange={event => setFilter(event.target.value)}><option value="all">当前账号全部会话</option><option value="current">仅上方选定会话</option></select></div>
-        <div className="wa-task-list" data-testid="task-list">{visible.map(task => <article className="wa-task" key={task.id} data-task-id={task.id}>
-          <div className="wa-between"><strong>{task.name}</strong><span className="wa-badge">{taskStates[task.state] || task.state}</span></div><p className="wa-task-content">{task.content}</p>
-          <p className="wa-help">{task.kind === 'agent' ? 'Agent 任务' : '发送消息'} · {scheduleLabel(task.schedule)} · {task.source === 'chat' ? task.senderName + ' 在聊天中创建' : '管理员创建'}</p><p className="wa-help">{task.state === 'completed' ? '执行时间' : '计划时间'}：{date(task.nextRunAt)}</p>
-          {task.lastState && <p className="wa-help">上次结果：{taskStates[task.lastState] || task.lastState}{task.lastError ? ' · ' + task.lastError : ''}</p>}
-          <div className="wa-row">{task.state === 'pending' && <Button disabled={!!busy} onClick={() => act('tasks.pause', { accountId, taskId: task.id }, '任务已暂停。')}>暂停</Button>}{task.state === 'paused' && !['unknown', 'partial'].includes(task.lastState) && <Button disabled={!!busy} onClick={() => act('tasks.resume', { accountId, taskId: task.id }, '任务已恢复。')}>恢复</Button>}{['pending', 'paused', 'running'].includes(task.state) && <Button danger disabled={!!busy} onClick={() => act('tasks.cancel', { accountId, taskId: task.id }, '任务已取消；若已发送，请以回执记录为准。')}>取消任务</Button>}</div>
-        </article>)}</div>{!visible.length && <p className="wa-help wa-section-space">还没有匹配的定时任务。</p>}
-        <details className="wa-subsection"><summary>最近执行记录</summary>{data.runs.map(run => <p className="wa-help" key={run.id}>{date(run.startedAt)} · {taskStates[run.state] || run.state}{run.acknowledgedMessageIds?.length ? ' · 微信确认 ' + run.acknowledgedMessageIds.length + ' 条' : ''}{run.reason ? ' · ' + run.reason : ''}</p>)}{!data.runs.length && <p className="wa-help">暂无执行记录。</p>}</details>
+        </div><div className="wa-row"><Button type="submit" primary disabled={!!busy || !selected || !content.trim() || !status.settings.enabled}>{busy === 'tasks.create' ? '正在保存…' : '保存定时任务'}</Button><Button onClick={() => setShowCreate(false)}>收起，保留草稿</Button></div>{!status.settings.enabled && <p className="wa-help">请先在会话页开启自动回复。</p>}</fieldset>
+      </form>}
+      <section className="wa-card wa-task-workspace">
+        <div className="wa-task-toolbar"><div className="wa-task-tabs" role="tablist" aria-label="任务视图">{[['current', '当前任务'], ['history', '历史记录']].map(([key, label]) => <button type="button" role="tab" id={'wa-task-tab-' + key} aria-controls="wa-task-panel" aria-selected={view === key} tabIndex={view === key ? 0 : -1} data-testid={'task-tab-' + key} key={key} onClick={() => setView(key)} onKeyDown={event => { if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return; event.preventDefault(); const next = event.key === 'Home' ? 'current' : event.key === 'End' ? 'history' : key === 'current' ? 'history' : 'current'; setView(next); document.getElementById('wa-task-tab-' + next)?.focus(); }}>{label}<span>{views[key].length}</span></button>)}</div>
+          <div className="wa-task-tools"><input className="wa-input" aria-label="搜索定时任务" placeholder="搜索内容或会话" value={query} onChange={event => setQuery(event.target.value)}/><select className="wa-select" aria-label="定时任务筛选" value={filter} onChange={event => setFilter(event.target.value)}><option value="all">全部会话</option>{rooms.map(task => <option key={conversationKey(task)} value={conversationKey(task)}>{task.name}</option>)}</select></div></div>
+        {!status.settings.enabled && <p className="wa-task-warning">自动回复已关闭，定时任务暂不执行。</p>}
+        {view === 'history' && <p className="wa-help wa-task-history-hint">每个任务保留一条记录；展开可查看完整内容、最近执行和微信回执。</p>}
+        <div id="wa-task-panel" role="tabpanel" aria-labelledby={'wa-task-tab-' + view}>
+          {view === 'current' ? <div className="wa-task-list" data-testid="task-list">{pageEntries.map(task => <article className="wa-task" key={task.id} data-task-id={task.id}>
+            <div className="wa-task-main"><div className="wa-task-heading"><h3>{task.content}</h3><p className="wa-help">{task.name} · {task.kind === 'agent' ? 'Agent 任务' : '发送消息'} · {scheduleLabel(task.schedule)}</p>{task.targets?.length > 0 && <p className="wa-help">提醒对象：{task.targets.map(target => '@' + target.name).join('、')}</p>}</div>
+              <div className="wa-task-next"><span>{task.state === 'running' ? '本次计划' : task.state === 'paused' ? '原计划' : '下次执行'}</span><time>{formatTime(task.nextRunAt)}</time></div><TaskBadge state={task.state}/>
+              <div className="wa-task-actions">{task.state === 'pending' && <Button disabled={!!busy} onClick={() => act('tasks.pause', { accountId, taskId: task.id }, '任务已暂停。')}>暂停</Button>}{task.state === 'paused' && !['unknown', 'partial'].includes(task.lastState) && <Button disabled={!!busy} onClick={() => act('tasks.resume', { accountId, taskId: task.id }, '任务已恢复。')}>恢复</Button>}<Button danger disabled={!!busy} onClick={() => act('tasks.cancel', { accountId, taskId: task.id }, '任务已取消，已移入历史记录；发送结果以回执为准。')}>取消任务</Button></div>
+            </div>{task.lastState && ['failed', 'unknown', 'partial', 'cancelled', 'expired'].includes(task.lastState) && <p className="wa-task-warning">{taskStates[task.lastState]}{task.lastError ? ' · ' + task.lastError : ''}</p>}
+            <details className="wa-task-details"><summary>查看详情</summary><TaskDetails task={task}/></details>
+          </article>)}</div> : <div className="wa-task-history" data-testid="task-history">
+            {pageEntries.length > 0 && <div className="wa-task-history-head"><span>记录时间</span><span>任务与会话</span><span>结果</span><span/></div>}
+            {pageEntries.map(entry => <details className="wa-task-history-row" key={entry.task.id} data-task-id={entry.task.id}>
+              <summary><time>{formatTime(entry.timestamp)}</time><div className="wa-task-history-title"><strong>{entry.task.content}</strong><span>{entry.task.name} · {scheduleLabel(entry.task.schedule)}{entry.task.state === 'cancelled' && entry.result === 'sent' ? ' · 已有微信确认，请以回执为准' : ''}</span></div><div className="wa-task-history-result"><TaskBadge state={entry.state}/>{entry.result && entry.result !== entry.state && entry.state !== 'completed' && <small>{taskStates[entry.result] || entry.result}</small>}</div><span className="wa-task-expand" aria-hidden="true">⌄</span></summary>
+              <TaskDetails task={entry.task} runs={entry.runs}/>
+            </details>)}
+          </div>}
+          {!entries.length && <div className="wa-empty wa-task-empty"><h3>{!loaded ? '正在读取任务…' : query || filter !== 'all' ? '没有匹配的任务' : view === 'current' ? '暂无待执行任务' : '暂无历史记录'}</h3><p>{query || filter !== 'all' ? '试试其他关键词或切换到全部会话。' : view === 'current' ? '可以点击右上方新增，也可以在聊天中安排提醒。' : '任务结束后会保留在这里，执行过的循环任务也可查看最近结果。'}</p></div>}
+        </div>
+        {entries.length > 20 && <div className="wa-task-pagination"><Button disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>上一页</Button><span>{currentPage * 20 + 1}–{Math.min(currentPage * 20 + 20, entries.length)} / {entries.length}</span><Button disabled={currentPage + 1 >= pageCount} onClick={() => setPage(currentPage + 1)}>下一页</Button></div>}
       </section>
     </>}
   </>;
