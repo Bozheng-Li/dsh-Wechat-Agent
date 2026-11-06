@@ -66,11 +66,15 @@ if (process.argv.includes('--pack')) {
   const pythonHash = '91d828c2da3a029b41699e918674a0cb379c02cf20dab9c501306885f837402a';
   fs.mkdirSync(cache, { recursive: true });
   if (!fs.existsSync(zip)) {
-    const response = await fetch('https://www.python.org/ftp/python/3.13.9/python-3.13.9-embed-amd64.zip', { signal: AbortSignal.timeout(60000) });
-    if (!response.ok) throw new Error(`Python download: HTTP ${response.status}`);
-    const bytes = Buffer.from(await response.arrayBuffer());
-    if (hash(bytes) !== pythonHash) throw new Error('Python download hash mismatch');
-    fs.writeFileSync(zip, bytes);
+    try {
+      const response = await fetch('https://www.python.org/ftp/python/3.13.9/python-3.13.9-embed-amd64.zip', { signal: AbortSignal.timeout(60000) });
+      if (!response.ok) throw new Error(`Python download: HTTP ${response.status}`);
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (hash(bytes) !== pythonHash) throw new Error('Python download hash mismatch');
+      fs.writeFileSync(zip, bytes);
+    } catch (cause) {
+      throw new Error('无法下载已验证的 Python 运行时。请检查网络，或将官方 python-3.13.9-embed-amd64.zip 放入 storage/cache/ 后重试；仍会校验 SHA-256。', { cause });
+    }
   }
   if (hash(fs.readFileSync(zip)) !== pythonHash) throw new Error('Embedded Python hash mismatch');
   if (!fs.existsSync(path.join(python, 'ready.json'))) {
@@ -89,9 +93,13 @@ if (process.argv.includes('--pack')) {
   for (const file of ['LICENSE', 'THIRD_PARTY_NOTICES.md', 'CHANGELOG.md']) copy(path.join(root, file), path.join(stage, file));
   for (const directory of bundledPackages) {
     const dependency = JSON.parse(fs.readFileSync(path.join(directory, 'package.json'), 'utf8'));
-    const licenses = fs.readdirSync(directory).filter(name => /^(?:licen[cs]e|copying)(?:[.-]|$)/i.test(name));
+    // This npm version omits its upstream license; retain the matching gitHead copy.
+    const licenseDirectory = dependency.name === '@nodable/entities' && dependency.version === '3.1.0'
+      ? path.join(root, 'third-party/nodable-entities') : directory;
+    const licenses = fs.readdirSync(licenseDirectory).filter(name => /^(?:licen[cs]e|copying)(?:[.-]|$)/i.test(name));
     if (!licenses.length) throw new Error(`Missing bundled dependency license: ${dependency.name}`);
-    for (const file of licenses) copy(path.join(directory, file), path.join(stage, 'licenses', dependency.name.replaceAll('/', '__'), file));
+    if (licenseDirectory !== directory) licenses.push('NOTICE.md');
+    for (const file of licenses) copy(path.join(licenseDirectory, file), path.join(stage, 'licenses', dependency.name.replaceAll('/', '__'), file));
   }
   for (const file of ['native_login_worker.py', 'native_login_agent.js', 'native_engine.py']) copy(path.join(root, 'runtime', file), path.join(stage, 'runtime', file));
   copy(path.join(root, 'runtime/wechat39/proto'), path.join(stage, 'runtime/wechat39/proto'));

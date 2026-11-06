@@ -65,6 +65,8 @@ npm run audit:package
 
 完整包输出到 `release/dsh-plugin-wechat-agent-0.1.0-preview.4.tgz`，同目录提供 `.sha256` 校验文件。打包脚本下载并校验 Python 3.13.9 嵌入版，安装 `runtime/requirements.txt` 中固定版本的依赖。只打包显式列出的运行文件、更新日志和许可证，排除开发脚本、个人配置、登录资料、存储和测试入口。
 
+若 Python 自动下载超时，可将从 [Python 官网](https://www.python.org/ftp/python/3.13.9/python-3.13.9-embed-amd64.zip) 取得的 `python-3.13.9-embed-amd64.zip` 放入 `storage/cache/` 后重试；脚本会验证相同的固定 SHA-256。
+
 `lib/`、`release/`、`storage/`、`node_modules/`、本地 Python 和微信组件均被 Git 忽略。不要直接使用 `npm pack` 作为完整安装包；使用上面的 `pack:plugin` 命令准备全部运行资源。兼容命令 `dsh:build`、`dsh:test`、`dsh:pack` 仍可使用。
 
 ### 可选原生验证

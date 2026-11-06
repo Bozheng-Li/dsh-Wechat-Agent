@@ -10,6 +10,8 @@ The plugin and the protocol/login subset in `src/wechat/` and `runtime/` origina
 
 The plugin bundles fast-xml-parser, Zod and their included dependencies. Full dependency licenses are copied into `licenses/` in the complete installation package. Exact versions, integrity hashes and the development toolchain are locked in `package-lock.json`.
 
+The npm archive for `@nodable/entities@3.1.0` omits its license file. Its upstream MIT license and provenance are preserved in `third-party/nodable-entities/` and copied to the installation package's `licenses/@nodable__entities/` directory.
+
 React is provided by DeepSeek Harness and is not bundled by this project. Rolldown and node-tar are build tools. DeepSeek Harness is installed separately and remains subject to its own license and terms.
 
 ## Python runtime
