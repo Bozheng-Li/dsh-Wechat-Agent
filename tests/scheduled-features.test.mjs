@@ -147,13 +147,28 @@ test('revoking authorization during generation blocks delivery, with retry waiti
 });
 
 for (const failure of ['model', 'memory', 'timeout', 'empty']) test(`saved agent reminder uses an acknowledged fallback when ${failure} fails before sending`, async t => {
-  const f = await fixture(t);
+  const f = await fixture(t); let observedModelTimeout = false;
   if (failure === 'memory') f.channel.memory.enrich = async () => { throw new ChannelError('MEMORY_INVALID', '合成记忆无法读取'); };
   else if (failure === 'timeout') {
     f.channel.timeoutMs = 10;
-    f.runner.run = async input => { await new Promise((resolve, reject) => input.signal.addEventListener('abort', () => reject(input.signal.reason), { once: true })); };
+    f.runner.run = async input => { await new Promise((resolve, reject) => {
+      // The synthetic model has no socket. Keep this wait alive while the
+      // production timeout is unref'ed, and fail if that timeout never fires.
+      const watchdog = setTimeout(() => {
+        input.signal.removeEventListener('abort', aborted);
+        reject(new Error('The model timeout did not abort the synthetic request'));
+      }, 1000);
+      function aborted() {
+        clearTimeout(watchdog);
+        observedModelTimeout = input.signal.reason?.code === 'MODEL_TIMEOUT';
+        reject(input.signal.reason);
+      }
+      if (input.signal.aborted) aborted();
+      else input.signal.addEventListener('abort', aborted, { once: true });
+    }); };
   } else f.runner.run = async () => { if (failure === 'empty') return { text: '' }; throw new ChannelError('MODEL_INCOMPLETE', '模型未完成'); };
   const task = f.create('agent', '下午三点核对会议材料'); f.advance(1000); await f.scheduler.tick();
+  if (failure === 'timeout') assert(observedModelTimeout, 'The actual channel deadline must trigger the fallback');
   assert.equal(f.sent.length, 1); assert.equal(f.task(task.id).state, 'completed');
   assert(f.sent[0].message[0].data.text.includes(task.content)); assert(f.sent[0].message[0].data.text.includes('未能生成'));
   assert(f.record(task.id).taskFallback); assert.equal(f.record(task.id).state, 'sent');
