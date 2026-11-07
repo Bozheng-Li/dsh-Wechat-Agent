@@ -6,12 +6,12 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { deflateSync } from 'node:zlib';
 import { rolldown } from 'rolldown';
-import { StateStore, WechatChannel, TaskScheduler, AgentIdentity, VERSION, identity, createPluginService, rpcHandler, ChannelError, describeWorkspace, migrateWorkspaceRoot, SearchService } from '../lib/testing.js';
+import { StateStore, WechatChannel, TaskScheduler, AgentIdentity, VERSION, identity, createPluginService, rpcHandler, ChannelError, describeWorkspace, migrateWorkspaceRoot, SearchService, REPLY_STYLE_REVIEW_NOTE } from '../lib/testing.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const electron = process.argv[2] || process.env.ELECTRON_PATH;
 if (!electron || !path.isAbsolute(electron) || !fs.existsSync(electron)) throw new Error('Pass an Electron executable: npm run test:ui -- <absolute path to electron.exe>');
-const out = path.join(root, 'storage/logs', process.env.WECHAT_UI_TEST_VISUALS_ONLY === '1' ? 'visual-refresh-preview' : process.env.WECHAT_UI_TEST_TASKS_ONLY === '1' ? 'tasks-layout-preview' : 'ui-preview');
+const out = path.resolve(process.env.WECHAT_UI_TEST_OUTPUT || path.join(root, 'storage/logs', process.env.WECHAT_UI_TEST_NATURAL_ONLY === '1' ? 'natural-chat-preview' : process.env.WECHAT_UI_TEST_VISUALS_ONLY === '1' ? 'visual-refresh-preview' : process.env.WECHAT_UI_TEST_TASKS_ONLY === '1' ? 'tasks-layout-preview' : 'ui-preview'));
 fs.mkdirSync(out, { recursive: true });
 fs.mkdirSync(path.join(root, 'storage/tmp'), { recursive: true });
 const fixture = fs.mkdtempSync(path.join(root, 'storage/tmp/ui-preview-'));
@@ -95,8 +95,15 @@ const worker = {
   async send() { throw new Error('The UI fixture must never send a WeChat message'); }
 };
 const assetAnalysisRequests = [];
+let memoryImageReadsReady = false;
+worker.media = async ({ resourceId }) => {
+  if (resourceId === 'c'.repeat(64)) return { data: fixturePng([200, 200, 200]).toString('base64'), mediaType: 'image/png', quality: 'thumbnail', fixtureMemoryImage: true };
+  if (!memoryImageReadsReady) throw new ChannelError('IMAGE_URL_INVALID', '图片资源地址不是可读取的微信媒体地址');
+  return { data: fixturePng([200, 30, 30]).toString('base64'), mediaType: 'image/png', quality: 'original', fixtureMemoryImage: true };
+};
 const runner = { selection: () => store.modelChoice() || { provider: 'fixture', model: 'alpha' }, defaultSelection: () => ({ provider: 'fixture', model: 'alpha' }),
-  async describeImages(images, signal) { signal.throwIfAborted(); assetAnalysisRequests.push(images.length); return images.map(() => '合成方块，用于表达赞同或让讨论冷静下来。'); },
+  async describeImage(_image, signal) { signal.throwIfAborted(); return '合成测试图片的笔记。'; },
+  async describeImages(images, signal) { signal.throwIfAborted(); if (!images.every(image => image.fixtureMemoryImage)) assetAnalysisRequests.push(images.length); return images.map(() => '合成方块，用于表达赞同或让讨论冷静下来。'); },
   async run() { throw new Error('The UI fixture must never generate a model response'); } };
 let channel = new WechatChannel({ store, runner, transport: worker });
 // This fixture checks owner UI/RPC and durable files. Automatic extraction must not
@@ -186,6 +193,11 @@ const server = http.createServer(async (req, res) => {
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     if (req.url === '/fixture') {
       if (body.command === 'state') { json(res, service.call('status')); return; }
+      if (body.command === 'flagRecordStyle') {
+        const record = store.data.records.find(value => value.key === body.payload?.recordKey && value.accountId === state.account?.id);
+        if (!record || record.state !== 'sent') throw new Error('Choose a confirmed synthetic record');
+        store.update(record, { replyStyleWarning: REPLY_STYLE_REVIEW_NOTE }); json(res, { key: record.key, reply: record.reply }); return;
+      }
       if (body.command === 'searchFailure') { runner.searchStatus = () => ({ ok: false, provider: 'tavily', code: 'WEB_SEARCH_AUTH_FAILED', message: 'Tavily 搜索接口返回 HTTP 401，请检查 Tavily API Key 与访问权限。', checkedAt: new Date().toISOString() }); json(res, { ok: true }); return; }
       if (body.command === 'paths') { json(res, paths); return; }
       if (body.command === 'stats') { json(res, { lastHistoryRequest, cancelRequests, tasks: scheduler.list(accountId).tasks, assetUploadRequests, assetAnalysisRequests, memberRequests, migrations, storageRequests, identityRequests, activeRoot, storeFile: store.file, identityPath: agentIdentity.file, preservedFiles }); return; }
@@ -198,6 +210,31 @@ const server = http.createServer(async (req, res) => {
       if (body.command === 'assetZip') { json(res, { name: '界面测试表情.zip', data: assetZip.toString('base64'), bytes: assetZip.length }); return; }
       if (body.command === 'assets') { json(res, channel.library.list(state.account.id)); return; }
       if (body.command === 'globalMemory') { json(res, channel.longMemory.view(state.account.id)); return; }
+      if (body.command === 'imageMemory') { json(res, channel.imageMemory.list({ accountId: state.account.id, chatType: body.payload?.chatType || 'group', peerId: body.payload?.peerId || 'group_alpha@chatroom' })); return; }
+      if (body.command === 'seedImageMemory') {
+        const samples = [];
+        for (const [chatType, peerId, label] of [['group', 'group_alpha@chatroom', 'ALPHA_IMAGE_NOTE'], ['group', 'group_beta@chatroom', 'BETA_IMAGE_NOTE'], ['private', 'wxid_alice', 'PRIVATE_IMAGE_NOTE']]) {
+          const scope = { accountId, chatType, peerId }, entry = { key: label, messageId: 'message-' + label, direction: 'incoming', senderId: 'wxid_alice', senderName: 'Alice', time: Date.now(), text: label,
+            attachments: [{ type: 'image', resourceId: label.toLowerCase().padEnd(64, 'a'), description: label + '：红色方块。' }] };
+          channel.memory.append(scope, entry);
+          const item = await channel.imageMemory.capture(scope, entry, entry.attachments[0], { mediaType: 'image/png', data: fixturePng([220, 20, 20]).toString('base64'), quality: 'original' }, new AbortController().signal);
+          samples.push({ scope, id: item.id });
+        }
+        json(res, samples); return;
+      }
+      if (body.command === 'seedLongMemorySources') {
+        if (channel.longMemory.view(accountId).sections.length) throw new Error('Long-memory source fixture already seeded');
+        for (const [chatType, peerId, label] of [['group', 'group_alpha@chatroom', 'ALPHA_SOURCE_FACT'],
+          ['group', 'group_beta@chatroom', 'BETA_SOURCE_FACT'], ['private', 'wxid_alice', 'PRIVATE_SOURCE_FACT']]) {
+          const scope = { accountId, chatType, peerId };
+          channel.longMemory.capture(scope, [{ key: 'ui-long-source-' + label, text: label + '：本会话的合成长事实。', direction: 'incoming',
+            senderId: 'wxid_alice', senderName: 'Alice', time: Date.now() }]);
+          await channel.longMemory.extract(scope, { run: async () => ({ text: JSON.stringify({
+            facts: [{ text: label + '：本会话的合成长事实。', sources: ['s1'], replaces: [] }]
+          }) }) }, new AbortController().signal);
+        }
+        json(res, channel.longMemory.view(accountId)); return;
+      }
       if (body.command === 'localMemory') { json(res, await service.call('memory.get', { accountId, chatType: 'group', peerId: body.payload?.peerId || 'group_alpha@chatroom' })); return; }
       if (body.command === 'holdNext') {
         if (body.payload?.endpoint !== 'memory.edit' || heldRequests.has(body.payload.endpoint)) throw new Error('Only one isolated memory save can be held');
@@ -220,6 +257,15 @@ const server = http.createServer(async (req, res) => {
         json(res, channel.longMemory.view(accountId)); return;
       }
       if (body.command === 'repairGlobalMemory') { repairGlobalMemory(); json(res, channel.longMemory.view(accountId)); return; }
+      if (body.command === 'seedImageFailures') {
+        const scope = { accountId, chatType: 'group', peerId: 'group_alpha@chatroom' };
+        channel.memory.append(scope, { key: 'ui-image-failures', messageId: 'ui-image-failures', text: '[合成图片与表情]', direction: 'incoming', time: Date.now(),
+          attachments: [{ type: 'face', resourceId: 'd'.repeat(64), error: '旧表情理解失败，应跳过' }, { type: 'image', resourceId: 'a'.repeat(64), error: '图片资源地址不是可读取的微信媒体地址' },
+            { type: 'image', resourceId: 'b'.repeat(64), error: '图片资源地址不是可读取的微信媒体地址' },
+            { type: 'image', resourceId: 'c'.repeat(64), description: '仅有缩略图，小字尚未核实。', quality: 'thumbnail' }] });
+        json(res, channel.memory.view(scope)); return;
+      }
+      if (body.command === 'fixImageReads') { memoryImageReadsReady = true; json(res, { ok: true }); return; }
       if (body.command === 'taskHistory') {
         if (scheduler.data.tasks.some(task => task.id === 'ui-history-completed-0')) throw new Error('Task history fixture already seeded');
         const stamp = Date.now(), planned = stamp - 3600000;
@@ -277,10 +323,15 @@ const server = http.createServer(async (req, res) => {
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const origin = `http://127.0.0.1:${server.address().port}`;
 try {
-  const env = { ...process.env, WECHAT_UI_TEST_ORIGIN: origin }; delete env.ELECTRON_RUN_AS_NODE;
+  const runId = randomBytes(16).toString('hex');
+  const env = { ...process.env, WECHAT_UI_TEST_ORIGIN: origin, WECHAT_UI_TEST_RUN_ID: runId }; delete env.ELECTRON_RUN_AS_NODE;
   const child = spawn(electron, [path.join(root, 'scripts/test-ui-driver.cjs'), 'ui-fixture', out], { cwd: root, windowsHide: true, stdio: 'inherit', env });
   const exit = await new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', code => resolve(code)); });
   if (exit !== 0) throw new Error(`UI verification failed (${exit}); see ${path.join(out, 'report.json')}`);
+  let report;
+  try { report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8')); } catch {}
+  if (!report?.ok || report.runId !== runId || !report.assertions?.length || !report.screenshots?.length || report.errors?.length)
+    throw new Error('UI driver did not produce a successful report for this run; check the Electron executable and report.json');
   fs.writeFileSync(path.join(out, 'fixture-summary.json'), JSON.stringify({ ok: true, root: fixture, version: VERSION, actualWeChatMessages: 0, actualModelRequests: 0 }, null, 2));
 } finally {
   for (const held of heldRequests.values()) held.release();

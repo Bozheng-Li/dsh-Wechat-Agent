@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { imageMime } from './media.ts';
-import { ChannelError } from '../../contracts.mjs';
+import { ChannelError } from "../../shared/contracts.mjs";
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 function inside(root, file) {
@@ -13,9 +13,13 @@ function allowedMediaUrl(value) {
   let url;
   try { url = new URL(value); } catch { throw new ChannelError('IMAGE_UNAVAILABLE', '微信仅提供了加密资源标识，暂未取得图片内容'); }
   if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.port ||
-      !/(^|\.)(qpic\.cn|weixin\.qq\.com|wx\.qq\.com|wxapp\.tc\.qq\.com)$/.test(url.hostname))
+      !/(^|\.)(qpic\.cn|weixin\.qq\.com|wx\.qq\.com|wxapp\.tc\.qq\.com|vweixinf\.tc\.qq\.com)$/.test(url.hostname))
     throw new ChannelError('IMAGE_URL_INVALID', '图片资源地址不是可读取的微信媒体地址');
-  url.protocol = 'https:';
+  // WeChat advertises this emoji CDN over HTTP. Its HTTPS certificate does
+  // not cover the hostname, so a forced upgrade makes valid resources fail.
+  // Preserve the advertised protocol only for this exact CDN; HTTPS requests
+  // still keep normal certificate verification.
+  if (url.hostname !== 'vweixinf.tc.qq.com') url.protocol = 'https:';
   return url;
 }
 async function downloadResource(resource, signal, fetcher) {

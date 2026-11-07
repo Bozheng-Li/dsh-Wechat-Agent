@@ -3,3 +3,4 @@ Pillow==12.3.0
 frida==17.24.3
 cffi==2.1.1
 pycparser==3.12
+pypdf==6.16.1

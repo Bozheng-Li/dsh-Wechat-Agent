@@ -58,7 +58,7 @@ test('ordinary chat and due agent tasks still inherit global identity and the co
     assert(prompt.includes('ROOM_PRESENTATION'));
     assert(!prompt.includes('PERSONA_PRESENTATION'));
     assert(prompt.indexOf('GLOBAL_PRESENTATION') > prompt.indexOf('ROOM_PRESENTATION'), 'the administrator contract is kept after the persona defaults');
-    assert(prompt.includes('不能覆盖管理员明确指定的语言、署名或固定结尾'));
+    assert(prompt.includes('管理员明确要求的语言、署名、固定开头和结尾仍保留'));
     assert.equal(prompt.split('GLOBAL_PRESENTATION').length, 2, 'the current global contract is included exactly once');
   }
 });

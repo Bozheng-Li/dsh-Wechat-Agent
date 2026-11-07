@@ -1,0 +1,79 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { parseSync } from 'rolldown/utils';
+import { packageRoot, resourcePath } from '../src/platform/resources.mjs';
+
+const root = fileURLToPath(new URL('../', import.meta.url));
+const sourceRoot = path.join(root, 'src');
+const files = (directory) =>
+  fs
+    .readdirSync(directory, { withFileTypes: true })
+    .flatMap((entry) =>
+      entry.isDirectory() ? files(path.join(directory, entry.name)) : [path.join(directory, entry.name)]
+    )
+    .filter((file) => /\.(mjs|jsx|ts)$/.test(file));
+
+test('source dependencies resolve, remain acyclic and respect browser and storage boundaries', () => {
+  const graph = new Map();
+  for (const file of files(sourceRoot)) {
+    const parsed = parseSync(file, fs.readFileSync(file, 'utf8'));
+    assert.deepEqual(parsed.errors, [], file);
+    const relative = path.relative(sourceRoot, file).replaceAll('\\', '/');
+    const dependencies = [];
+    for (const node of parsed.program.body) {
+      if (node.importKind === 'type' || node.exportKind === 'type') continue;
+      const specifier = node.source?.value;
+      if (!specifier) continue;
+      if (!specifier.startsWith('.')) {
+        if (relative.startsWith('client/')) assert(!specifier.startsWith('node:'), `${relative} imports a Node API`);
+        continue;
+      }
+      let target = path.resolve(path.dirname(file), specifier);
+      if (!fs.existsSync(target) && target.endsWith('.js')) target = target.slice(0, -3) + '.ts';
+      assert(fs.existsSync(target), `${relative}: missing ${specifier}`);
+      const destination = path.relative(sourceRoot, target).replaceAll('\\', '/');
+      if (relative.startsWith('client/'))
+        assert(/^(client|shared)\//.test(destination), `${relative} crosses into ${destination}`);
+      if (relative.startsWith('shared/'))
+        assert(
+          destination.startsWith('shared/') || destination === '../package.json',
+          `${relative} depends on ${destination}`
+        );
+      if (relative.startsWith('storage/'))
+        assert(/^(storage|shared|platform)\//.test(destination), `${relative} depends on ${destination}`);
+      if (relative.startsWith('features/'))
+        assert(!/^(app|client)\//.test(destination), `${relative} depends on ${destination}`);
+      dependencies.push(target);
+    }
+    graph.set(file, dependencies);
+  }
+  const complete = new Set();
+  function visit(file, stack = []) {
+    assert(
+      !stack.includes(file),
+      `Circular dependency: ${[...stack, file].map((name) => path.relative(root, name)).join(' -> ')}`
+    );
+    if (complete.has(file)) return;
+    for (const dependency of graph.get(file) || []) visit(dependency, [...stack, file]);
+    complete.add(file);
+  }
+  for (const file of graph.keys()) visit(file);
+});
+
+test('resource paths resolve from nested source, built entry and installed package independently of cwd', (t) => {
+  const expected = path.resolve(root);
+  assert.equal(packageRoot(), expected);
+  assert.equal(packageRoot(new URL('../lib/index.js', import.meta.url)), expected);
+  assert.equal(resourcePath('CHANGELOG.md'), path.join(expected, 'CHANGELOG.md'));
+  assert(fs.existsSync(resourcePath('assets', 'stickers', 'manifest.json')));
+  assert(fs.existsSync(resourcePath('runtime', 'read_knowledge_document.py')));
+  const installed = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-package-resources-'));
+  t.after(() => fs.rmSync(installed, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(installed, 'package.json'), JSON.stringify({ name: 'dsh-plugin-wechat-agent' }));
+  assert.equal(packageRoot(pathToFileURL(path.join(installed, 'lib/index.js'))), installed);
+  assert.equal(packageRoot(pathToFileURL(path.join(installed, 'src/features/media/library.mjs'))), installed);
+});

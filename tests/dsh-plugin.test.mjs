@@ -299,16 +299,16 @@ test('runner follows DSH defaults and captures a stable route while selection ch
   await selectModel(ctx, store, { provider: 'other', model: 'second' });
   defaultChoice = { provider: 'mock', model: 'second', reasoningEffort: 'low' };
   gate.resolve(); await active;
-  assert.deepEqual(requests[0].agentOptions, { provider: 'mock', model: 'first', reasoningEffort: 'high', maxTokens: 4096 });
+  assert.deepEqual(requests[0].agentOptions, { provider: 'mock', model: 'first', reasoningEffort: 'high' });
   await runner.run({ text: '续接使用所选模型', sessionId: 'existing-session', signal });
-  assert.deepEqual(requests[1].agentOptions, { provider: 'other', model: 'second', maxTokens: 4096 });
+  assert.deepEqual(requests[1].agentOptions, { provider: 'other', model: 'second' });
   assert.equal(requests[1].resumeSessionId, 'existing-session');
   valid = false;
   await assert.rejects(runner.run({ text: '模型已移除', signal }), error => error.code === 'MODEL_UNAVAILABLE');
   assert.equal(requests.length, 2, 'unavailable choice must never fall back to the default');
   await selectModel(ctx, store, null);
   await runner.run({ text: '跟随新默认', signal });
-  assert.deepEqual(requests[2].agentOptions, { ...defaultChoice, maxTokens: 4096 });
+  assert.deepEqual(requests[2].agentOptions, { ...defaultChoice });
 });
 
 test('DSH adapter establishes tool limits before followup and always disposes owned handle', async () => {

@@ -58,6 +58,27 @@ async function fixture(t, { seedLongMemory = false } = {}) {
     record: id => store.data.records.find(record => record.taskId === id) };
 }
 
+test('confirmed owner operation deduplication survives restart and stays inside its account and conversation', async t => {
+  const f = await fixture(t), operationKey = 'digest:confirmed-summary:confirmed-todo';
+  const original = f.create('message', '第一次确认的内容', { source: 'owner', operationKey });
+  await f.scheduler.close();
+  const restored = new TaskScheduler({ store: f.store, channel: f.channel, now: f.now });
+  t.after(() => restored.close());
+  const input = { kind: 'message', content: '改了时间后重试', schedule: { kind: 'once', at: f.now() + 60000 } };
+  const again = restored.create(input, { ...f.scope, source: 'owner', operationKey });
+  assert.equal(again.id, original.id); assert.equal(again.schedule.at, original.schedule.at); assert.equal(again.content, original.content);
+  const otherRoom = restored.create(input, { ...f.scope, peerId: other, source: 'owner', operationKey });
+  assert.notEqual(otherRoom.id, original.id);
+  f.store.configure('another-scheduler-owner', { enabled: true, groups: [room], privatePeers: [], prompt: '' });
+  const otherAccount = restored.create(input, { ...f.scope, accountId: 'another-scheduler-owner', source: 'owner', operationKey });
+  assert.notEqual(otherAccount.id, original.id);
+  const chat = restored.create(input, { ...f.scope, source: 'chat', senderId: 'alice', operationKey });
+  assert.notEqual(chat.id, original.id); assert.equal(chat.operationKey, undefined);
+  restored.cancel(original.id, f.scope, true);
+  assert.equal(restored.create(input, { ...f.scope, source: 'owner', operationKey }).state, 'cancelled', 'a reconciliation cannot revive a cancelled task');
+  assert.equal(f.sent.length, 0);
+});
+
 test('scheduled Agent reads durable facts and scoped memory, selects an image, and waits for ACK before completion', async t => {
   const f = await fixture(t, { seedLongMemory: true }), assetId = f.media();
   f.channel.memory.append(f.scope, source('recent-lunch', '今天中午想吃面。', f.now()));
@@ -65,7 +86,8 @@ test('scheduled Agent reads durable facts and scoped memory, selects an image, a
   f.runner.run = async input => {
     f.calls.push(input);
     assert.equal(input.mode, 'scheduled');
-    assert(input.memory.includes('对花生过敏') && input.memory.includes('今天中午想吃面') && input.memory.includes('重要提醒直接说明时间'));
+    assert(input.memory.includes('对花生过敏') && input.memory.includes('今天中午想吃面'));
+    assert(input.adminNotes.includes('重要提醒直接说明时间'));
     assert(!input.memory.includes('秘密生日礼物'));
     assert.deepEqual(input.tools.map(tool => tool.name), ['wechat_reply_media']);
     const tool = input.tools[0], execution = { signal: input.signal };
@@ -81,7 +103,7 @@ test('scheduled Agent reads durable facts and scoped memory, selects an image, a
   const task = f.create('agent', '根据饮食偏好提醒阿禾吃饭，配图'); f.advance(1000);
   const running = f.scheduler.tick();
   try {
-    await reached.promise;
+    await Promise.race([reached.promise, running.then(() => { throw new Error('Scheduled reply ended before reaching the transport'); })]);
     assert.equal(f.task(task.id).state, 'running'); assert.equal(f.record(task.id).state, 'sending');
     assert.equal(f.store.history(owner, 'group', room).filter(entry => entry.direction === 'outgoing').length, 0);
   } finally { ack.resolve(); await running; }
@@ -113,17 +135,73 @@ test('cancelling generation prevents delivery and keeps local and pending durabl
   await f.scheduler.tick(); assert.equal(f.sent.length, 0);
 });
 
-test('revoking authorization during generation stops delivery and a later reauthorization does not replay it', async t => {
+test('revoking authorization during generation blocks delivery, with retry waiting for restored authorization', async t => {
   const f = await fixture(t), reached = Promise.withResolvers(), gate = Promise.withResolvers();
   f.runner.run = async () => { reached.resolve(); await gate.promise; return { text: '已撤权的任务不能发出去。' }; };
   const task = f.create(); f.advance(1000); const running = f.scheduler.tick();
   try { await reached.promise; f.store.configure(owner, { ...f.settings, groups: [other] }); }
   finally { gate.resolve(); await running; }
-  assert.equal(f.sent.length, 0); assert.equal(f.task(task.id).state, 'paused'); assert.equal(f.task(task.id).lastState, 'cancelled');
+  assert.equal(f.sent.length, 0); assert.equal(f.task(task.id).state, 'pending'); assert.equal(f.task(task.id).lastState, 'cancelled');
   f.store.configure(owner, f.settings); await f.scheduler.tick(); assert.equal(f.sent.length, 0);
+  f.advance(60000); await f.scheduler.tick(); assert.equal(f.sent.length, 1); assert.equal(f.task(task.id).state, 'completed');
 });
 
-test('tasks becoming overdue in the channel queue never send a stale reminder', async t => {
+for (const failure of ['model', 'memory', 'timeout', 'empty']) test(`saved agent reminder uses an acknowledged fallback when ${failure} fails before sending`, async t => {
+  const f = await fixture(t);
+  if (failure === 'memory') f.channel.memory.enrich = async () => { throw new ChannelError('MEMORY_INVALID', '合成记忆无法读取'); };
+  else if (failure === 'timeout') {
+    f.channel.timeoutMs = 10;
+    f.runner.run = async input => { await new Promise((resolve, reject) => input.signal.addEventListener('abort', () => reject(input.signal.reason), { once: true })); };
+  } else f.runner.run = async () => { if (failure === 'empty') return { text: '' }; throw new ChannelError('MODEL_INCOMPLETE', '模型未完成'); };
+  const task = f.create('agent', '下午三点核对会议材料'); f.advance(1000); await f.scheduler.tick();
+  assert.equal(f.sent.length, 1); assert.equal(f.task(task.id).state, 'completed');
+  assert(f.sent[0].message[0].data.text.includes(task.content)); assert(f.sent[0].message[0].data.text.includes('未能生成'));
+  assert(f.record(task.id).taskFallback); assert.equal(f.record(task.id).state, 'sent');
+  assert.deepEqual(f.record(task.id).acknowledgedMessageIds, ['scheduled-ack-1']);
+  await f.scheduler.tick(); assert.equal(f.sent.length, 1);
+});
+
+test('definite unsent failure retries the same draft after delay without regenerating or falsely completing', async t => {
+  const f = await fixture(t); let models = 0, sends = 0;
+  f.runner.run = async () => ({ text: '原定内容，保留全部正文。' + ++models });
+  f.transport.send = async input => {
+    sends++; if (sends === 1) throw new ChannelError('SEND_REJECTED', '合成明确未发送', { delivery: 'rejected' });
+    f.sent.push(input); return { delivery: 'server-ack', serverMessageIds: ['retry-ack'] };
+  };
+  const task = f.create(); f.advance(1000); await f.scheduler.tick();
+  assert.equal(f.task(task.id).state, 'pending'); assert.equal(f.task(task.id).lastState, 'failed'); assert.equal(f.sent.length, 0);
+  await f.scheduler.tick(); assert.equal(sends, 1);
+  f.advance(60000); await f.scheduler.tick();
+  assert.equal(models, 1); assert.equal(sends, 2); assert.equal(f.sent[0].message[0].data.text, '原定内容，保留全部正文。1');
+  assert.equal(f.task(task.id).state, 'completed');
+});
+
+test('a saved reminder still executes after all related memory expires', async t => {
+  const f = await fixture(t, { seedLongMemory: true });
+  const task = f.create('message', '核对一个月后的合同'); f.advance(31 * 86400000);
+  assert.equal(f.longMemory.adminNotes(f.scope), ''); assert.equal(f.longMemory.view(owner).factCount, 0);
+  await f.scheduler.tick(); assert.equal(f.sent.length, 1); assert.equal(f.sent[0].message[0].data.text, task.content);
+});
+
+test('restart recovers only reminders interrupted before send and coalesces missed recurring periods', async t => {
+  const f = await fixture(t);
+  const task = f.scheduler.create({ kind: 'message', content: '重复提醒', schedule: { kind: 'interval', minutes: 1 } }, f.scope);
+  const original = f.scheduler.data.tasks[0]; original.state = 'running'; original.recordKey = 'scheduled:pre-send-crash'; f.scheduler.save();
+  f.store.add({ key: original.recordKey, contextKey: 'isolated', accountId: owner, chatType: 'group', peerId: room, messageId: original.recordKey, state: 'generating', createdAt: f.now(), updatedAt: f.now() });
+  const restored = new TaskScheduler({ store: f.store, channel: f.channel, now: f.now }); f.channel.scheduler = restored;
+  t.after(() => restored.close()); f.advance(3 * 86400000); await restored.tick();
+  assert.equal(f.sent.length, 1); assert.equal(restored.list(owner).tasks[0].state, 'pending');
+  assert(restored.list(owner).tasks[0].nextRunAt > f.now()); await restored.tick(); assert.equal(f.sent.length, 1);
+});
+
+test('shared notes reach every on-demand reply without leaking automatic facts from another room', async t => {
+  const f = await fixture(t, { seedLongMemory: true });
+  f.store.setConversationSettings(owner, 'group', room, { ...f.store.conversationSettings(owner, 'group', room), memoryMode: 'on-demand' });
+  f.runner.run = async input => { f.calls.push(input); assert(input.adminNotes.includes('重要提醒')); assert(!input.memory.includes('秘密生日礼物')); return { text: '已核对。' }; };
+  f.receive('/agent 共同约定是什么？'); await f.channel.whenIdle(); assert.equal(f.calls.length, 1); assert.equal(f.sent.length, 1);
+});
+
+test('a reminder waiting over ten minutes in the queue still sends once while an ordinary old reply is cancelled', async t => {
   const f = await fixture(t), reached = Promise.withResolvers(), gate = Promise.withResolvers();
   f.runner.run = async () => { reached.resolve(); await gate.promise; return { text: '旧回复。' }; };
   f.receive('/agent 先处理这条消息'); await reached.promise;
@@ -132,21 +210,22 @@ test('tasks becoming overdue in the channel queue never send a stale reminder', 
     assert(f.channel.queue.some(item => item.scheduled?.id === task.id));
     f.advance(600001);
   } finally { gate.resolve(); await running; await f.channel.whenIdle(); }
-  assert.equal(f.sent.length, 0); assert.equal(f.task(task.id).state, 'paused'); assert.equal(f.record(task.id).state, 'cancelled');
-  assert.match(f.record(task.id).reason, /等待.*(?:十分钟|过长)/u);
-  await f.scheduler.tick(); assert.equal(f.sent.length, 0);
+  assert.equal(f.sent.length, 1); assert.equal(f.task(task.id).state, 'completed'); assert.equal(f.record(task.id).state, 'sent');
+  assert.equal(f.sent[0].message[0].data.text, task.content);
+  await f.scheduler.tick(); assert.equal(f.sent.length, 1);
 });
 
-test('revoked or offline tasks stay pending until expiry without creating a delivery attempt', async t => {
+test('revoked and offline reminders remain pending until online authorization returns, then send once', async t => {
   const f = await fixture(t), revoked = f.create('message', '撤权任务');
   f.store.configure(owner, { ...f.settings, groups: [other] }); f.advance(1000); await f.scheduler.tick();
   assert.equal(f.task(revoked.id).state, 'pending'); assert.equal(f.scheduler.list(owner).runs.length, 0);
-  f.advance(600001); await f.scheduler.tick(); assert.equal(f.task(revoked.id).state, 'expired');
+  f.advance(600001); await f.scheduler.tick(); assert.equal(f.task(revoked.id).state, 'pending');
   f.store.configure(owner, f.settings); const offline = f.create('message', '离线任务'); f.state.online = false;
   f.advance(1000); await f.scheduler.tick(); assert.equal(f.task(offline.id).state, 'pending');
-  f.advance(600001); await f.scheduler.tick(); assert.equal(f.task(offline.id).state, 'expired');
+  f.advance(600001); await f.scheduler.tick(); assert.equal(f.task(offline.id).state, 'pending');
   f.state.online = true; await f.scheduler.tick();
-  assert.equal(f.sent.length, 0); assert.equal(f.scheduler.list(owner).runs.length, 0);
+  assert.equal(f.sent.length, 2); assert.equal(f.scheduler.list(owner).runs.length, 2);
+  await f.scheduler.tick(); assert.equal(f.sent.length, 2);
 });
 
 for (const [label, outcome, expectedState, expectedIds] of [

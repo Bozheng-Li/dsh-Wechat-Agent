@@ -22,7 +22,7 @@ React is provided by DeepSeek Harness and is not bundled by this project. Rolldo
 
 ## Python runtime
 
-The complete Windows package includes the official Python 3.13.9 embedded distribution with its original license. Python dependencies are pinned in `runtime/requirements.txt`; their distribution metadata and license files remain in the packaged `site-packages` directory. These include cryptography (Apache-2.0/BSD), Pillow (HPND), Frida (wxWindows Library Licence 3.1), CFFI (MIT) and pycparser (BSD).
+The complete Windows package includes the official Python 3.13.9 embedded distribution with its original license. Python dependencies are pinned in `runtime/requirements.txt`; their distribution metadata and license files remain in the packaged `site-packages` directory. These include cryptography (Apache-2.0/BSD), Pillow (HPND), Frida (wxWindows Library Licence 3.1), CFFI (MIT), pycparser (BSD), and pypdf (BSD-3-Clause), used for local knowledge-document text extraction.
 
 ## WeChat runtime
 

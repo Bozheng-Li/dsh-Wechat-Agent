@@ -16,7 +16,7 @@ npm test
 
 `npm test` 构建服务端、管理页面和协议子进程，并运行插件回归测试；单独构建使用 `npm run build`。完整回归需要 Python 3.13 与上述依赖，未安装 Pillow 会跳过三项实际图片转换检查；CI 在 Node 回归前安装依赖。这两项不需要登录微信、安装 DSH 或准备微信二进制组件。测试数据写入本仓库的临时目录，不使用个人会话。
 
-本次验证结果见[全模块验收](FULL-ACCEPTANCE-2026-11-06.md)，正式包与本机升级见 [0.2.0-preview.6 发布记录](LOCAL-RELEASE-PREVIEW-6-2026-11-06.md)。此前的 [0.2.0-preview.4 验证记录](VERIFICATION-PREVIEW-4-2026-11-06.md)、[0.2.0-preview.3 验证记录](VERIFICATION-PREVIEW-3-2026-11-06.md)和 [2026-11-06 验证记录](VERIFICATION-2026-11-06.md)继续保留。
+本轮完整验证、公开发布与本机升级阶段见 [0.2.0-preview.7 发布记录](LOCAL-RELEASE-PREVIEW-7-2026-11-07.md)。此前的[全模块验收](FULL-ACCEPTANCE-2026-11-06.md)、[0.2.0-preview.6 发布记录](LOCAL-RELEASE-PREVIEW-6-2026-11-06.md)、[0.2.0-preview.4 验证记录](VERIFICATION-PREVIEW-4-2026-11-06.md)、[0.2.0-preview.3 验证记录](VERIFICATION-PREVIEW-3-2026-11-06.md)和 [2026-11-06 验证记录](VERIFICATION-2026-11-06.md)继续保留。
 
 可单独运行真实一分钟计时测试，使用本地模拟传输，不连接微信：
 
@@ -26,7 +26,7 @@ node scripts/test-scheduler-clock.mjs
 
 脚本通过聊天请求创建任务，使用实际时钟与调度循环等待一分钟，核对提醒仅执行一次并在回执后完成，结果保存到 `storage/logs/scheduler-clock.json`。最新隔离验证的实际触发用时为 60.486 秒，报告保留在 `storage/logs/full-audit-scheduler-clock.json`；未发送真实微信消息，群维护通知保持关闭。
 
-微信协议与登录代码位于 `src/wechat/` 和 `runtime/`；插件入口、页面与任务处理位于 `src/`，构建产物位于 `lib/`，测试位于 `tests/`。原项目来源为 [wechat-agent](https://github.com/2720480371/wechat-agent)，沿用 AGPL-3.0-or-later。
+源码按 `src/app/`（插件装配与 RPC）、`src/client/`（页面与组件）、`src/features/`（业务功能）、`src/storage/`（持久化）、`src/platform/`（包资源定位）、`src/shared/`（共用契约）和 `src/wechat/`（微信适配）组织。详细职责、依赖规则和维护入口见 [代码结构说明](CODE-STRUCTURE.md)。Python 与登录资源位于 `runtime/`，构建产物位于 `lib/`，测试位于 `tests/`。原项目来源为 [wechat-agent](https://github.com/2720480371/wechat-agent)，沿用 AGPL-3.0-or-later。
 
 ### 构建完整安装包
 
@@ -38,22 +38,22 @@ npm run pack:plugin
 npm run audit:package
 ```
 
-完整包按 `package.json` 的版本输出到 `release/dsh-plugin-wechat-agent-<版本>.tgz`，本版为 `release/dsh-plugin-wechat-agent-0.2.0-preview.6.tgz`，同目录提供 `.sha256` 校验文件。打包脚本下载并校验 Python 3.13.9 嵌入版，安装 `runtime/requirements.txt` 中固定版本的依赖。只打包显式列出的运行文件、更新日志、说明和许可证，排除开发脚本、个人配置、登录资料、存储和测试入口。
+完整包按 `package.json` 的版本输出到 `release/dsh-plugin-wechat-agent-<版本>.tgz`，本版为 `release/dsh-plugin-wechat-agent-0.2.0-preview.7.tgz`，同目录提供 `.sha256` 校验文件。打包脚本下载并校验 Python 3.13.9 嵌入版，安装 `runtime/requirements.txt` 中固定版本的依赖。只打包显式列出的运行文件、更新日志、说明和许可证，排除开发脚本、个人配置、登录资料、存储和测试入口。
 
 若 Python 自动下载超时，可将从 [Python 官网](https://www.python.org/ftp/python/3.13.9/python-3.13.9-embed-amd64.zip) 取得的 `python-3.13.9-embed-amd64.zip` 放入 `storage/cache/` 后重试；脚本会验证相同的固定 SHA-256。
 
 `lib/`、`release/`、`storage/`、`node_modules/`、本地 Python 和微信组件均被 Git 忽略。不要直接使用 `npm pack` 作为完整安装包；使用上面的 `pack:plugin` 命令准备全部运行资源。兼容命令 `dsh:build`、`dsh:test`、`dsh:pack` 仍可使用。
 
-本地未发布构建可使用 `npm run pack:plugin -- --output-dir release/unreleased`，再用 `npm run audit:package -- release/unreleased/dsh-plugin-wechat-agent-0.2.0-preview.6.tgz` 审计指定文件；版本号随 `package.json` 调整。输出目录与已发布包分开，打包不会自动发布或升级正在运行的插件。维护者可用 `node scripts/download-builtin-stickers.mjs` 从固定上游版本重新取得原图；常规构建只校验本地图片，不联网下载表情。
+本地未发布构建可使用 `npm run pack:plugin -- --output-dir release/unreleased`，再用 `npm run audit:package -- release/unreleased/dsh-plugin-wechat-agent-0.2.0-preview.7.tgz` 审计指定文件；版本号随 `package.json` 调整。输出目录与已发布包分开，打包不会自动发布或升级正在运行的插件。维护者可用 `node scripts/download-builtin-stickers.mjs` 从固定上游版本重新取得原图；常规构建只校验本地图片，不联网下载表情。
 
 发布时先完成测试、完整打包和包审计，再发布已验证的压缩包：
 
 ```powershell
-npm publish ./release/dsh-plugin-wechat-agent-0.2.0-preview.6.tgz --access public --tag latest --registry=https://registry.npmjs.org/
+npm publish ./release/dsh-plugin-wechat-agent-0.2.0-preview.7.tgz --access public --tag latest --registry=https://registry.npmjs.org/
 npm run verify:npm -- --wait --download --write-index
 ```
 
-上方为本版发布命令示例；`0.2.0-preview.6` 已发布，后续发布必须先更新版本号并使用对应的新包，不可覆盖现有版本。源码 `package.json` 保留 `private: true`，防止误把不含完整运行环境的源码目录直接发布；完整打包阶段会去除此标记与开发依赖、脚本。`latest` 指向当前公开预览版，版本名仍明确标记 `preview`。
+上方为本版发布命令示例；先确认发布记录中的阶段和 npm 的实际状态，已发布版本不可覆盖，后续发布必须更新版本号并使用对应的新包。源码 `package.json` 保留 `private: true`，防止误把不含完整运行环境的源码目录直接发布；完整打包阶段会去除此标记与开发依赖、脚本。`latest` 指向当前公开预览版，版本名仍明确标记 `preview`。
 
 npm 返回接受上传后可能继续后台处理，版本元数据与下载节点也可能分批就绪。验证命令会等待正式版本、实际下载并比对完整压缩包，然后使用 npm 返回的真实发布时间更新 `market/index.json`；确认成功后再推送索引或升级正在运行的实例。
 

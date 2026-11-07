@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { StateStore, ConversationMemory } from '../lib/testing.js';
-import { LongTermMemory } from '../src/long-term-memory.mjs';
+import { LongTermMemory } from '../src/features/memory/long-term-memory.mjs';
 
 const temp = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../storage/tmp');
 const accountId = 'long_memory_owner', peerId = 'long-memory@chatroom';
@@ -134,6 +134,10 @@ test('corrections preserve old facts in Markdown and remove them only from the c
   const old = f.memory.view(accountId).sections[0].facts[0];
   f.memory.capture(f.scope, [entry('new-preference', '更正一下，我现在更喜欢狗。')]);
   await f.memory.extract(f.scope, runner([fact('阿禾现在更喜欢狗。', ['s1'], [old.id])]), signal());
+  const pending = f.memory.view(accountId), candidate = pending.sections[0].facts.find(value => value.state === 'pending');
+  assert(candidate); assert.equal(pending.factCount, 0);
+  assert(!f.memory.prompt(f.scope).includes('阿禾喜欢猫。') && !f.memory.prompt(f.scope).includes('更喜欢狗'));
+  f.memory.resolveFact(accountId, { factId: candidate.id, revision: pending.revision, decision: 'accept' });
   const doc = f.memory.view(accountId);
   assert.equal(doc.globalNotes, '手动备注要原样保留。'); assert.equal(doc.factCount, 1);
   assert(doc.markdown.includes('阿禾喜欢猫。') && doc.markdown.includes('已被后续更正'));

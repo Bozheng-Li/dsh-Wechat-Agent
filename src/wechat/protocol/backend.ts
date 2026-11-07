@@ -359,9 +359,11 @@ export class ProtocolBackend implements Backend {
     if (this.queuedMediaBytes + mediaBytes > 64 * 1024 * 1024) throw new BridgeError('ERR_SEND_QUEUE_FULL', '图片发送队列已满，请等待正在发送的图片完成', { delivery: 'rejected' });
     const signal = cancel ? AbortSignal.any([this.controller!.signal, cancel]) : this.controller!.signal; this.sendPending++; this.queuedMediaBytes += mediaBytes;
     const task = this.sendTail.then(async () => {
-      const ids: string[] = []; let first: BridgeMessage | undefined;
+      const ids: string[] = []; let first: BridgeMessage | undefined, currentIndex = -1, requestStarted = false;
+      const deliveryParts = () => parts.map((part, index) => ({ index, type: part.type, state: index < ids.length ? 'acknowledged' : index === currentIndex && requestStarted ? 'unknown' : 'not-sent', ...(ids[index] ? { serverMessageId: ids[index] } : {}) }));
       try {
         for (let index = 0; index < parts.length; index++) {
+          currentIndex = index; requestStarted = false;
           let part = parts[index];
           await sleep(Math.max(0, this.nextSendAt - Date.now()) + Math.floor(Math.random() * (this.options.sendJitterMs + 1)), undefined, { signal });
           if (signal.aborted) throw new BridgeError('ERR_STOPPED', 'Session stopped');
@@ -383,6 +385,7 @@ export class ProtocolBackend implements Backend {
           let ack: { id: string; time: number };
           if (part.type === 'text') {
             const request = sendRequest(p.peerId, part.text, part.mentions?.map(target => target.id));
+            requestStarted = true;
             ack = sendResponse(await t.request(522, request.body), request.f4, request.f5);
           } else {
             const upload: ImageUpload = { clientId: `${account.wxid}_${Date.now()}_${randomBytes(8).toString('hex')}`, from: account.wxid, to: p.peerId, total: part.bytes.length, time: Math.floor(Date.now() / 1000), baseRequest: Buffer.from(imageBase!, 'hex'), extension: part.extension };
@@ -391,6 +394,7 @@ export class ProtocolBackend implements Backend {
               if (signal.aborted) throw new BridgeError('ERR_STOPPED', '图片上传已停止；已写出的分片不会自动重发');
               if (t !== this.transport || !t.connected) throw new BridgeError('ERR_CONNECTION_CLOSED', '图片上传期间连接已断开，发送结果未知');
               const chunk = part.bytes.subarray(start, start + IMAGE_CHUNK_BYTES);
+              requestStarted = true;
               const result = imageUploadResponse(await t.request(110, imageUploadRequest(upload, start, chunk)), upload, start, chunk.length);
               // Do not discard a final server ACK if cancellation arrived while
               // the request was in flight. Stop before the next request instead.
@@ -406,9 +410,9 @@ export class ProtocolBackend implements Backend {
           this.remember(message); this.persist(); first ??= message; this.emit({ type: 'event.message', payload: structuredClone(message) });
         }
       } catch (error) {
-        throw new BridgeError(error instanceof BridgeError ? error.code : 'ERR_SEND_FAILED', error instanceof Error ? error.message : 'Send failed', { ...(error instanceof BridgeError ? error.details : {}), acknowledgedMessageIds: ids, delivery: ids.length ? 'partially-acknowledged' : error instanceof BridgeError ? error.details.delivery ?? 'unknown' : 'unknown' });
+        throw new BridgeError(error instanceof BridgeError ? error.code : 'ERR_SEND_FAILED', error instanceof Error ? error.message : 'Send failed', { ...(error instanceof BridgeError ? error.details : {}), acknowledgedMessageIds: ids, deliveryParts: deliveryParts(), delivery: ids.length ? 'partially-acknowledged' : error instanceof BridgeError ? error.details.delivery ?? 'unknown' : 'unknown' });
       }
-      return { ...first!, serverMessageIds: ids };
+      return { ...first!, serverMessageIds: ids, deliveryParts: deliveryParts() };
     });
     this.sendTail = task.catch(() => {});
     return task.finally(() => { this.sendPending--; this.queuedMediaBytes -= mediaBytes; });

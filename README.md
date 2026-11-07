@@ -21,19 +21,20 @@
 | **18 套完整人设** | 选择小胖、晚晴、北辰等角色，继续编辑；不同会话使用不同人设。 |
 | **共同的身份** | 用一份 `AGENT.md` 定义所有角色共有的身份与习惯，每轮对话重新读取。 |
 | **两层持久记忆** | 近期对话接住上下文，长期 Markdown 保存事实与约定；支持按需查询、纠正与清空。 |
-| **自然加入群聊** | 从 @ 与 `/agent`、昵称唤醒到按消息条数主动参与，逐群控制。 |
-| **看图与表情回复** | 选择视觉模型理解图片；使用三组共 30 张内置表情，或导入自己的素材。 |
+| **自然加入群聊** | 保留 @、`/agent`、昵称与数量设置，结合时间、话题和互动反馈择机参与，逐群控制。 |
+| **看图与表情回复** | 普通图片先保存，按当前问题选择查看；表情包跳过图像理解，可用内置或自备素材回复。 |
 | **把约定变成提醒** | 聊天中安排一次、每天或间隔任务，到期在授权会话发送消息，并真正 @ 群成员。 |
+| **查自己的知识库** | 导入 Markdown、TXT、PDF、DOCX，按明确请求查原文、带来源回答；默认关闭。 |
 | **查资料，带上来源** | 默认选择 Tavily，也可切换 DeepSeek 原生搜索；分别配置密钥，保留可核对的来源。 |
 
 ## 开始使用
 
-当前预览版为 **`0.2.0-preview.6`**，已针对 **Windows x64 · DeepSeek Harness `0.2.1-rc.5`** 验证。模型使用你在 DSH 中配置的服务。
+当前预览版为 **`0.2.0-preview.7`**，支持 **Windows x64 · DeepSeek Harness `0.2.1-rc.5`**。模型使用你在 DSH 中配置的服务。
 
 在 DSH 插件管理页输入 `dsh-plugin-wechat-agent` 安装，或在 PowerShell 执行：
 
 ```powershell
-dsh plugin --profile desktop add dsh-plugin-wechat-agent@0.2.0-preview.6
+dsh plugin --profile desktop add dsh-plugin-wechat-agent@0.2.0-preview.7
 ```
 
 完整 npm 包包含微信认证组件、Python 与依赖，安装后即可打开侧栏 **微信 Agent**。
@@ -69,7 +70,7 @@ DSH `0.2.1-rc.5` 使用用户添加的自定义索引。索引提供版本目录
 
 <img src="https://raw.githubusercontent.com/Bozheng-Li/dsh-Wechat-Agent/main/docs/images/visual-refresh-personas-dark.png" alt="深色主题中的 18 套内置人设分类与预览界面" width="100%" />
 
-记忆库把会话上下文和全局长期记忆放在两个独立页面。近期消息、字符数与窗口容量一眼可见；共同备注、来源事实和文件维护分区管理。切换页面保留未保存草稿，保存时锁定当前会话，避免改错对象；文件无法安全读取时显示原因并暂停编辑。
+记忆库集中管理会话上下文、全局备注、长期事实、图片记忆和维护。默认文字窗口为 100000 字符，可按群自定义；达到窗口自动整理，临时失败自动重试。切换标签保留未保存草稿，保存时锁定当前会话，避免改错对象；文件无法安全读取时显示原因并暂停编辑。
 
 <img src="https://raw.githubusercontent.com/Bozheng-Li/dsh-Wechat-Agent/main/docs/images/visual-refresh-memory-light.png" alt="长期记忆工作区：共同备注、来自各会话的事实与记忆概况" width="100%" />
 
@@ -89,7 +90,7 @@ DSH `0.2.1-rc.5` 使用用户添加的自定义索引。索引提供版本目录
 
 ## 消息与数据，都能核对
 
-回复取得微信服务端回执后才记为成功。部分确认或结果不明时保留已知回执，暂停相应任务；升级和重启保留授权、设置、记忆与历史。
+回复取得微信服务端回执后才记为成功。部分确认或结果不明时保留已知回执，暂停相应任务；发送恢复位于“处理记录”，核对后可处理或整理记录。升级和重启保留授权、设置、记忆与历史。
 
 数据默认保存在 `~/.dsh/wechat-agent`，也可指定一个全局工作目录，统一管理身份、会话、记忆、素材与任务。模型请求发往你配置的 DSH 模型服务，开启搜索后公开查询发往选中的 Tavily 或 DeepSeek 搜索服务。
 
@@ -101,6 +102,7 @@ DSH `0.2.1-rc.5` 使用用户添加的自定义索引。索引提供版本目录
 | --- | --- |
 | [使用指南](https://github.com/Bozheng-Li/dsh-Wechat-Agent/blob/main/docs/USER-GUIDE.md) | 回复模式、人设、身份、记忆、素材、提醒与目录迁移。 |
 | [开发与发布](https://github.com/Bozheng-Li/dsh-Wechat-Agent/blob/main/docs/DEVELOPMENT.md) | 独立构建、测试、完整打包、包审计与 npm 发布。 |
+| [代码结构](docs/CODE-STRUCTURE.md) | 模块职责、页面与业务入口、依赖边界及维护方式。 |
 | [更新日志](https://github.com/Bozheng-Li/dsh-Wechat-Agent/blob/main/CHANGELOG.md) | 与应用内共用的版本记录。 |
 | [图片发送修复](https://github.com/Bozheng-Li/dsh-Wechat-Agent/blob/main/docs/IMAGE-HANDOFF-2026-11-06.md) | 反复扫码仍无法发图的原因、修复与验证范围。 |
 | [联网搜索](https://github.com/Bozheng-Li/dsh-Wechat-Agent/blob/main/docs/SEARCH-2026-11-06.md) | Tavily、DeepSeek 原生搜索、独立凭据与实际查询验证。 |

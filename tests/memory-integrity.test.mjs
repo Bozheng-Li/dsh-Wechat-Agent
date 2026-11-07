@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { StateStore, ConversationMemory, conversationMemoryTool } from '../lib/testing.js';
-import { LongTermMemory } from '../src/long-term-memory.mjs';
+import { LongTermMemory } from '../src/features/memory/long-term-memory.mjs';
 
 const base = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../storage/tmp');
 const accountId = 'memory_integrity_owner', peerId = 'memory-integrity@chatroom';
@@ -46,6 +46,9 @@ test('a correction matching an unaffected fact does not duplicate or remove that
   const coffee = f.long.view(accountId).sections[0].facts.find(value => value.text.includes('咖啡'));
   f.long.capture(f.scope, [entry('corrected-drinks', '之前咖啡说错了，我只常喝茶。')]);
   await f.long.extract(f.scope, extractor([fact('阿禾常喝茶。', [coffee.id])]), signal());
+  const pending = f.long.view(accountId), candidate = pending.sections[0].facts.find(value => value.state === 'pending');
+  assert(candidate); assert(!f.long.prompt(f.scope).includes('咖啡'));
+  f.long.resolveFact(accountId, { factId: candidate.id, revision: pending.revision, decision: 'accept' });
   assert.equal(f.long.view(accountId).factCount, 1);
   assert(f.long.prompt(f.scope).includes('阿禾常喝茶。'));
   assert(!f.long.prompt(f.scope).includes('阿禾常喝咖啡。'));
@@ -62,7 +65,7 @@ test('compaction cannot discard a picture description completed while its summar
   await started.promise;
   await f.local.enrich(f.scope, { describeImage: async () => '图片写明：周五十点在书店见面。' }, {
     media: async () => ({ quality: 'original', bytes: 1500 }),
-  }, signal());
+  }, signal(), { imageRequest: { key: 'picture-during-compaction', resourceId: 'picture-resource' } });
   gate.resolve('仅保留了普通聊天。');
   await assert.rejects(pending, { code: 'MEMORY_CHANGED' });
   assert(new ConversationMemory(new StateStore(f.root)).view(f.scope).text.includes('周五十点在书店见面'));
@@ -75,7 +78,7 @@ test('cancelling image understanding prevents a late model response from changin
   const before = f.local.load(f.scope);
   const pending = f.local.enrich(f.scope, { describeImage: async () => { started.resolve(); return gate.promise; } }, {
     media: async () => ({ quality: 'original', bytes: 1500 }),
-  }, controller.signal);
+  }, controller.signal, { imageRequest: { key: 'cancelled-picture', resourceId: 'cancelled-resource' } });
   await started.promise; controller.abort(new Error('图像理解已取消')); gate.resolve('过期图像描述');
   await assert.rejects(pending, /图像理解已取消/);
   assert.deepEqual(f.local.load(f.scope), before);

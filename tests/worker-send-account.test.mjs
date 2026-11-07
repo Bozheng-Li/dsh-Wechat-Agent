@@ -11,16 +11,23 @@ import { rolldown } from 'rolldown';
 // Neither real credentials nor network transports are available to this child.
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const mocks = {
-  './wechat/protocol/backend.ts': `export class ProtocolBackend {
+  './protocol/backend.ts': `export class ProtocolBackend {
     constructor() { this.session = { value: process.env.WECHAT_TEST_NO_ACCOUNT === '1' ? undefined : { wxid: 'worker-current-account' } }; this.sent = 0; }
     status() { return { online: !!this.session.value, diagnostics: { state: 'fixture', account: this.session.value ? { id: this.session.value.wxid } : null, sent: this.sent } }; }
     subscribe() {}
-    async sendMessage(params) { this.sent++; return { delivery: 'server-ack', serverMessageIds: ['9007199254740999'], actualAccount: this.session.value.wxid, receivedParams: params }; }
+    async sendMessage(params) {
+      this.sent++;
+      if (params.peerId === 'partial@chatroom') throw Object.assign(new Error('internal transport detail'), { code: 'ERR_SEND_FAILED', details: {
+        delivery: 'partially-acknowledged', acknowledgedMessageIds: ['9007199254740999'], privateData: 'do not forward',
+        deliveryParts: [{ index: 0, type: 'text', state: 'acknowledged', serverMessageId: '9007199254740999', raw: 'not public' }, { index: 1, type: 'image', state: 'unknown', bytes: 'not public' }]
+      } });
+      return { delivery: 'server-ack', serverMessageIds: ['9007199254740999'], actualAccount: this.session.value.wxid, receivedParams: params };
+    }
     async close() {}
   }`,
-  './wechat/protocol/login.ts': `export class QrLoginManager { status() { return { state: 'idle' }; } async close() {} }`,
-  './wechat/paths.ts': `export const protectStorage = () => {}; export const projectPaths = root => ({ private: root, cache: root });`,
-  './wechat/protocol/media-loader.mjs': `export const loadObservedMedia = () => { throw new Error('Media is not available in this isolated worker'); };`,
+  './protocol/login.ts': `export class QrLoginManager { status() { return { state: 'idle' }; } async close() {} }`,
+  './paths.ts': `export const protectStorage = () => {}; export const projectPaths = root => ({ private: root, cache: root });`,
+  './protocol/media-loader.mjs': `export const loadObservedMedia = () => { throw new Error('Media is not available in this isolated worker'); };`,
 };
 const build = await rolldown({ input: path.join(root, 'src/worker.mjs'), platform: 'node', plugins: [{ name: 'offline-worker-boundary',
   resolveId(source) { return Object.hasOwn(mocks, source) ? '\0offline:' + source : null; },
@@ -80,4 +87,12 @@ test('worker refuses sending when no account is logged in', async t => {
   const response = await f.call('send', { accountId: 'worker-current-account', ...message });
   assert.equal(response.ok, false); assert.equal(response.error.code, 'ACCOUNT_CHANGED');
   assert.equal((await f.call('status')).value.sent, 0);
+});
+
+test('worker preserves per-part ACK and uncertainty across IPC without serializing transport internals', async t => {
+  const f = await workerFixture(t);
+  const response = await f.call('send', { accountId: 'worker-current-account', ...message, peerId: 'partial@chatroom' });
+  assert.equal(response.ok, false); assert.equal(response.error.details.delivery, 'partially-acknowledged');
+  assert.deepEqual(response.error.details.deliveryParts, [{ index: 0, type: 'text', state: 'acknowledged', serverMessageId: '9007199254740999' }, { index: 1, type: 'image', state: 'unknown' }]);
+  assert(!JSON.stringify(response).includes('not public')); assert(!JSON.stringify(response).includes('do not forward')); assert(!JSON.stringify(response).includes('internal transport detail'));
 });

@@ -10,7 +10,7 @@ fs.mkdirSync(out, { recursive: true });
 fs.mkdirSync(path.join(out, 'browser-profile'), { recursive: true });
 app.setPath('userData', path.join(out, 'browser-profile'));
 app.disableHardwareAcceleration();
-const report = { ok: false, assertions: [], errors: [], screenshots: [], at: new Date().toISOString() };
+const report = { ok: false, runId: process.env.WECHAT_UI_TEST_RUN_ID || null, assertions: [], errors: [], screenshots: [], at: new Date().toISOString() };
 let window;
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 // These helpers are declared inside each browser evaluation so reloads cannot
@@ -70,9 +70,13 @@ async function theme(name) {
   await evaluate(name => { document.documentElement.dataset.theme = name; document.documentElement.classList.toggle('dark', name === 'dark'); }, name);
   await pause(100);
 }
-async function screenshot(name, selectedTheme = 'dark') {
+async function screenshot(name, selectedTheme = 'dark', focusSelector) {
   await theme(selectedTheme);
   await evaluate(() => document.querySelector('.wa-workspace')?.scrollTo({ top: 0, left: 0 }));
+  if (focusSelector) {
+    await waitFor(selector => isVisible(document.querySelector(selector)), [focusSelector]);
+    await evaluate(selector => document.querySelector(selector).scrollIntoView({ block: 'start', behavior: 'instant' }), focusSelector);
+  }
   await evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)))));
   await pause(150);
   fs.writeFileSync(path.join(out, name + '.png'), (await window.webContents.capturePage()).toPNG());
@@ -87,6 +91,23 @@ async function assertLayout(label) {
 }
 function check(name) { report.assertions.push(name); }
 const peer = (state, id) => state.conversations.find(item => item.peerId === id);
+
+async function captureNaturalChat() {
+  for (const [size, width, height] of [['desktop', 1280, 1100], ['narrow', 430, 900]]) {
+    window.setContentSize(width, height);
+    await assertLayout(size + ' natural chat');
+    for (const selectedTheme of ['dark', 'light']) {
+      await screenshot('natural-chat-' + size + '-' + selectedTheme, selectedTheme, '[data-testid="natural-chat-settings"]');
+      const controlsInFrame = await evaluate(() => ['#wa-natural-temperament', '#wa-natural-interval', '#wa-natural-start', '#wa-natural-end'].every(selector => {
+        const control = document.querySelector(selector), rect = control?.getBoundingClientRect();
+        return isVisible(control) && rect.top >= 0 && rect.bottom <= innerHeight && rect.left >= 0 && rect.right <= innerWidth;
+      }));
+      assert(controlsInFrame, size + ' natural chat controls must be visible in the screenshot');
+      await screenshot('natural-chat-' + size + '-followup-' + selectedTheme, selectedTheme, '[data-testid="natural-chat-settings"] details');
+    }
+  }
+  window.setContentSize(1280, 940);
+}
 
 async function verifyVisualDesign() {
   const originalSettings = (await fixture('state')).settings;
@@ -156,13 +177,52 @@ async function verifyVisualDesign() {
         await waitFor(page => document.querySelector('.wa-panel').dataset.page === page, [page]);
         await pause(150);
         await assertLayout(width + 'px ' + page);
-        const navigation = await evaluate(() => Array.from(document.querySelectorAll('.wa-nav-button')).every(button => { const r = button.getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight; }));
+        const navigation = await evaluate(() => Array.from(document.querySelectorAll('.wa-nav-button')).every(button => { button.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' }); const r = button.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight; }));
         assert(navigation, 'All navigation controls must remain reachable at ' + width + 'px');
         if (page === 'overview' || width === 430 && ['settings', 'assets', 'authorization'].includes(page)) await screenshot(page + '-' + width + '-dark');
       }
     }
     check('all seven pages and navigation fit 1024, 768, 430, 360 and 320px widths without horizontal overflow');
   } finally { window.webContents.debugger.detach(); }
+}
+
+async function verifyLongMemorySources() {
+  const sourceSelect = '[aria-label="长期记忆来源会话"]', panel = '#wa-memory-panel-global';
+  const doc = await fixture('seedLongMemorySources'), originalBytes = fs.readFileSync(doc.path);
+  const visibleFacts = () => evaluate(() => Array.from(document.querySelectorAll('#wa-memory-panel-global .wa-long-collected [data-long-fact-id]'))
+    .filter(el => isVisible(el)).map(el => el.dataset.longFactId));
+  const activeIds = sections => sections.flatMap(section => section.facts.filter(fact => fact.state === 'active').map(fact => fact.id));
+  await clickText('重新读取', panel); await input(sourceSelect, '');
+  await waitFor(ids => {
+    const rendered = Array.from(document.querySelectorAll('#wa-memory-panel-global .wa-long-collected [data-long-fact-id]'))
+      .filter(el => isVisible(el)).map(el => el.dataset.longFactId);
+    return JSON.stringify(rendered) === JSON.stringify(ids);
+  }, [activeIds(doc.sections)]);
+  assert.equal((await visibleFacts()).length, 3);
+  for (const section of doc.sections) {
+    const choice = `${section.chatType}:${section.peerId}`;
+    assert.notEqual(section.key, choice, 'fixture must use the real backend storage key');
+    await input(sourceSelect, choice);
+    assert.deepEqual(await visibleFacts(), activeIds([section]), 'selected source must show exactly its own facts');
+    assert(await evaluate(name => {
+      const headings = Array.from(document.querySelectorAll('#wa-memory-panel-global .wa-long-source-head h3')).filter(el => isVisible(el));
+      return headings.length === 1 && headings[0].textContent === name;
+    }, section.name));
+    assert(await evaluate(() => Array.from(document.querySelectorAll('#wa-memory-panel-global button'))
+      .some(el => el.textContent.trim() === '整理这个会话的重要信息' && isUsable(el))));
+  }
+  await input(sourceSelect, 'group:group_gamma@chatroom');
+  assert.deepEqual(await visibleFacts(), []);
+  assert(await evaluate(() => Array.from(document.querySelectorAll('#wa-memory-panel-global .wa-long-collected p'))
+    .some(el => isVisible(el) && el.textContent.includes('还没有匹配的长期事实'))));
+  await input(sourceSelect, ''); assert.deepEqual(await visibleFacts(), activeIds(doc.sections));
+  await input(sourceSelect, 'group:group_alpha@chatroom'); await clickText('重新读取', panel);
+  await waitFor(() => document.querySelector('[aria-label="长期记忆来源会话"]')?.value === 'group:group_alpha@chatroom');
+  assert.deepEqual(await visibleFacts(), activeIds(doc.sections.filter(section => section.peerId === 'group_alpha@chatroom')));
+  assert.deepEqual(fs.readFileSync(doc.path), originalBytes, 'changing source filters and rereading must preserve stored facts');
+  await screenshot('long-memory-source-group-dark'); await screenshot('long-memory-source-group-light', 'light');
+  await input(sourceSelect, '');
+  check('real extracted long-memory facts remain visible when selecting either group or a private chat; empty sources stay empty, reread keeps the selection, and filtering preserves Markdown bytes');
 }
 
 async function verifyMemory() {
@@ -172,9 +232,8 @@ async function verifyMemory() {
   const selectedKey = name => evaluate(name => Array.from(document.querySelector('[aria-label="选择会话"]').options).find(option => option.textContent.includes(name)).value, name);
   const assertPanel = async id => {
     assert(await evaluate(id => {
-      const other = id === 'conversation' ? 'global' : 'conversation';
       return document.querySelector('#wa-memory-tab-' + id).getAttribute('aria-selected') === 'true' &&
-        isVisible(document.querySelector('#wa-memory-panel-' + id)) && !isVisible(document.querySelector('#wa-memory-panel-' + other));
+        ['conversation', 'global', 'images', 'review'].every(tab => isVisible(document.querySelector('#wa-memory-panel-' + tab)) === (tab === id));
     }, id), id + ' must be the only visible memory panel');
   };
   const overview = async memoryDoc => {
@@ -193,6 +252,11 @@ async function verifyMemory() {
   assert.equal(await evaluate(() => document.querySelector('[data-testid="memory-preferences"]').open), false);
   assert.equal(await evaluate(() => isUsable(document.querySelector('[aria-label="默认记忆窗口字符数"]'), true)), false);
   await click('[data-testid="memory-preferences"] > summary');
+  assert.equal(await value('[aria-label="默认记忆窗口字符数"]'), '100000');
+  assert.equal(await evaluate(() => document.querySelector('[aria-label="默认记忆窗口字符数"]').hasAttribute('max')), false);
+  await input('[aria-label="默认记忆窗口字符数"]', '1000000'); await clickText('保存窗口');
+  await stateMatches(state => state.memory.windowChars === 1000000);
+  check('custom million-character memory window saves through the real owner RPC without the old 200000-character limit');
   await input('[aria-label="默认记忆窗口字符数"]', '48000'); await clickText('保存窗口', localPanel);
   await stateMatches(state => state.memory.windowChars === 48000);
   await waitFor(() => document.querySelector('[data-testid="memory-preferences"] > summary').textContent.includes('48000'));
@@ -206,9 +270,19 @@ async function verifyMemory() {
   await input('[aria-label="选择会话"]', chooseAlpha);
   await waitFor(() => document.querySelector('[data-testid="memory-document"]')?.textContent.includes('产品讨论组'));
   check('memory overview reads actual room metrics and capacity; preferences start collapsed, save the default, and preserve the room override');
+  await fixture('seedImageFailures');
+  await waitFor(() => document.querySelector('[data-testid="image-failure-reasons"]')?.textContent.includes('2 张：图片资源地址不是可读取的微信媒体地址'));
+  await clickText('重试图片理解', localPanel);
+  await waitFor(() => document.querySelector('#wa-memory-panel-conversation [role="status"]')?.textContent.includes('仍有 2 张普通图片未理解'));
+  assert.equal((await fixture('localMemory')).failedImages, 2);
+  await fixture('fixImageReads'); await clickText('重试图片理解', localPanel);
+  await waitFor(() => document.querySelector('#wa-memory-panel-conversation [role="status"]')?.textContent.includes('仍有 1 张图片的清晰度未核实'));
+  assert.equal((await fixture('localMemory')).failedImages, 0);
+  assert.equal(await evaluate(() => !!document.querySelector('[data-testid="image-failure-reasons"]')), false);
+  check('image failures show grouped causes; unsuccessful retry reports remaining failures; success clears stale errors and keeps thumbnail limits');
 
   await evaluate(() => document.querySelector('#wa-memory-tab-conversation').focus());
-  for (const [keyCode, tab] of [['Right', 'global'], ['Left', 'conversation'], ['End', 'global'], ['Home', 'conversation']]) {
+  for (const [keyCode, tab] of [['Right', 'global'], ['Left', 'conversation'], ['Left', 'review'], ['Right', 'conversation'], ['End', 'review'], ['Left', 'images'], ['Home', 'conversation']]) {
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode });
     await waitFor(tab => document.activeElement?.id === 'wa-memory-tab-' + tab && document.activeElement.getAttribute('aria-selected') === 'true', [tab]);
     await assertPanel(tab);
@@ -225,7 +299,7 @@ async function verifyMemory() {
   await clickText('撤销修改', globalPanel); assert.equal(await value('[aria-label="全局通用备注"]'), '');
   await input('[aria-label="全局通用备注"]', globalNotes);
   await clickText('会话记忆窗口'); assert.equal(await value('[aria-label="记忆摘要"]'), localSummary);
-  check('real arrow/Home/End keys select and focus the visible tab; unsaved local/global drafts survive switching and undo restores each saved value');
+  check('real arrow/Home/End keys select and focus all four memory tabs including review; unsaved local/global drafts survive switching and undo restores each saved value');
 
   await fixture('holdNext', { endpoint: 'memory.edit' }); await clickText('保存记忆', localPanel);
   await waitFor(async () => (await window.__uiFixture('heldRequest', { endpoint: 'memory.edit' })).started);
@@ -254,7 +328,13 @@ async function verifyMemory() {
   assert.equal(await value('[aria-label="全局通用备注"]'), globalNotes); assert.equal((await fixture('globalMemory')).globalNotes, '');
   await clickText('保存全局备注', globalPanel);
   await waitFor(async notes => (await window.__uiFixture('globalMemory')).globalNotes === notes, [globalNotes]);
-  await waitFor(() => isUsable(document.querySelector('[aria-label="全局通用备注"]'), true));
+  await waitFor(notes => isVisible(document.querySelector('[data-testid="saved-global-notes"]')) && document.querySelector('[data-testid="saved-global-notes"] p').textContent === notes && !document.querySelector('[aria-label="全局通用备注"]'), [globalNotes]);
+  await clickText('编辑全局备注', globalPanel); assert.equal(await value('[aria-label="全局通用备注"]'), globalNotes);
+  await input('[aria-label="全局通用备注"]', '未保存的角色约定'); await clickText('取消编辑备注', globalPanel);
+  assert.equal(await evaluate(() => document.querySelector('[data-testid="saved-global-notes"] p').textContent), globalNotes);
+  assert.equal((await fixture('globalMemory')).globalNotes, globalNotes);
+  check('saved owner notes leave the input and display as saved content; edit restores their exact text and cancel preserves the saved document');
+  await verifyLongMemorySources();
   const globalDocument = await fixture('globalMemory'), originalBytes = fs.readFileSync(globalDocument.path);
   assert(originalBytes.toString('utf8').includes(globalNotes));
   assert(await evaluate(doc => {
@@ -281,7 +361,7 @@ async function verifyMemory() {
     await screenshot('global-memory-read-only-dark');
   } finally { await fixture('repairGlobalMemory'); }
   await clickText('重新读取', globalPanel);
-  await waitFor(notes => !document.querySelector('[data-testid="memory-read-only"]') && isUsable(document.querySelector('[aria-label="全局通用备注"]'), true) && document.querySelector('[aria-label="全局通用备注"]').value === notes, [globalNotes]);
+  await waitFor(notes => !document.querySelector('[data-testid="memory-read-only"]') && isVisible(document.querySelector('[data-testid="saved-global-notes"]')) && document.querySelector('[data-testid="saved-global-notes"] p').textContent === notes, [globalNotes]);
   assert.deepEqual(fs.readFileSync(globalDocument.path), originalBytes);
   check('an actual oversized fixture Markdown file exposes read-only state, blocks editing/clearing/extraction, and reload restores the exact original notes after repair');
 
@@ -291,9 +371,56 @@ async function verifyMemory() {
   await waitFor(() => isVisible(document.querySelector('[data-testid="memory-entry-count"]')) && document.querySelector('[data-testid="memory-entry-count"]').textContent === '0');
   assert.equal(peer(await fixture('state'), 'group_alpha@chatroom').recordCount, recordsBeforeMemoryClear);
   assert.equal((await fixture('globalMemory')).globalNotes, globalNotes);
-  await clickText('全局长期记忆'); await assertPanel('global'); assert.equal(await value('[aria-label="全局通用备注"]'), globalNotes);
+  await clickText('全局长期记忆'); await assertPanel('global'); assert.equal(await evaluate(() => document.querySelector('[data-testid="saved-global-notes"] p').textContent), globalNotes);
   check('global notes survive failed save/retry and local memory clearing; clearing the visible local panel leaves chat records and global notes intact');
   return globalNotes;
+}
+
+async function verifyImageMemory() {
+  const panel = '#wa-memory-panel-images';
+  await click('[data-testid="nav-memory"]'); await clickText('图片记忆');
+  const samples = await fixture('seedImageMemory');
+  const alpha = samples.find(item => item.scope.peerId === 'group_alpha@chatroom'), beta = samples.find(item => item.scope.peerId === 'group_beta@chatroom'), privateImage = samples.find(item => item.scope.chatType === 'private');
+  const choose = choice => input(panel + ' [aria-label="选择会话"]', choice);
+  const findCard = id => waitFor(id => Array.from(document.querySelectorAll('#wa-memory-panel-images [data-image-memory-id]')).some(el => isVisible(el) && el.dataset.imageMemoryId === id), [id]);
+  await choose('group:group_alpha@chatroom'); await clickText('重新读取图片记忆', panel); await findCard(alpha.id);
+  await input('[aria-label="搜索图片记忆"]', 'ALPHA_IMAGE_NOTE');
+  await waitFor(() => document.querySelectorAll('#wa-memory-panel-images [data-image-memory-id]').length === 1);
+  await waitFor(() => document.querySelector('#wa-memory-panel-images .wa-image-open img')?.complete);
+  await click(`[data-image-memory-id="${alpha.id}"] .wa-image-open`);
+  await waitFor(() => document.querySelector('[role="dialog"][aria-label="图片记忆预览"] .wa-image-preview')?.complete);
+  assert((await evaluate(() => document.querySelector('[role="dialog"][aria-label="图片记忆预览"]').textContent)).includes('原图'));
+  await screenshot('image-memory-preview-desktop-dark'); await screenshot('image-memory-preview-desktop-light', 'light');
+  await clickText('关闭图片预览', '[aria-label="图片记忆预览"]');
+  for (const [choice, sample] of [['group:group_beta@chatroom', beta], ['private:wxid_alice', privateImage]]) {
+    await choose(choice); await findCard(sample.id);
+    assert.equal(await evaluate(id => !!document.querySelector(`#wa-memory-panel-images [data-image-memory-id="${id}"]`), alpha.id), false);
+  }
+  await choose('group:group_alpha@chatroom'); await findCard(alpha.id);
+  await input('[aria-label="图片记忆保留天数"]', '7'); await clickText('保存图片记忆设置', panel);
+  await waitFor(async () => (await window.__uiFixture('imageMemory')).settings.retentionDays === 7);
+  await input('[aria-label="图片记忆保留天数"]', ''); await clickText('保存图片记忆设置', panel);
+  await waitFor(async () => (await window.__uiFixture('imageMemory')).settings.retentionDays === null);
+  await input('[aria-label="图片记忆保留天数"]', '0');
+  assert(await evaluate(() => Array.from(document.querySelectorAll('#wa-memory-panel-images button')).find(button => button.textContent === '保存图片记忆设置').disabled));
+  await input('[aria-label="图片记忆保留天数"]', '');
+  await screenshot('image-memory-desktop-dark'); await screenshot('image-memory-desktop-light', 'light');
+  window.setContentSize(430, 900); await assertLayout('narrow image memory'); await screenshot('image-memory-narrow-dark'); await screenshot('image-memory-narrow-light', 'light');
+  await click(`[data-image-memory-id="${alpha.id}"] .wa-image-open`); await waitFor(() => document.querySelector('.wa-image-preview')?.complete);
+  await assertLayout('narrow image preview'); await screenshot('image-memory-preview-narrow-light', 'light');
+  await clickText('删除这张图片记忆', '[aria-label="图片记忆预览"]');
+  await fixture('failNext', { endpoint: 'memory.images.delete' }); await clickText('确认删除图片记忆', '[aria-label="图片记忆预览"]');
+  await waitFor(() => document.querySelector('#wa-memory-panel-images [role="alert"]')?.textContent.includes('模拟保存失败'));
+  assert((await fixture('imageMemory')).items.some(item => item.id === alpha.id));
+  await clickText('确认删除图片记忆', '[aria-label="图片记忆预览"]');
+  await waitFor(() => !document.querySelector('[aria-label="图片记忆预览"]'));
+  assert(!(await fixture('imageMemory')).items.some(item => item.id === alpha.id));
+  assert((await fixture('imageMemory', { peerId: 'group_beta@chatroom' })).items.some(item => item.id === beta.id));
+  await clickText('保存已有图片', panel);
+  await waitFor(() => document.querySelector('#wa-memory-panel-images [role="status"]')?.textContent.includes('保存已结束'));
+  assert(!(await fixture('imageMemory')).items.some(item => item.id === alpha.id));
+  window.setContentSize(1280, 940);
+  check('image memory renders real original and thumbnail previews, scopes group/private search, saves or clears retention, fits narrow screens, and preserves a failed deletion until retry without resurrecting it');
 }
 
 async function verifyTasks() {
@@ -381,6 +508,18 @@ app.whenReady().then(async () => {
     await window.loadURL(origin);
     await waitFor(() => typeof window.__uiFixture === 'function' && document.querySelector('.wa-account-name')?.textContent.includes('界面测试'));
     assert.equal((await fixture('state')).account.id, 'wxid_ui_fixture', 'Refuse to operate outside the synthetic fixture');
+    if (process.env.WECHAT_UI_TEST_NATURAL_ONLY === '1') {
+      await click('[data-testid="nav-authorization"]');
+      await clickText('设置', '.wa-session-row[data-peer-id="group_alpha@chatroom"]');
+      await click('input[name="wa-group-mode"][value="natural"]');
+      await click('[data-testid="natural-chat-settings"] summary');
+      await clickText('保存会话设置');
+      await stateMatches(state => state.conversations.find(peer => peer.peerId === 'group_alpha@chatroom').config.mode === 'natural');
+      await waitFor(() => !!document.querySelector('[data-testid="natural-chat-status"]'));
+      await captureNaturalChat();
+      check('natural-chat primary controls, followup controls and real status fit desktop/narrow and light/dark screenshots');
+      assert.deepEqual(report.errors, [], 'Browser errors must be resolved'); report.ok = true; return;
+    }
     if (process.env.WECHAT_UI_TEST_VISUALS_ONLY === '1') {
       await verifyVisualDesign();
       assert.deepEqual(report.errors, [], 'Browser errors must be resolved'); report.ok = true; return;
@@ -468,7 +607,13 @@ app.whenReady().then(async () => {
     await waitFor(() => document.querySelectorAll('.wa-persona-card').length === 1);
     await click('.wa-persona-card[data-preset-id="xingli"]');
     await waitFor(() => document.querySelector('[data-testid="persona-preset-preview"]'));
-    assert.equal(await evaluate(() => document.querySelectorAll('.wa-persona-example').length), 2);
+    const { getPersonaPreset } = await import('../src/shared/persona-presets.mjs');
+    const expectedExamples = getPersonaPreset('xingli').examples;
+    assert.equal(await evaluate(() => document.querySelectorAll('.wa-persona-example').length), expectedExamples.length);
+    assert(await evaluate(examples => {
+      const rendered = [...document.querySelectorAll('.wa-persona-example')];
+      return examples.every((example, index) => [example.scene, example.message, example.reply].every(text => rendered[index].textContent.includes(text)));
+    }, expectedExamples), 'the preview renders every scenario, message and reply from the shared preset data');
     await assertLayout('desktop persona preview'); await screenshot('persona-preview-desktop-dark'); await screenshot('persona-preview-desktop-light', 'light');
     await click('.wa-back'); assert.equal(await value('[data-testid="persona-search"]'), '傲娇');
     await input('[data-testid="persona-search"]', ''); await click('[data-category="social"]');
@@ -501,6 +646,15 @@ app.whenReady().then(async () => {
     await clickText('返回模型设置');
     await input('#wa-model', JSON.stringify(['fixture', 'beta']));
     await stateMatches(s => s.modelChoice?.model === 'beta');
+    assert.equal(await value('#wa-max-tokens'), '', 'new configuration must show automatic model output');
+    assert.equal(await evaluate(() => document.querySelector('#wa-max-tokens').hasAttribute('max')), false);
+    await input('#wa-max-tokens', '131072'); await clickText('保存生成参数');
+    await stateMatches(s => s.modelConfig.maxTokens === 131072);
+    await input('#wa-max-tokens', ''); await clickText('保存生成参数');
+    await stateMatches(s => s.modelConfig.maxTokens === null);
+    await input('#wa-max-tokens', '0');
+    assert(await evaluate(() => [...document.querySelectorAll('button')].find(el => el.textContent.trim() === '保存生成参数').disabled));
+    check('automatic output saves as null; 131072 saves unchanged; no fixed HTML upper bound; zero is rejected');
     await input('#wa-max-tokens', '2048'); await input('#wa-temperature', '0.7');
     await clickText('保存生成参数');
     await stateMatches(s => s.modelConfig.maxTokens === 2048 && s.modelConfig.temperature === 0.7);
@@ -601,10 +755,42 @@ app.whenReady().then(async () => {
     await input('[aria-label="主动参与间隔模式"]', 'fixed'); await input('[aria-label="主动参与固定消息数"]', '100');
     await clickText('保存会话设置'); await stateMatches(state => state.conversations.find(peer => peer.peerId === 'group_alpha@chatroom').config.fixedMessages === 100);
     await input('[aria-label="主动参与间隔模式"]', 'random'); await input('[aria-label="主动参与最少消息数"]', '1'); await input('[aria-label="主动参与最多消息数"]', '100');
+    assert.equal(await evaluate(() => document.querySelector('#wa-memory-window').hasAttribute('max')), false);
+    await input('#wa-memory-window', '1000000'); await clickText('保存会话设置');
+    await stateMatches(state => state.conversations.find(peer => peer.peerId === 'group_alpha@chatroom').config.memoryWindowChars === 1000000);
     await input('#wa-memory-window', '24000'); await clickText('保存会话设置');
     await stateMatches(state => { const config = state.conversations.find(peer => peer.peerId === 'group_alpha@chatroom').config; return config.intervalMode === 'random' && config.minMessages === 1 && config.maxMessages === 100 && config.memoryWindowChars === 24000; });
     assert(await evaluate(() => document.querySelector('[aria-label="群聊回复模式"]').textContent.includes('立即回应')));
     check('progressive mode explanation, 1–100 random/fixed interval and per-room memory window are usable');
+    await click('input[name="wa-group-mode"][value="natural"]');
+    await waitFor(() => !!document.querySelector('[data-testid="natural-chat-settings"]'));
+    assert.equal(await value('#wa-natural-temperament'), 'balanced');
+    assert.equal(await value('[aria-label="自然陪聊最少分钟数"]'), '30');
+    assert.equal(await value('[aria-label="自然陪聊最多分钟数"]'), '60');
+    assert.equal(await evaluate(() => document.querySelector('[aria-label="自然陪聊智能跳过"]').checked), true);
+    assert.equal(await value('#wa-natural-start'), '09:00'); assert.equal(await value('#wa-natural-end'), '23:00');
+    await input('#wa-natural-temperament', 'lively'); await input('#wa-natural-interval', 'fixed');
+    await input('[aria-label="自然陪聊固定分钟数"]', '0');
+    await waitFor(() => Array.from(document.querySelectorAll('[role="alert"]')).some(element => element.textContent.includes('主动间隔应为')));
+    assert.equal(await evaluate(() => Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === '保存会话设置').disabled), true);
+    await input('[aria-label="自然陪聊固定分钟数"]', '17');
+    await click('[data-testid="natural-chat-settings"] summary');
+    assert.equal(await value('#wa-natural-followup'), '120');
+    await input('#wa-natural-followup', '90'); await input('#wa-natural-unanswered', '3'); await input('#wa-natural-gap', '4');
+    await fixture('failNext', { endpoint: 'conversation.configure' }); await clickText('保存会话设置');
+    await waitFor(() => Array.from(document.querySelectorAll('[role="alert"]')).some(element => element.textContent.includes('模拟保存失败')));
+    assert.equal(peer(await fixture('state'), 'group_alpha@chatroom').config.mode, 'participate');
+    assert.equal(await value('[aria-label="自然陪聊固定分钟数"]'), '17');
+    await clickText('保存会话设置');
+    await stateMatches(state => { const config = state.conversations.find(peer => peer.peerId === 'group_alpha@chatroom').config;
+      return config.mode === 'natural' && config.natural.temperament === 'lively' && config.natural.fixedMinutes === 17 &&
+        config.natural.followupSeconds === 90 && config.natural.maxUnanswered === 3 && config.natural.minGapMinutes === 4 && config.minMessages === 1 && config.maxMessages === 100; });
+    await waitFor(() => !!document.querySelector('[data-testid="natural-chat-status"]'));
+    assert.equal(peer(await fixture('state'), 'group_beta@chatroom').config.mode, 'default');
+    await captureNaturalChat();
+    check('natural-chat fourth mode preserves quantity settings, validates minutes, retains failed-save drafts and saves temperament, followup, response limit and hours per room');
+    await click('input[name="wa-group-mode"][value="participate"]'); await clickText('保存会话设置');
+    await stateMatches(state => state.conversations.find(peer => peer.peerId === 'group_alpha@chatroom').config.mode === 'participate');
     await click('details.wa-subsection summary');
     assert.equal(await evaluate(() => !!document.querySelector('#wa-conversation-path')), false);
     let current = await fixture('state');
@@ -661,6 +847,14 @@ app.whenReady().then(async () => {
     assert.equal(await evaluate(() => !!document.querySelector('[data-testid="new-records-notice"]')), false);
     assert(await evaluate(() => document.querySelector('.wa-pagination').textContent.includes('共 67 条')));
     check('expanded records and older pages keep their position as new records arrive; explicit refresh returns to newest');
+    const flagged = await fixture('flagRecordStyle', { recordKey: latest.keys.at(-1) });
+    await click('.wa-record summary');
+    await waitFor(() => document.querySelector('.wa-record[open] [data-testid="reply-style-review"]')?.textContent.includes('表达待优化'));
+    assert.equal(await evaluate(() => document.querySelector('.wa-record[open] .wa-record-reply').textContent), flagged.reply);
+    assert(await evaluate(() => document.querySelector('.wa-record[open]').textContent.includes('微信服务端已确认 1 条消息')));
+    assert(await evaluate(() => document.querySelector('.wa-record[open] [data-testid="reply-style-review"]').textContent.includes('此标记不影响发送')));
+    await screenshot('records-style-review-light', 'light');
+    check('a pending style review remains a local note beside the original reply and true WeChat acknowledgement');
     await click('.wa-records-peer[data-peer-id="group_beta@chatroom"]');
     await waitFor(() => document.querySelectorAll('.wa-record').length === 3);
     assert(await evaluate(() => Array.from(document.querySelectorAll('.wa-record-question')).every(el => el.textContent.includes('BETA'))));
@@ -723,6 +917,7 @@ app.whenReady().then(async () => {
     check('one global path preserves failed-save drafts and migrates all seven plugin data areas, identity, personas and records; legacy overrides consolidate and later writes use only the replacement runtime');
 
     const globalNotes = await verifyMemory();
+    await verifyImageMemory();
     await verifyTasks();
 
     await click('[data-testid="nav-assets"]'); await waitFor(() => document.querySelector('[data-testid="asset-upload-input"]'));
@@ -759,10 +954,10 @@ app.whenReady().then(async () => {
     await clickText('关闭', '[role="dialog"]');
     check('the real file input imports a ZIP across two 256 KiB chunks and previews the original PNG');
 
-    await clickText('理解未填写含义的素材');
-    await waitFor(async () => (await window.__uiFixture('assets')).counts.described === 2);
-    assert.deepEqual((await fixture('stats')).assetAnalysisRequests, [2]);
-    await waitFor(() => document.querySelector('[role="status"]')?.textContent.includes('已理解 2 张'));
+    await clickText('理解未填写含义的图片');
+    await waitFor(() => document.querySelector('[role="status"]')?.textContent.includes('2 张表情包跳过'));
+    assert.equal((await fixture('assets')).counts.described, 0);
+    assert.deepEqual((await fixture('stats')).assetAnalysisRequests, []);
     await click('[data-testid="asset-settings"] summary');
     await input('[aria-label="素材自动使用概率"]', '35'); await input('[aria-label="素材最少消息间隔"]', '5'); await clickText('保存使用设置');
     await waitFor(async () => { const settings = (await window.__uiFixture('assets')).settings; return settings.enabled && settings.probability === 35 && settings.minGapMessages === 5; });
@@ -814,13 +1009,13 @@ app.whenReady().then(async () => {
     assert(editorLayout.scroll <= editorLayout.width + 1 && editorLayout.left >= 0 && editorLayout.right <= editorLayout.viewport);
     await clickText('关闭', '[role="dialog"]');
     await click('[data-testid="nav-memory"]'); await clickText('全局长期记忆'); await waitFor(() => isVisible(document.querySelector('[data-testid="global-memory-document"]')));
-    assert.equal(await value('[aria-label="全局通用备注"]'), globalNotes); await assertLayout('narrow global memory'); await screenshot('global-memory-narrow-dark'); await screenshot('global-memory-narrow-light', 'light');
+    assert.equal(await evaluate(() => document.querySelector('[data-testid="saved-global-notes"] p').textContent), globalNotes); await assertLayout('narrow global memory'); await screenshot('global-memory-narrow-dark'); await screenshot('global-memory-narrow-light', 'light');
     await click('[data-testid="nav-tasks"]');
     await assertLayout('narrow tasks'); await screenshot('tasks-narrow-dark');
     await click('[data-testid="task-tab-history"]'); await waitFor(() => document.querySelectorAll('.wa-task-history-row').length === 20);
     await assertLayout('narrow task history'); await screenshot('tasks-history-narrow-dark'); await screenshot('tasks-history-narrow-light', 'light');
     await click('[data-task-id="ui-history-completed-0"] summary'); await assertLayout('narrow expanded task history'); await screenshot('tasks-history-expanded-narrow-dark');
-    await click('[data-testid="nav-memory"]'); await waitFor(() => isVisible(document.querySelector('[data-testid="memory-document"]'))); await assertLayout('narrow memory'); await screenshot('memory-narrow-light', 'light');
+    await click('[data-testid="nav-memory"]'); await clickText('会话记忆窗口'); await waitFor(() => isVisible(document.querySelector('[data-testid="memory-document"]'))); await assertLayout('narrow memory'); await screenshot('memory-narrow-light', 'light');
     await click('[data-testid="nav-overview"]'); await assertLayout('narrow overview'); await screenshot('overview-narrow-dark');
     await click('[data-testid="nav-authorization"]'); await assertLayout('narrow authorization'); await screenshot('authorization-narrow-light', 'light');
     await click('[data-testid="nav-settings"]'); await click('[data-testid="open-persona"]'); await assertLayout('narrow persona'); await screenshot('persona-narrow-dark');

@@ -49,6 +49,17 @@ function fixture(t, respond = (cmd, body) => cmd === 110 ? imageAck(body) : text
   return { backend, calls, events, cache: () => fs.readFileSync(path.join(cacheDir, `${backend.session.value.uin}.json`), 'utf8') };
 }
 
+test('long complete text is segmented without losing Unicode or the ending, with one ACK per segment', async t => {
+  const f = fixture(t, (_cmd, body, number) => textAck(body, String(9000000 + number)));
+  const reply = '甲🙂双曲线 x²/a² − y²/b² = 1。\n'.repeat(1000) + '完整结尾。';
+  assert(reply.length > 12000);
+  const result = await f.backend.sendMessage(message(text(reply)));
+  assert.equal(result.delivery, 'server-ack'); assert(f.calls.length > 1);
+  assert.equal(f.events.map(e => e.message[0].data.text).join(''), reply);
+  assert(f.events.every(e => Buffer.byteLength(e.message[0].data.text) <= 4096));
+  assert.equal(result.serverMessageIds.length, f.calls.length);
+});
+
 test('UploadMsgImg uses command 9, exact wrappers, and complete-image identity', () => {
   const upload = { clientId: 'fixture-image', from: 'self', to: 'peer', total: 6, time: 1700000000, baseRequest: fv(2, 123), extension: 'png' };
   const body = imageUploadRequest(upload, 0, Buffer.from('123456'));

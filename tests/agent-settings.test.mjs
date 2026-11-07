@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DshAgentRunner } from '../lib/testing.js';
+import { DshAgentRunner, parseNaturalDecision } from '../lib/testing.js';
 
 const signal = () => new AbortController().signal;
 const finished = [
@@ -8,7 +8,7 @@ const finished = [
   { type: 'turn/end', data: { turn: 0, reason: { kind: 'completed' } } }
 ];
 
-function fixture({ hostTemperature, listModels } = {}) {
+function fixture({ hostTemperature, listModels, responseText } = {}) {
   const calls = [], scopes = [], dispatched = [], messages = [];
   const create = async options => {
     calls.push(options);
@@ -22,7 +22,9 @@ function fixture({ hostTemperature, listModels } = {}) {
     const request = await hooks.reduceRight((next, hook) => () => hook({}, next), async () => base)();
     dispatched.push(request);
     return { agent: {
-      session: { seq: 0, snapshotEvents: () => finished },
+      session: { seq: 0, snapshotEvents: () => responseText === undefined ? finished : [
+        { type: 'assistant/message', data: { turn: 0, message: { content: [{ type: 'text', text: responseText }] } } }, finished[1]
+      ] },
       followup: message => messages.push(message), whenIdle: async () => {}, cancel() {}
     }, dispose: async () => {} };
   };
@@ -42,12 +44,26 @@ test('persona, participation instructions and account prompt enter the isolated 
   };
   await new DshAgentRunner(f.ctx, () => null, () => runtime).run({ text: '接上音乐话题', group: true, mode: 'participate', prompt: '避免剧透', signal: signal() });
   const scope = f.scopes[0];
-  for (const value of ['小胖', '胖胖', '熟悉音乐的群友助手', '温和并有分寸', '短句，少用表情', '避免剧透', '群聊中的 AI 参与者', '不冒充真人', '不虚构图片内容']) assert(scope.prompt.text.includes(value), value);
+  for (const value of ['小胖', '胖胖', '熟悉音乐的群友助手', '温和并有分寸', '短句，少用表情', '避免剧透', '本轮主动接群内当前话题', '被直接问是否 AI 时如实回答', '未读取的画面不能猜测']) assert(scope.prompt.text.includes(value), value);
   assert.equal(scope.prompt.complete, true); assert.equal(scope.prompt.interpolate, false); assert.equal(scope.suppressed, true);
   assert.deepEqual(scope.rules, [{ allow: [] }]); assert.equal(typeof scope.guard(), 'string');
   assert.equal(f.calls[0].agentOptions.maxTokens, 8192);
   assert.equal(f.dispatched[0].temperature, 0, 'temperature zero must reach the request waterfall');
   assert.deepEqual(f.calls[0].meta, { cwd: runtime.workspacePath });
+});
+
+test('natural skip is one model call with persona and global identity, no tools and no public JSON', async () => {
+  const f = fixture({ responseText: '{"action":"skip","reason":"repeated","text":""}' });
+  let decision;
+  const result = await new DshAgentRunner(f.ctx, () => null, () => ({
+    persona: { name: '小胖', aliases: [], prompt: '喜欢露营，短句接话。' }, identityMarkdown: '# 全局身份\n署名小胖。',
+    modelConfig: { webSearch: true, maxTokens: null, temperature: null }
+  })).run({ text: '判断是否接话', memory: '本群已经讨论并确定了露营地点。', group: true, mode: 'natural',
+    naturalDecision: { trigger: 'count', temperament: 'balanced', smartSkip: true }, signal: signal(), allowEmptyReply: true,
+    selectReplyText: raw => { decision = parseNaturalDecision(raw); return decision.text; } });
+  assert.equal(result.text, ''); assert.equal(decision.action, 'skip'); assert.equal(f.calls.length, 1);
+  for (const text of ['小胖', '喜欢露营', '署名小胖', '自然陪聊判断', '只输出一个 JSON 对象', 'skip 不生成正文或署名']) assert(f.scopes[0].prompt.text.includes(text));
+  assert.deepEqual(f.scopes[0].rules, [{ allow: [] }]); assert.equal(typeof f.scopes[0].guard({ name: 'wechat_web_search' }), 'string');
 });
 
 test('runtime and model settings are snapshotted before asynchronous model validation', async () => {
@@ -88,13 +104,23 @@ test('global identity is reloaded each turn and a conversation persona overrides
   assert.equal(f.scopes[1].prompt.text.split(markdown).length, 2); assert(f.scopes[1].prompt.text.includes('DEFAULT_ONLY')); assert(!f.scopes[1].prompt.text.includes('ROOM_A_ONLY')); assert(!f.scopes[1].prompt.text.includes('GLOBAL_ONE'));
 });
 
-test('null temperature preserves host controls and the old constructor keeps compatible defaults', async () => {
+test('public knowledge answers preserve persona and fixed identity without enabling tools or a second model pass', async () => {
+  const f = fixture(), runner = new DshAgentRunner(f.ctx, () => null, () => ({ identityMarkdown: 'GLOBAL_KB_ENDING', modelConfig: { webSearch: true }, persona: { name: '默认', prompt: 'DEFAULT_KB_STYLE' } }));
+  await runner.run({ text: '{"question":"退款","sources":[]}', mode: 'knowledge', systemOverride: 'KNOWLEDGE_GROUNDED_ONLY', persona: { name: '知识小圆', prompt: 'ROOM_KB_STYLE' }, prompt: 'ACCOUNT_KB_RULE', group: true, signal: signal() });
+  assert.equal(f.calls.length, 1);
+  for (const text of ['GLOBAL_KB_ENDING', '知识小圆', 'ROOM_KB_STYLE', 'ACCOUNT_KB_RULE', 'KNOWLEDGE_GROUNDED_ONLY']) assert(f.scopes[0].prompt.text.includes(text), text);
+  assert(!f.scopes[0].prompt.text.includes('DEFAULT_KB_STYLE'));
+  assert.deepEqual(f.scopes[0].rules, [{ allow: [] }]);
+  assert.equal(typeof f.scopes[0].guard({ name: 'wechat_web_search' }), 'string');
+});
+
+test('null temperature and automatic output preserve model controls', async () => {
   const f = fixture({ hostTemperature: 0.65 });
   await new DshAgentRunner(f.ctx, () => null, () => ({ modelConfig: { maxTokens: 256, temperature: null } })).run({ text: '简短回答', signal: signal() });
   assert.equal(f.dispatched[0].temperature, 0.65); assert.equal(f.dispatched[0].maxTokens, 256);
   assert.equal(f.scopes[0].hooks.length, 0);
   await new DshAgentRunner(f.ctx).run({ text: '兼容旧调用', signal: signal() });
-  assert.equal(f.calls[1].agentOptions.maxTokens, 4096);
+  assert.equal(Object.hasOwn(f.calls[1].agentOptions, 'maxTokens'), false);
   assert.equal(Object.hasOwn(f.calls[1], 'meta'), false);
   assert(f.scopes[1].prompt.text.includes('微信助手'));
   assert.equal(f.messages[1].content[0].text, '兼容旧调用');

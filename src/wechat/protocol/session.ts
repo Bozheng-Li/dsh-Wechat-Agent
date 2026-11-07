@@ -1,6 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
-import path from 'node:path';
+import { atomicJson } from '../../storage/atomic-json.ts';
+export { atomicJson } from '../../storage/atomic-json.ts';
+import { existsSync, readFileSync } from "node:fs";
+
+
 import { BridgeError, object } from '@napcat-wechat/protocol';
 import { fields, num } from './wire.js';
 import { recoverImageBaseRequest, validateImageBaseRequest } from './image-session.js';
@@ -15,25 +17,7 @@ export interface Credential {
   // omit both and use the observed defaults.
   body_key?: string; s08?: string;
 }
-export function atomicJson(file: string, value: unknown) {
-  mkdirSync(path.dirname(file), { recursive: true });
-  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
-  try {
-    writeFileSync(temporary, JSON.stringify(value, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
-    for (let attempt = 0; ; attempt++) {
-      try { renameSync(temporary, file); break; }
-      catch (error) {
-        // Windows readers/scanners can briefly deny replacement. Keep the old
-        // file intact and bound retries to 310 ms for this synchronous API.
-        if (process.platform !== 'win32' || attempt >= 5 || !['EPERM', 'EACCES', 'EBUSY'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10 * 2 ** attempt);
-      }
-    }
-  } catch (error) {
-    try { unlinkSync(temporary); } catch { /* Preserve the original write failure. */ }
-    throw error;
-  }
-}
+
 export function readJson(file: string): unknown { return JSON.parse(readFileSync(file, 'utf8')); }
 export function validateCredential(raw: unknown): Credential {
   const c = object(raw);

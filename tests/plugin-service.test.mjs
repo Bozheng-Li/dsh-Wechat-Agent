@@ -117,7 +117,7 @@ test('new configuration and records endpoints remain owner-only', async t => {
     const response = await f.rpc(endpoint, {}, undefined, agent);
     assert.equal(response.ok, false); assert.equal(response.error.code, 'OWNER_REQUIRED');
   }
-  assert.deepEqual(f.store.modelConfig(), { maxTokens: 4096, temperature: null, vision: true, visionModel: null, webSearch: false, searchProvider: 'tavily', tavilyBaseURL: 'https://api.tavily.com' });
+  assert.deepEqual(f.store.modelConfig(), { maxTokens: null, temperature: null, vision: true, visionModel: null, webSearch: false, searchProvider: 'tavily', tavilyBaseURL: 'https://api.tavily.com' });
   assert.equal(f.store.persona().name, '微信助手');
   assert.equal(f.workerCalls.length, 0);
   const owner = { principal: { kind: 'owner' } };

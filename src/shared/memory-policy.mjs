@@ -1,0 +1,3 @@
+export const DEFAULT_MEMORY_RETENTION_DAYS = 30;
+export const DEFAULT_MEMORY_RETENTION_MS = DEFAULT_MEMORY_RETENTION_DAYS * 86400000;
+export const defaultMemoryExpiry = (savedAt) => savedAt + DEFAULT_MEMORY_RETENTION_MS;

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AgentIdentity, DEFAULT_AGENT_IDENTITY, DshAgentRunner, NATURAL_REPLY_RULES, needsConversationalRewrite } from '../lib/testing.js';
+import { AgentIdentity, DEFAULT_AGENT_IDENTITY, effectiveAgentIdentity, DshAgentRunner, NATURAL_REPLY_RULES, REPLY_STYLE_REVIEW_NOTE, needsConversationalRewrite } from '../lib/testing.js';
 
 const poems = `灯下翻书久，
 页中落旧尘。
@@ -43,7 +43,7 @@ function agentFixture(answers, onMessage = () => {}) {
     scopes.push(scope); options.setup(scope);
     requests.push(await scope.hooks.reduceRight((next, hook) => () => hook({}, next), async () => options.agentOptions)());
     const answer = answers.shift();
-    assert.equal(typeof answer, 'string', 'a rewrite must use at most one additional model request');
+    assert.equal(typeof answer, 'string', 'style review must not make another model request');
     return { agent: {
       session: { seq: 0, snapshotEvents: () => [
         { type: 'assistant/message', data: { turn: 0, message: { content: [{ type: 'text', text: answer }] } } },
@@ -117,15 +117,14 @@ test('explicit numbered choices and step-by-step requests preserve the requested
   assert(needsConversationalRewrite(choices, '今天好累'));
 });
 
-test('an explicit no-list request rewrites a disobedient draft before any reply is returned', async () => {
+test('a disobedient format is marked for later review and the complete draft remains deliverable', async () => {
   const request = '今天列计划就把自己列累了，我只想聊两句，别给我行动清单。';
   const draft = '1. 喝一杯水\n2. 列出优先级\n3. 先完成最简单的事';
-  const answer = '光安排这些事就够费神了，先陪你歇会儿。';
-  const f = agentFixture([draft, answer]);
+  const f = agentFixture([draft]);
   const result = await new DshAgentRunner(f.ctx, () => null, () => ({ persona: { name: '阿衡', prompt: '使用编号清单给出建议。' } })).run({ text: request, signal: new AbortController().signal });
-  assert.equal(result.text, answer);
-  assert.equal(f.messages.length, 2);
-  assert(f.messages[1].content[0].text.includes(request));
+  assert.equal(result.text, draft);
+  assert.equal(result.replyStyleWarning, REPLY_STYLE_REVIEW_NOTE);
+  assert.equal(f.messages.length, 1);
 });
 
 test('the latest explicit format direction wins within a request without treating quoted directions as commands', () => {
@@ -148,11 +147,11 @@ test('the latest explicit format direction wins within a request without treatin
   assert(!needsConversationalRewrite('```text\n1. 原文\n2. 保留\n```', '逐字返回这段代码，不要在正文用列表。'));
 });
 
-test('poetry polishing keeps the original persona, global identity, account requirements and model controls without tools', async () => {
+test('poetry review keeps the complete works and captured generation settings without another model or tool call', async () => {
   const choice = { provider: 'fixture', model: 'first' };
   const runtime = { identityMarkdown: '# GLOBAL_CAPTURED\n只用中文。', persona: { name: '墨白', aliases: [], prompt: 'MOBAI_CAPTURED：克制的轻古风。' },
     modelConfig: { maxTokens: 1536, temperature: 0.2 } };
-  const f = agentFixture([submittedReply, poems], number => {
+  const f = agentFixture([submittedReply], number => {
     if (number !== 1) return;
     runtime.identityMarkdown = '# GLOBAL_CHANGED'; runtime.persona.prompt = 'PERSONA_CHANGED';
     runtime.modelConfig.maxTokens = 768; runtime.modelConfig.temperature = 0.9; choice.model = 'second';
@@ -161,26 +160,44 @@ test('poetry polishing keeps the original persona, global identity, account requ
   const runner = new DshAgentRunner(f.ctx, () => { choiceReads++; return choice; }, () => { runtimeReads++; return runtime; });
   const result = await runner.run({ text: '给我写三首诗', prompt: 'ACCOUNT_CAPTURED：作品结束就停，不加签名。',
     tools: [{ name: 'wechat_task', execute: async () => { toolExecutions++; } }], signal: new AbortController().signal });
-  assert.equal(result.text, poems); assert.equal(f.messages.length, 2);
+  assert.equal(result.text, submittedReply); assert.equal(f.messages.length, 1);
+  assert.equal(result.replyStyleWarning, REPLY_STYLE_REVIEW_NOTE);
   assert.equal(runtimeReads, 1); assert.equal(choiceReads, 1);
   for (const prompt of f.scopes.map(scope => scope.prompt)) {
     for (const value of ['GLOBAL_CAPTURED', 'MOBAI_CAPTURED', 'ACCOUNT_CAPTURED']) assert(prompt.includes(value), value);
     for (const value of ['GLOBAL_CHANGED', 'PERSONA_CHANGED']) assert(!prompt.includes(value), value);
     assert.equal(prompt.split(NATURAL_REPLY_RULES).length, 2, 'delivery defaults occur exactly once');
-    assert(prompt.indexOf('GLOBAL_CAPTURED') > prompt.indexOf('ACCOUNT_CAPTURED'), 'normal generation and rewriting share the final global contract');
+    assert(prompt.indexOf('GLOBAL_CAPTURED') > prompt.indexOf('ACCOUNT_CAPTURED'), 'generation keeps the final global contract');
   }
   assert(f.scopes[0].prompt.indexOf(NATURAL_REPLY_RULES) < f.scopes[0].prompt.indexOf('MOBAI_CAPTURED'));
   assert(f.scopes[0].prompt.indexOf('MOBAI_CAPTURED') < f.scopes[0].prompt.indexOf('ACCOUNT_CAPTURED'));
-  assert.deepEqual(f.scopes.map(scope => scope.definitions.map(tool => tool.name)), [['wechat_task'], []]);
+  assert.deepEqual(f.scopes.map(scope => scope.definitions.map(tool => tool.name)), [['wechat_task']]);
   assert.equal(toolExecutions, 0);
   assert(f.requests.every(request => request.model === 'first' && request.maxTokens === 1536 && request.temperature === 0.2));
-  assert(f.messages[1].content[0].text.includes(poems), 'the rewrite receives the complete original works');
 });
 
-test('an unresolved service footer is reported after one rewrite and never returned as a deliverable', async () => {
-  const f = agentFixture([`${poems}\n\n${menu}`, `${poems}\n\n${menu}`]);
-  await assert.rejects(new DshAgentRunner(f.ctx).run({ text: '写三首诗', signal: new AbortController().signal }), { code: 'REPLY_STYLE_FAILED' });
-  assert.equal(f.messages.length, 2);
+test('a service footer is returned with a local review note, without rewriting or interrupting the conversation', async () => {
+  const answer = `${poems}\n\n${menu}`, f = agentFixture([answer]);
+  const result = await new DshAgentRunner(f.ctx).run({ text: '写三首诗', signal: new AbortController().signal });
+  assert.equal(result.text, answer); assert.equal(result.replyStyleWarning, REPLY_STYLE_REVIEW_NOTE);
+  assert.equal(f.messages.length, 1); assert(!result.text.includes(REPLY_STYLE_REVIEW_NOTE));
+});
+
+test('the reported conic-section answer keeps every formula despite a boilerplate opening', async () => {
+  const answer = '收到你的问题。\n双曲线：x²/a² − y²/b² = 1，c² = a² + b²。\n抛物线：y² = 2px，焦点 (p/2, 0)，准线 x = −p/2。';
+  const f = agentFixture([answer]);
+  const result = await new DshAgentRunner(f.ctx).run({ text: '小胖你把双曲线和抛物线的都写出来', signal: new AbortController().signal });
+  assert.equal(result.text, answer); assert.equal(result.replyStyleWarning, REPLY_STYLE_REVIEW_NOTE);
+  assert.equal(f.messages.length, 1);
+});
+
+test('a clean reply has no review note and a cancelled caption is still cancelled', async () => {
+  const f = agentFixture(['双曲线：x²/a² − y²/b² = 1。']);
+  const runner = new DshAgentRunner(f.ctx);
+  const result = await runner.run({ text: '写出双曲线方程', signal: new AbortController().signal });
+  assert.equal(result.replyStyleWarning, undefined);
+  const controller = new AbortController(); controller.abort(new Error('cancelled'));
+  await assert.rejects(runner.polishReply('收到你的问题。', '继续说', controller.signal, {}), /cancelled/);
 });
 
 const base = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../storage/tmp');
@@ -193,9 +210,10 @@ function identityRoot(t) {
   return root;
 }
 const legacyIdentity = fs.readFileSync(new URL('./fixtures/agent-identity-preview2.md', import.meta.url), 'utf8');
+const previousIdentity = fs.readFileSync(new URL('./fixtures/agent-identity-before-persona-rewrite.md', import.meta.url), 'utf8');
 
 test('only unedited legacy default identity files are migrated, including Windows line endings', t => {
-  for (const markdown of [legacyIdentity, '\uFEFF' + legacyIdentity.replace(/\n/g, '\r\n')]) {
+  for (const legacy of [legacyIdentity, previousIdentity]) for (const markdown of [legacy, '\uFEFF' + legacy.replace(/\n/g, '\r\n')]) {
     const root = identityRoot(t); fs.writeFileSync(path.join(root, 'AGENT.md'), markdown);
     const identity = new AgentIdentity(root);
     assert.equal(identity.view().markdown, DEFAULT_AGENT_IDENTITY);
@@ -205,9 +223,22 @@ test('only unedited legacy default identity files are migrated, including Window
 });
 
 test('custom global identity and invalid files are preserved byte for byte during default migration', t => {
-  for (const content of [Buffer.from(legacyIdentity + '\n只使用我指定的人设。'), Buffer.from([0xff, 0xfe, 0x00])]) {
+  for (const content of [Buffer.from(legacyIdentity + '\n只使用我指定的人设。'), Buffer.from(previousIdentity + '\n保留我的自定义约定。'), Buffer.from([0xff, 0xfe, 0x00])]) {
     const root = identityRoot(t), file = path.join(root, 'AGENT.md'); fs.writeFileSync(file, content);
     new AgentIdentity(root);
     assert.deepEqual(fs.readFileSync(file), content);
   }
+});
+
+test('a known old default prefix is replaced only in the prompt and its appended owner agreements survive', t => {
+  const root = identityRoot(t), file = path.join(root, 'AGENT.md');
+  const note = '\n第一行写“保留约定”。青石是当前角色的爸爸。';
+  const content = Buffer.from('\uFEFF' + (previousIdentity + note).replace(/\n/g, '\r\n'));
+  fs.writeFileSync(file, content);
+  const identity = new AgentIdentity(root), promptIdentity = effectiveAgentIdentity(identity.view().markdown);
+  assert.equal(promptIdentity, DEFAULT_AGENT_IDENTITY + note);
+  assert(!promptIdentity.includes('不编造真人身份、亲身经历、家人'));
+  assert.deepEqual(fs.readFileSync(file), content, 'a custom identity file must not be rewritten');
+  const customized = previousIdentity.replace('像对话中的参与者一样接话', '每条都先写一句诗') + note;
+  assert.equal(effectiveAgentIdentity(customized), customized, 'an edited prefix is owner content, not boilerplate');
 });

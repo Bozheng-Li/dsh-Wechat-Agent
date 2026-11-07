@@ -10,7 +10,7 @@ import { rolldown } from 'rolldown';
 // Compile the source in memory. These fixtures never use the installed worker,
 // real account storage, or a network transport, and do not rebuild lib/.
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const entry = ['src/scheduler.mjs', 'src/conversation-tools.mjs', 'src/contracts.mjs', 'src/wechat/protocol/backend.ts', 'src/wechat/protocol/wire.ts', 'src/wechat/types.ts']
+const entry = ['src/features/tasks/scheduler.mjs', 'src/features/tasks/conversation-tools.mjs', 'src/shared/contracts.mjs', 'src/wechat/protocol/backend.ts', 'src/wechat/protocol/wire.ts', 'src/wechat/types.ts']
   .map(file => `export * from ${JSON.stringify(path.join(root, file))};`).join('\n');
 const bundle = await rolldown({ input: 'virtual:task-mentions', platform: 'node', resolve: { alias: { '@napcat-wechat/protocol': path.join(root, 'src/wechat/types.ts') } }, plugins: [{ name: 'task-mentions', resolveId: id => id === 'virtual:task-mentions' ? id : null, load: id => id === 'virtual:task-mentions' ? entry : null }] });
 let api;
@@ -126,14 +126,15 @@ test('task idempotency includes target IDs, survives renaming and remains accoun
   assert.equal(f.scheduler.create(original, scope).id, first.id);
 });
 
-test('a missing member at execution pauses the durable task with a clear failed result and no plain-message fallback', async t => {
+test('a missing member retains the reminder for delayed retry with a clear failed result and no plain-message fallback', async t => {
   const f = schedulerFixture(t), targets = await f.scheduler.resolveTargets(['阿禾'], f.scope);
   f.scheduler.create(f.input(targets), f.scope); f.groups.set(room, []); f.advance(60000);
   await f.scheduler.tick();
   const { tasks, runs } = f.scheduler.list(owner);
-  assert.equal(tasks[0].state, 'paused'); assert.equal(tasks[0].lastState, 'failed'); assert.match(tasks[0].lastError, /提醒对象.*名单/);
+  assert.equal(tasks[0].state, 'pending'); assert.equal(tasks[0].lastState, 'failed'); assert.match(tasks[0].lastError, /提醒对象.*名单/);
   assert.equal(runs[0].state, 'failed'); assert.deepEqual(runs[0].acknowledgedMessageIds, []); assert.equal(f.sent.length, 0);
   await f.scheduler.tick(); assert.equal(f.scheduler.list(owner).runs.length, 1);
+  f.groups.set(room, [member('alice', '阿禾')]); f.advance(60000); await f.scheduler.tick(); assert.equal(f.sent.length, 1);
 });
 
 const execute = async (tool, args, signal = new AbortController().signal) => JSON.parse(await tool.execute(args, { signal }));
@@ -292,7 +293,7 @@ test('cancellation while a native mention request is in flight preserves its act
 });
 
 const workerMocks = {
-  './wechat/protocol/backend.ts': `export class ProtocolBackend {
+  './protocol/backend.ts': `export class ProtocolBackend {
     constructor() { this.session = { value: { wxid: '${owner}', uin: 123 } }; this.reads = 0; }
     status() { return { online: true, diagnostics: { account: { id: this.session.value.wxid }, received: this.reads } }; }
     subscribe() {}
@@ -302,9 +303,9 @@ const workerMocks = {
       return [{ id: 'alice', groupId: params.groupId, nickname: '阿禾', card: '群中阿禾', remark: 'Alice' }, { id: 'foreign', groupId: 'foreign@chatroom', nickname: '其他群成员' }]; }
     async close() {}
   }`,
-  './wechat/protocol/login.ts': `export class QrLoginManager { status() { return { state: 'idle' }; } async close() {} }`,
-  './wechat/paths.ts': `export const protectStorage = () => {}; export const projectPaths = root => ({ private: root, cache: root });`,
-  './wechat/protocol/media-loader.mjs': `export const loadObservedMedia = () => { throw new Error('No media in member fixture'); };`,
+  './protocol/login.ts': `export class QrLoginManager { status() { return { state: 'idle' }; } async close() {} }`,
+  './paths.ts': `export const protectStorage = () => {}; export const projectPaths = root => ({ private: root, cache: root });`,
+  './protocol/media-loader.mjs': `export const loadObservedMedia = () => { throw new Error('No media in member fixture'); };`,
 };
 const workerBundle = await rolldown({ input: path.join(root, 'src/worker.mjs'), platform: 'node', plugins: [{ name: 'offline-member-worker', resolveId: source => Object.hasOwn(workerMocks, source) ? '\0member-worker:' + source : null, load: id => id.startsWith('\0member-worker:') ? workerMocks[id.slice('\0member-worker:'.length)] : null }] });
 let workerCode;

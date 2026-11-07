@@ -1,6 +1,6 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-import { WechatPanel } from '../../src/client.jsx';
+import { WechatPanel } from '../../src/client/panel.jsx';
 
 const headers = { 'content-type': 'application/json', 'x-fixture-key': window.__UI_FIXTURE_KEY__ };
 const connection = { rpc: { async call(_channel, endpoint, payload, signal) {

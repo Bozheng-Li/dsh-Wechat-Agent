@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { MediaLibrary, inspectAssetImage } from '../src/media-library.mjs';
+import { MediaLibrary } from '../src/features/media/library.mjs';
+import { inspectAssetImage } from '../src/features/media/image-format.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'), temporary = path.join(repo, 'storage/tmp');
 const embedded = path.join(repo, 'storage/cache/dsh-plugin-python-3.13.9-v1/python.exe');

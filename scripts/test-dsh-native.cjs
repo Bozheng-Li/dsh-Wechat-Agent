@@ -25,25 +25,27 @@ const hostRequire = createRequire(path.join(installation, 'resources/app.asar/ds
 const { Context } = hostRequire('@deepseek-ai/cordis');
 const { LlmAdapter } = hostRequire('@deepseek-ai/dsh-llm');
 const { buildModelCatalog } = hostRequire('@deepseek-ai/dsh-api-session-controller');
-const { DshAgentRunner, WechatChannel, StateStore, TaskScheduler, AgentIdentity, conversationMemoryTool, conversationTaskTool, webSearchTool, ChannelError, selectModel } = require(path.join(repo, 'lib/testing.js'));
+const { DshAgentRunner, WechatChannel, StateStore, TaskScheduler, AgentIdentity, conversationMemoryTool, imageMemoryTool, conversationImageTool, completedText, conversationTaskTool, webSearchTool, ChannelError, selectModel, emptyNaturalSettings, REPLY_STYLE_REVIEW_NOTE } = require(path.join(repo, 'lib/testing.js'));
 const root = fs.mkdtempSync(path.join(repo, 'storage/tmp/dsh-native-'));
 process.env.DSH_HOME = path.join(root, 'home');
 process.env.DSH_AGENTS_HOME = path.join(root, 'agents');
 const ctx = new Context();
 const requests = [];
+const longCompleteReply = '收到你的问题。\n' + '双曲线：x²/a² − y²/b² = 1。抛物线：y² = 2px。\n'.repeat(500) + '完整结尾。';
 let mode = 'complete';
 class FixtureAdapter extends LlmAdapter {
   async listModels(provider) {
     return ['fixture', 'alternate'].map(id => ({ provider, id, name: `测试模型 ${id}` }));
   }
   async resolveModel(provider, id) {
-    return { provider, id, name: `测试模型 ${id}`, inputModalities: ['text', 'image'], reasoning: {
+    return { provider, id, name: `测试模型 ${id}`, inputModalities: ['text', 'image'], defaultMaxTokens: id === 'alternate' ? 131072 : 256000, reasoning: {
       efforts: [{ id: 'high', name: '高' }, { id: 'low', name: '低' }], defaultEffort: id === 'alternate' ? 'low' : 'high'
     } };
   }
   async *stream(options) {
     requests.push(options);
-    const expectedTools = mode === 'task-tool' || mode === 'task-denied' ? ['wechat_task'] : mode === 'search-tool' ? ['wechat_web_search'] : mode === 'memory-tool' ? ['wechat_memory'] : [];
+    const incomingImages = options.messages.flatMap(message => message.content || []).filter(block => block.type === 'image');
+    const expectedTools = mode === 'image-request-tool' && !incomingImages.length ? ['wechat_read_image'] : mode === 'image-memory-tool' && !incomingImages.length ? ['wechat_image_memory'] : mode === 'task-tool' || mode === 'task-denied' ? ['wechat_task'] : mode === 'search-tool' ? ['wechat_web_search'] : mode === 'memory-tool' ? ['wechat_memory'] : mode === 'knowledge-tool' ? ['wechat_knowledge'] : [];
     assert.deepEqual((options.tools || []).map(tool => tool.name), expectedTools, 'only current-conversation tools are available; host tools never leak');
     const systems = options.messages.filter(m => m.role === 'system').flatMap(m => m.content).map(b => b.text || '').join('\n');
     assert(systems.includes('微信')); assert(!systems.includes('HOST_SECRET_PERSONA'));
@@ -51,14 +53,52 @@ class FixtureAdapter extends LlmAdapter {
       await new Promise((resolve, reject) => { options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }); });
       return;
     }
-    if (['task-tool', 'task-denied', 'search-tool', 'memory-tool'].includes(mode) && !options.messages.some(message => message.role === 'tool')) {
-      const name = mode === 'search-tool' ? 'wechat_web_search' : mode === 'memory-tool' ? 'wechat_memory' : 'wechat_task';
-      const args = name === 'wechat_task' ? { action: 'create', kind: 'message', content: '该喝水啦。', delaySeconds: 300 } : name === 'wechat_memory' ? { section: 'conversation', query: '隔离链路' } : { query: '上海天气' };
+    if (mode === 'image-memory-tool' || mode === 'image-request-tool') {
+      if (incomingImages.length) {
+        assert.equal(incomingImages.length, 1); assert.equal(incomingImages[0].attachment.width, 2400); assert.equal(incomingImages[0].attachment.height, 1600);
+        assert.equal(options.tools?.length || 0, 0, 'saved-image vision cannot inherit tools');
+        const text = '重新读取原图：画面是合成的黑白网格。';
+        yield { type: 'block-start', index: 0, blockType: 'text' }; yield { type: 'text-delta', index: 0, text };
+        yield { type: 'block-end', index: 0, block: { type: 'text', text } }; yield { type: 'finish', reason: { kind: 'stop' } }; return;
+      }
+      const results = options.messages.filter(message => message.role === 'tool').flatMap(message => message.content || []).filter(block => block.type === 'text').map(block => {
+        try { return JSON.parse(block.text); } catch { return null; }
+      }).filter(Boolean);
+      if (!results.some(result => result.observation)) {
+        if (mode === 'image-request-tool') {
+          const candidates = JSON.parse(options.tools[0].description.split('图片列表：')[1]); assert.equal(candidates.length, 1);
+          const id = 'native-current-image', name = 'wechat_read_image', argumentsText = JSON.stringify({ imageId: candidates[0].imageId, question: '核对画面细节' });
+          yield { type: 'block-start', index: 0, blockType: 'tool-call' }; yield { type: 'tool-call-delta', index: 0, id, name, argumentsDelta: argumentsText };
+          yield { type: 'block-end', index: 0, block: { type: 'tool-call', id, name, arguments: argumentsText } }; yield { type: 'finish', reason: { kind: 'tool-calls' } }; return;
+        }
+        const search = results.find(result => result.images?.length);
+        const args = search ? { action: 'read', imageId: search.images[0].imageId, question: '核对画面细节' } : { action: 'search', query: '网格' };
+        const id = search ? 'native-image-read' : 'native-image-search', name = 'wechat_image_memory', argumentsText = JSON.stringify(args);
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' }; yield { type: 'tool-call-delta', index: 0, id, name, argumentsDelta: argumentsText };
+        yield { type: 'block-end', index: 0, block: { type: 'tool-call', id, name, arguments: argumentsText } };
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }; return;
+      }
+      assert(results.some(result => result.ok && typeof result.observation === 'string' && result.observation.includes('黑白网格')));
+    }
+    if (['task-tool', 'task-denied', 'search-tool', 'memory-tool', 'knowledge-tool'].includes(mode) && !options.messages.some(message => message.role === 'tool')) {
+      const name = mode === 'search-tool' ? 'wechat_web_search' : mode === 'memory-tool' ? 'wechat_memory' : mode === 'knowledge-tool' ? 'wechat_knowledge' : 'wechat_task';
+      const args = name === 'wechat_task' ? { action: 'create', kind: 'message', content: '该喝水啦。', delaySeconds: 300 } : name === 'wechat_memory' ? { section: 'conversation', query: '隔离链路' } : { query: name === 'wechat_knowledge' ? '退款期限' : '上海天气' };
       const block = { type: 'tool-call', id: 'native-fixture-tool-call', name, arguments: JSON.stringify(args) };
       yield { type: 'block-start', index: 0, blockType: 'tool-call' };
       yield { type: 'tool-call-delta', index: 0, id: block.id, name, argumentsDelta: block.arguments };
       yield { type: 'block-end', index: 0, block };
       yield { type: 'finish', reason: { kind: 'tool-calls' } }; return;
+    }
+    if (mode === 'natural-reply' || mode === 'natural-skip') {
+      assert(systems.includes('自然陪聊判断')); assert(systems.includes('只输出一个 JSON 对象'));
+      const text = '<think>PRIVATE_NATURAL_REASONING</think>' + JSON.stringify(mode === 'natural-reply' ? { action: 'reply', text: '湖边风大，记得把帐篷固定好。' } : { action: 'skip', reason: 'repeated', text: '' });
+      yield { type: 'block-start', index: 0, blockType: 'text' }; yield { type: 'text-delta', index: 0, text };
+      yield { type: 'block-end', index: 0, block: { type: 'text', text } }; yield { type: 'finish', reason: { kind: 'stop' } }; return;
+    }
+    if (mode === 'style-warning' || mode === 'long-style-warning') {
+      const text = mode === 'long-style-warning' ? longCompleteReply : '收到你的问题。双曲线：x²/a² − y²/b² = 1。抛物线：y² = 2px。';
+      yield { type: 'block-start', index: 0, blockType: 'text' }; yield { type: 'text-delta', index: 0, text };
+      yield { type: 'block-end', index: 0, block: { type: 'text', text } }; yield { type: 'finish', reason: { kind: 'stop' } }; return;
     }
     if (mode === 'vision') {
       const images = options.messages.flatMap(message => message.content || []).filter(block => block.type === 'image');
@@ -200,7 +240,7 @@ async function verifyPluginLifecycle(hostContext) {
   assert.equal(requests[0].temperature, 0.25); assert.equal(requests[0].maxTokens, 1536);
   const firstSystem = requests[0].messages.filter(m => m.role === 'system').flatMap(m => m.content).map(b => b.text || '').join('\n');
   assert(firstSystem.includes('NATIVE_GLOBAL_FIRST'));
-  for (const value of ['小胖', '胖胖', '测试音乐助手背景', '温和且有分寸', '短句接话', '回答简洁', '群聊中的 AI 参与者']) assert(firstSystem.includes(value), value);
+  for (const value of ['小胖', '胖胖', '测试音乐助手背景', '温和且有分寸', '短句接话', '回答简洁', '本轮主动接群内当前话题']) assert(firstSystem.includes(value), value);
   const persisted = await ctx.sessionPersistence.open(first.sessionId, 'read');
   try {
     assert.equal(persisted.header.cwd, workspace);
@@ -222,7 +262,7 @@ async function verifyPluginLifecycle(hostContext) {
   assert.equal(requests[1].maxTokens, 768);
   const secondSystem = requests[1].messages.filter(m => m.role === 'system').flatMap(m => m.content).map(b => b.text || '').join('\n');
   assert(secondSystem.includes('NATIVE_GLOBAL_SECOND')); assert(!secondSystem.includes('NATIVE_GLOBAL_FIRST'));
-  assert(secondSystem.includes('你的名字是“会话阿圆”')); assert(secondSystem.includes('NATIVE_ROOM_PERSONA'));
+  assert(secondSystem.includes('配置名字："会话阿圆"')); assert(secondSystem.includes('NATIVE_ROOM_PERSONA'));
   assert(!secondSystem.includes('测试音乐助手背景'));
   registration.replace(['wechat-test-fixture']);
   assert.equal((await buildModelCatalog(ctx)).groups.length, 1);
@@ -231,6 +271,25 @@ async function verifyPluginLifecycle(hostContext) {
   await selectModel(ctx, store, null);
   await runner.run({ text: '恢复跟随默认', group: true, sessionId: first.sessionId, signal: controller.signal });
   assert.equal(requests[2].provider, 'wechat-test-fixture'); assert.equal(requests[2].model, 'fixture'); assert.equal(requests[2].reasoningEffort, 'high');
+  runtime.modelConfig.maxTokens = null;
+  await runner.run({ text: '自动使用当前模型输出额度', sessionId: first.sessionId, signal: controller.signal });
+  assert.equal(requests.at(-1).maxTokens, 256000, 'automatic output must reach the native adapter with its model allowance');
+  await selectModel(ctx, store, { provider: 'wechat-test-fixture', model: 'alternate' });
+  await runner.run({ text: '切换模型后跟随新额度', sessionId: first.sessionId, signal: controller.signal });
+  assert.equal(requests.at(-1).maxTokens, 131072);
+  runtime.modelConfig.maxTokens = 65536;
+  await runner.run({ text: '手动设置大于旧上限的额度', sessionId: first.sessionId, signal: controller.signal });
+  assert.equal(requests.at(-1).maxTokens, 65536);
+  runtime.modelConfig.maxTokens = null;
+  await selectModel(ctx, store, null);
+  mode = 'style-warning'; const styleRequestCount = requests.length;
+  const reviewed = await runner.run({ text: '小胖你把双曲线和抛物线的都写出来', signal: controller.signal });
+  assert.equal(reviewed.text, '收到你的问题。双曲线：x²/a² − y²/b² = 1。抛物线：y² = 2px。');
+  assert.equal(reviewed.replyStyleWarning, REPLY_STYLE_REVIEW_NOTE); assert.equal(requests.length, styleRequestCount + 1);
+  mode = 'long-style-warning'; const longRequestCount = requests.length;
+  const longReviewed = await runner.run({ text: '请完整写出所需数学内容', signal: controller.signal });
+  assert(longReviewed.text.length > 12000); assert.equal(longReviewed.text, longCompleteReply);
+  assert.equal(longReviewed.replyStyleWarning, REPLY_STYLE_REVIEW_NOTE); assert.equal(requests.length, longRequestCount + 1);
   mode = 'truncate';
   await assert.rejects(runner.run({ text: '截断测试', group: false, signal: controller.signal,
     onSession: id => assert.equal(ctx.sessions.get(id).header.cwd, alternateWorkspace) }), error => error.code === 'MODEL_INCOMPLETE');
@@ -243,6 +302,7 @@ async function verifyPluginLifecycle(hostContext) {
   const sent = [];
   const transport = { status: () => ({ online: true, account: { id: 'fake-owner' } }), send: async params => { sent.push(params); return { delivery: 'server-ack', serverMessageIds: [`mock-ack-${sent.length}`] }; } };
   const channel = new WechatChannel({ store, runner, transport });
+  mode = 'channel';
   const incoming = n => ({ id: `mock-${n}`, serverMessageId: String(n), direction: 'incoming', chatType: 'private', peerId: 'fake-friend', sender: { id: 'fake-friend' }, time: Math.floor(Date.now() / 1000), message: [{ type: 'text', data: { text: `隔离链路 ${n}` } }] });
   channel.receive(incoming(1), 'fake-owner'); channel.receive(incoming(2), 'fake-owner'); await channel.whenIdle();
   assert.equal(sent.length, 2); assert(store.data.records.every(r => r.state === 'sent'));
@@ -271,6 +331,40 @@ async function verifyPluginLifecycle(hostContext) {
   const memoryResults = requests.at(-1).messages.filter(message => message.role === 'tool').map(message => JSON.stringify(message)).join('\n');
   assert(memoryResults.includes('隔离链路 1')); assert(memoryResults.includes('隔离链路 2'));
   assert(!memoryResults.includes('NATIVE_LATER_ONLY'), 'native tool results cannot acquire later room context');
+  mode = 'knowledge-tool';
+  const knowledge = channel.workbench.knowledge;
+  const library = knowledge.configure('fake-owner', { title: '原生接入资料', description: '', scopes: [store.conversations('fake-owner')[0].key], enabled: true, revision: knowledge.list('fake-owner').revision }).libraries[0];
+  const bytes = Buffer.from('退款期限为七天。NATIVE_KNOWLEDGE_SOURCE。'), upload = knowledge.begin('fake-owner', { libraryId: library.id, name: '产品资料.md', size: bytes.length });
+  knowledge.append('fake-owner', { uploadId: upload.uploadId, offset: 0, data: bytes.toString('base64') });
+  await knowledge.finish('fake-owner', upload.uploadId, controller.signal);
+  knowledge.configureSettings('fake-owner', { enabled: true, revision: knowledge.list('fake-owner').revision });
+  await runner.run({ text: '/kb 退款期限', signal: controller.signal, tools: [knowledge.tool(scope, () => {}, '/kb 退款期限')] });
+  const knowledgeResults = requests.at(-1).messages.filter(message => message.role === 'tool').map(message => JSON.stringify(message)).join('\n');
+  assert(knowledgeResults.includes('NATIVE_KNOWLEDGE_SOURCE')); assert(knowledgeResults.includes('产品资料.md'));
+  mode = 'knowledge-answer';
+  const knowledgeChannel = new WechatChannel({ store, runner, transport });
+  runtime.modelConfig.webSearch = true;
+  const beforeKnowledge = requests.length;
+  const answer = await knowledgeChannel.workbench.answerKnowledge({ accountId: 'fake-owner', query: '退款期限', scope }, controller.signal);
+  assert.equal(requests.length, beforeKnowledge + 1, 'explicit retrieval adds exactly one native model request');
+  assert.equal(answer.usage.modelCalls, 1); assert.equal(answer.usage.queries, 1);
+  assert(requests.at(-1).messages.some(message => message.role === 'user' && JSON.stringify(message.content).includes('NATIVE_KNOWLEDGE_SOURCE')));
+  assert.equal(requests.at(-1).tools?.length || 0, 0, 'knowledge answers cannot call web, knowledge, or host tools');
+  const miss = await knowledgeChannel.workbench.answerKnowledge({ accountId: 'fake-owner', query: 'missinglookupzxq', scope }, controller.signal);
+  assert.equal(miss.usage.modelCalls, 0); assert.equal(requests.length, beforeKnowledge + 1);
+  const beforePublicKnowledge = requests.length;
+  await knowledgeChannel.workbench.answerKnowledge({ accountId: 'fake-owner', query: '退款期限', scope }, controller.signal, () => {}, {
+    group: false, persona: { name: '知识阿圆', aliases: [], prompt: 'NATIVE_KNOWLEDGE_PERSONA：温和的短句回答。' },
+    prompt: 'NATIVE_KNOWLEDGE_ACCOUNT：保持账号约定。', speaker: { id: 'native-speaker', name: '原生测试访客' }, account: { id: 'fake-owner' }
+  });
+  assert.equal(requests.length, beforePublicKnowledge + 1, 'public knowledge replies have no second rewrite pass');
+  const knowledgeSystem = requests.at(-1).messages.filter(message => message.role === 'system').flatMap(message => message.content).map(block => block.text || '').join('\n');
+  for (const required of ['NATIVE_KNOWLEDGE_PERSONA', 'NATIVE_KNOWLEDGE_ACCOUNT', 'NATIVE_GLOBAL_SECOND']) assert(knowledgeSystem.includes(required), required);
+  assert(!knowledgeSystem.includes('原生测试访客'), 'incoming display names are data, never system instructions');
+  assert(requests.at(-1).messages.some(message => message.role === 'user' && JSON.stringify(message.content).includes('原生测试访客')));
+  assert.equal(requests.at(-1).tools?.length || 0, 0);
+  runtime.modelConfig.webSearch = false;
+  await knowledgeChannel.close(); knowledgeChannel.library.close();
   mode = 'vision';
   const sharp = createRequire(hostRequire.resolve('@deepseek-ai/dsh-attachment-local'))('sharp');
   const pixels = Buffer.alloc(2400 * 1600 * 3);
@@ -279,13 +373,62 @@ async function verifyPluginLifecycle(hostContext) {
   const original = { mediaType: 'image/png', data: highResolution.toString('base64'), quality: 'original' };
   const png = { mediaType: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGP4z8DAAMIM/4EAAB/uBfsL2WiLAAAAAElFTkSuQmCC', quality: 'thumbnail' };
   assert.deepEqual(await runner.describeImages([original, png], controller.signal), ['第一张是合成测试图片。', '第二张是合成测试表情包。']);
+  channel.imageMemory.thumbnailMaker = data => sharp(data).resize({ width: 384, height: 384, fit: 'inside' }).png().toBuffer();
+  const savedSource = { key: 'native-saved-image', messageId: 'native-saved-image', direction: 'incoming', time: Date.now(), senderId: 'fake-friend', senderName: '测试朋友', text: '[合成图片]',
+    attachments: [{ type: 'image', resourceId: 'native-grid', description: '合成黑白网格图片。' }] };
+  const saved = await channel.imageMemory.capture(scope, savedSource, savedSource.attachments[0], original, controller.signal);
+  assert(saved.hasThumbnail); assert.equal(channel.imageMemory.content(scope, saved.id).data, original.data);
+  mode = 'image-memory-tool'; const imageRequestsBefore = requests.length;
+  await runner.run({ text: '查看之前保存的网格图片', signal: controller.signal, tools: [imageMemoryTool(channel.imageMemory, runner, scope, () => {})] });
+  const imageRequests = requests.slice(imageRequestsBefore);
+  assert(imageRequests.some(request => request.messages.some(message => message.content?.some(block => block.type === 'image'))));
+  assert(requests.at(-1).messages.filter(message => message.role === 'tool').some(message => JSON.stringify(message).includes('重新读取原图')));
+  channel.memory.append(scope, savedSource);
+  const requestTransport = { media: async input => { assert.equal(input.resourceId, 'native-grid'); return original; } };
+  const beforeArchiveOnly = requests.length;
+  await channel.memory.enrich(scope, runner, requestTransport, controller.signal); assert.equal(requests.length, beforeArchiveOnly);
+  mode = 'image-request-tool'; const currentBefore = requests.length;
+  await runner.run({ text: '看当前图片中的网格', signal: controller.signal, tools: [conversationImageTool(channel.memory, runner, requestTransport, scope, () => {}, { snapshot: channel.memory.load(scope), currentKey: savedSource.key })] });
+  assert.equal(requests.length - currentBefore, 3, 'chat selects one photo, isolated vision reads it, then chat finishes');
+  assert.equal(requests.slice(currentBefore).filter(request => request.messages.some(message => message.content?.some(block => block.type === 'image'))).length, 1);
+  assert(channel.memory.view(scope).text.includes('重新读取原图'));
+  assert.throws(() => completedText([{ type: 'turn/end', data: { reason: { kind: 'error', error: { code: 'ACCOUNT_QUOTA', message: 'private provider detail' } } } }]), error => error.message.includes('余额或额度不足') && !error.message.includes('private provider'));
   mode = 'complete'; await scheduler.close();
+  const naturalStore = new StateStore(path.join(root, 'natural-chat')), naturalRoom = 'native-natural@chatroom';
+  naturalStore.configure('fake-owner', { enabled: true, privatePeers: [], groups: [naturalRoom], prompt: '' });
+  naturalStore.setConversationSettings('fake-owner', 'group', naturalRoom, { mode: 'natural', intervalMode: 'fixed', fixedMessages: 100, minMessages: 100, maxMessages: 100, recordsPath: '',
+    natural: { ...emptyNaturalSettings(), activeHours: false, intervalMode: 'fixed', fixedMinutes: 1, minGapMinutes: 1, followupSeconds: 0 } });
+  let naturalNow = Date.now(); const naturalSent = [], nativeNaturalBefore = requests.length;
+  const naturalTransport = { status: () => ({ online: true, account: { id: 'fake-owner' } }), send: async params => { naturalSent.push(params); return { delivery: 'server-ack', serverMessageIds: ['native-natural-ack'] }; } };
+  const naturalChannel = new WechatChannel({ store: naturalStore, runner, transport: naturalTransport, now: () => naturalNow, random: () => 0 });
+  const searchBeforeNatural = runtime.modelConfig.webSearch; runtime.modelConfig.webSearch = true;
+  try {
+    naturalChannel.natural.tick(); mode = 'natural-reply'; naturalNow += 60000; naturalChannel.natural.tick(); await naturalChannel.whenIdle();
+    assert.equal(requests.length, nativeNaturalBefore + 1, 'native natural decision and reply use one model request');
+    assert.deepEqual(naturalSent[0].message, [{ type: 'text', data: { text: '湖边风大，记得把帐篷固定好。' } }]);
+    assert.equal(naturalStore.naturalState('fake-owner', 'group', naturalRoom).unanswered, 1);
+    mode = 'natural-skip'; naturalNow += 120000; naturalChannel.natural.tick(); await naturalChannel.whenIdle();
+    assert.equal(requests.length, nativeNaturalBefore + 2); assert.equal(naturalSent.length, 1);
+    assert.equal(naturalStore.data.records.at(-1).state, 'skipped'); assert.equal(naturalStore.data.records.at(-1).naturalReason, 'repeated');
+    assert.equal(naturalStore.naturalState('fake-owner', 'group', naturalRoom).unanswered, 1);
+  } finally {
+    if (searchBeforeNatural === undefined) delete runtime.modelConfig.webSearch; else runtime.modelConfig.webSearch = searchBeforeNatural;
+    mode = 'complete'; await naturalChannel.close();
+  }
   await verifyPluginLifecycle(ctx);
   const report = { ok: true, dsh: hostRequire('./package.json').version, node: process.versions.node,
     assertions: ['shared native model catalog', 'model choice persistence', 'real provider/model routing on resume', 'chosen model reasoning defaults', 'removed provider refuses fallback', 'return to DSH default', 'real temperature and maxTokens request controls', 'null temperature preserves Host default', 'persona and participation instructions in model prompt', 'workspace stored on create and retained on resume', 'configured Host session root observed through injection', 'Host session root stays independent of workspace', 'real agent create', 'persistent resume', 'complete prompt isolation', 'no inherited tools', 'final reasoning filtering', 'max-token refusal', 'cancellation', 'queued channel-to-agent-to-ACK', 'reload deduplication', 'real plugin apply and WorkerClient shutdown preserve participation progress', 'initial offline snapshots preserve progress but live disconnect resets it'], requests: requests.length, at: new Date().toISOString() };
   report.assertions.push('native scoped tool registration and actual task creation', 'quoted task requests denied inside the native tool boundary', 'native search tool calls only the bounded public query', 'actual DSH image admission and two ordered multimodal blocks');
   report.assertions.push('durable global identity reloaded in the native prompt', 'conversation persona replaces only the default persona', 'native scoped memory tool preserves the receive-time boundary');
   report.assertions.push('native DSH preserves a 2400x1600 original within its admission budget', 'per-image thumbnail limits reach the native vision prompt');
+  report.assertions.push('native scoped knowledge tool retrieves imported source text and citations');
+  report.assertions.push('explicit knowledge answers use one native model request with every tool disabled', 'unmatched knowledge queries make no native model request');
+  report.assertions.push('public knowledge replies preserve persona, global identity, account instructions and speaker with one model call and zero tools');
+  report.assertions.push('independent image memory keeps original bytes and generates a bounded thumbnail', 'native saved-image search and read supply the stored 2400x1600 original to isolated vision and return its observation');
+  report.assertions.push('native natural-chat timer runs through the shared channel and real ACK boundary', 'natural decision and public reply use one native model request', 'natural skip produces no WeChat message or signature', 'natural chat inherits no search, task, knowledge or host tools even with search enabled');
+  report.assertions.push('native boilerplate reply keeps all formulas and returns a local review note with one model request');
+  report.assertions.push('native complete replies beyond 12000 characters preserve all content and the ending with one model request');
+  report.assertions.push('receipt-time archiving makes zero native provider requests', 'current-photo tool routes exactly one isolated native vision request and saves its observation', 'native account-quota error identifies insufficient model balance without leaking diagnostics');
   fs.writeFileSync(path.join(repo, 'storage/logs/dsh-plugin-native-test.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
   for (const fork of forks.reverse()) await fork.dispose();

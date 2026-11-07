@@ -4,7 +4,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateRawSync, deflateSync } from 'node:zlib';
-import { MediaLibrary, MEDIA_LIBRARY_LIMITS, readAssetZip } from '../src/media-library.mjs';
+import { MediaLibrary } from '../src/features/media/library.mjs';
+import { MEDIA_LIBRARY_LIMITS } from '../src/features/media/limits.mjs';
+import { readAssetZip } from '../src/features/media/zip.mjs';
 
 const workspace = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../storage/tmp');
 const crc32 = data => { let value = 0xffffffff; for (const byte of data) { value ^= byte; for (let bit = 0; bit < 8; bit++) value = (value >>> 1) ^ (value & 1 ? 0xedb88320 : 0); } return (value ^ 0xffffffff) >>> 0; };
@@ -127,7 +129,7 @@ test('failed index commit publishes no new images and does not replace existing 
 });
 
 test('batch understanding persists errors and retries while preserving concurrent manual edits and deletions', async t => {
-  const f = fixture(t), first = f.import().assetIds[0], second = f.import(gif, '表情.gif').assetIds[0];
+  const f = fixture(t), first = f.import(png(), '测试图片.png', 'image').assetIds[0], second = f.import(gif, '测试动图.gif', 'image').assetIds[0];
   const reached = Promise.withResolvers(), gate = Promise.withResolvers();
   const pending = f.library.describe(f.owner, [first, second], { describeImages: async images => { assert.equal(images.length, 2); reached.resolve(); await gate.promise; return ['模型写的第一张', '模型写的第二张']; } }, new AbortController().signal);
   await reached.promise; assert(f.library.list(f.owner).progress.running);
@@ -141,15 +143,25 @@ test('batch understanding persists errors and retries while preserving concurren
   assert(new MediaLibrary(f.store).search(f.owner, '赞同').length === 1);
 });
 
+test('explicit mixed asset analysis skips stickers before decoding or calling the model and reports them honestly', async t => {
+  const f = fixture(t), sticker = f.import().assetIds[0], photo = f.import(png([0, 0, 255]), '普通图片.png', 'image').assetIds[0];
+  let calls = 0;
+  const result = await f.library.describe(f.owner, [sticker, photo], { describeImages: async images => { calls++; assert.equal(images.length, 1); return ['蓝色方块。']; } }, new AbortController().signal);
+  assert.equal(calls, 1); assert.equal(result.skippedStickers, 1); assert.equal(result.succeeded, 1); assert.equal(result.completed, 2);
+  assert.equal(f.library.resolveAsset(f.owner, sticker).description, '');
+  const skipped = await f.library.describe(f.owner, [sticker], {}, new AbortController().signal);
+  assert.equal(skipped.skippedStickers, 1); assert.equal(skipped.failed, 0); assert.equal(calls, 1);
+});
+
 test('cancelled model analysis does not overwrite assets or claim unfinished work succeeded', async t => {
-  const f = fixture(t), id = f.import().assetIds[0], controller = new AbortController(), reached = Promise.withResolvers(), gate = Promise.withResolvers();
+  const f = fixture(t), id = f.import(png(), '测试图片.png', 'image').assetIds[0], controller = new AbortController(), reached = Promise.withResolvers(), gate = Promise.withResolvers();
   const pending = f.library.describe(f.owner, [id], { describeImages: async () => { reached.resolve(); await gate.promise; return ['不应保存的迟到结果']; } }, controller.signal);
   await reached.promise; controller.abort(); gate.resolve(); await assert.rejects(pending);
   const after = f.library.list(f.owner); assert.equal(after.items[0].description, ''); assert.equal(after.progress.running, false); assert.equal(after.progress.succeeded, 0);
 });
 
 test('analysis progress counts only captions actually committed to storage', async t => {
-  const f = fixture(t), id = f.import().assetIds[0], saved = f.library.indexFile + '.previous';
+  const f = fixture(t), id = f.import(png(), '测试图片.png', 'image').assetIds[0], saved = f.library.indexFile + '.previous';
   fs.renameSync(f.library.indexFile, saved); fs.mkdirSync(f.library.indexFile);
   await assert.rejects(f.library.describe(f.owner, [id], { describeImages: async () => ['没有保存成功的说明'] }, new AbortController().signal), { code: 'STATE_WRITE_FAILED' });
   const result = f.library.list(f.owner); assert.equal(result.items[0].description, ''); assert.equal(result.progress.succeeded, 0); assert.equal(result.progress.completed, 0);

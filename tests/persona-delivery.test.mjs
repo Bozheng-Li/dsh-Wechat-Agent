@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { deflateSync } from 'node:zlib';
-import { StateStore, WechatChannel, DshAgentRunner, NATURAL_REPLY_RULES } from '../lib/testing.js';
+import { StateStore, WechatChannel, DshAgentRunner, NATURAL_REPLY_RULES, REPLY_STYLE_REVIEW_NOTE, ChannelError } from '../lib/testing.js';
 
 const accountId = 'persona-delivery-owner', peerId = 'persona-delivery@chatroom';
 const temporary = path.resolve(import.meta.dirname, '../storage/tmp');
@@ -16,7 +16,7 @@ function png() {
   return Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', header), chunk('IDAT', deflateSync(Buffer.from([0, 128, 128, 128]))), chunk('IEND', Buffer.alloc(0))]);
 }
 
-function fixture(t, answers, { caption = '此刻歇一歇，也无妨。', afterSelect, legacy = false } = {}) {
+function fixture(t, answers, { caption = '此刻歇一歇，也无妨。', afterSelect, legacy = false, selectMedia = true, sendFailure } = {}) {
   fs.mkdirSync(temporary, { recursive: true });
   const root = fs.mkdtempSync(path.join(temporary, 'persona-delivery-'));
   const store = new StateStore(root);
@@ -30,7 +30,7 @@ function fixture(t, answers, { caption = '此刻歇一歇，也无妨。', after
   const create = async options => {
     const number = scopes.length;
     const answer = answers[number];
-    assert.equal(typeof answer, 'string', 'do not request a rewrite for text that will not be delivered');
+    assert.equal(typeof answer, 'string', 'style review must not request a second model response');
     const scope = { definitions: [], hooks: [],
       tools: { restrict() {}, guard() {}, register: tool => scope.definitions.push(tool) },
       systemPrompt: { suppressRuntimeContext() {}, section: section => { scope.prompt = section.text; } },
@@ -47,7 +47,7 @@ function fixture(t, answers, { caption = '此刻歇一歇，也无妨。', after
       followup: message => {
         messages.push(message);
         pending = (async () => {
-          if (number !== 0) return;
+          if (number !== 0 || !selectMedia) return;
           const tool = scope.definitions.find(value => value.name === 'wechat_reply_media'); assert(tool);
           const result = JSON.parse(await tool.execute({ action: 'select', assetId: asset.id, caption }, { signal: options.signal }));
           assert(result.ok && !result.sent);
@@ -73,15 +73,15 @@ function fixture(t, answers, { caption = '此刻歇一歇，也无妨。', after
   };
   const transport = {
     status: () => ({ online: true, account: { id: accountId, nickname: '隔离测试账号' } }),
-    send: async input => { sent.push(input); return { delivery: 'server-ack', serverMessageIds: ['persona-delivery-ack'] }; },
+    send: async input => { sent.push(input); if (sendFailure) throw sendFailure; return { delivery: 'server-ack', serverMessageIds: ['persona-delivery-ack'] }; },
   };
   channel = new WechatChannel({ store, runner, transport, random: () => 0 });
   channel.library.import(accountId, { name: '示例.png', kind: 'sticker', data: png().toString('base64') });
   asset = channel.library.list(accountId).items[0];
-  const receive = async () => {
+  const receive = async (question = '发个表情包，配一句话。') => {
     channel.receive({ id: 'persona-delivery-message', serverMessageId: 'persona-delivery-message', direction: 'incoming',
       time: Math.floor(Date.now() / 1000), chatType: 'group', peerId, sender: { id: 'member', nickname: '阿禾' },
-      message: [{ type: 'text', data: { text: '/agent 发个表情包，配一句话。' } }] }, accountId);
+      message: [{ type: 'text', data: { text: '/agent ' + question } }] }, accountId);
     await channel.whenIdle();
   };
   t.after(async () => {
@@ -103,25 +103,50 @@ test('a valid selected caption is delivered without rewriting the unused assista
   assert.deepEqual(f.sent[0].message.map(value => value.type), ['text', 'face']);
   assert.equal(f.sent[0].message[0].data.text, caption);
   assert.equal(f.record().reply, caption);
+  assert.equal(f.record().replyStyleWarning, undefined, 'unused assistant boilerplate must not flag a clean caption');
 });
 
-test('caption polishing uses the original persona, identity, account requirements and model controls exactly once', async t => {
-  const caption = '收到你的问题，此刻歇一歇，也无妨。', polished = '且歇一歇，莫把自己催得太紧。';
-  const f = fixture(t, ['素材已选好。', polished], { caption, afterSelect: ({ runtime, choice }) => {
+test('a boilerplate caption is sent unchanged and marked for review with the captured generation settings', async t => {
+  const caption = '收到你的问题，此刻歇一歇，也无妨。';
+  const f = fixture(t, ['素材已选好。'], { caption, afterSelect: ({ runtime, choice }) => {
     runtime.identityMarkdown = '# GLOBAL_CHANGED'; runtime.modelConfig = { maxTokens: 768, temperature: 0.9 };
     runtime.persona.prompt = 'PERSONA_CHANGED'; choice.model = 'second';
   } });
   await f.receive();
   assert.equal(f.record().state, 'sent', f.record().reason);
-  assert.equal(f.messages.length, 2);
-  assert.equal(f.sent[0].message[0].data.text, polished);
+  assert.equal(f.messages.length, 1);
+  assert.equal(f.sent[0].message[0].data.text, caption);
+  assert.equal(f.record().replyStyleWarning, REPLY_STYLE_REVIEW_NOTE);
+  assert.deepEqual(f.record().acknowledgedMessageIds, ['persona-delivery-ack']);
   assert(f.requests.every(request => request.model === 'first' && request.maxTokens === 1536 && request.temperature === 0.2));
   for (const scope of f.scopes) {
     for (const value of ['PERSONA_CAPTURED', 'GLOBAL_CAPTURED', 'ACCOUNT_CAPTURED']) assert(scope.prompt.includes(value), value);
     for (const value of ['GLOBAL_CHANGED', 'PERSONA_CHANGED', 'DEFAULT_PERSONA_SHOULD_NOT_APPEAR']) assert(!scope.prompt.includes(value), value);
     assert.equal(scope.prompt.split(NATURAL_REPLY_RULES).length, 2);
   }
-  assert.equal(f.scopes[1].definitions.length, 0, 'a caption rewrite cannot select media or create tasks');
+  assert.equal(f.scopes.length, 1, 'a caption review cannot select media or create tasks again');
+});
+
+test('the reported conic-section reply sends once with real ACK and its review marker survives reload', async t => {
+  const answer = '收到你的问题。\n双曲线：x²/a² − y²/b² = 1。\n抛物线：y² = 2px。';
+  const f = fixture(t, [answer], { selectMedia: false });
+  await f.receive('小胖你把双曲线和抛物线的都写出来');
+  const record = f.record(); assert.equal(record.state, 'sent', record.reason);
+  assert.equal(f.sent.length, 1); assert.equal(f.messages.length, 1);
+  assert.deepEqual(f.sent[0].message, [{ type: 'text', data: { text: answer } }]);
+  assert.equal(record.reply, answer); assert.equal(record.replyStyleWarning, REPLY_STYLE_REVIEW_NOTE);
+  const restored = new StateStore(f.store.root).data.records.find(value => value.key === record.key);
+  assert.equal(restored.state, 'sent'); assert.equal(restored.replyStyleWarning, REPLY_STYLE_REVIEW_NOTE);
+  assert.deepEqual(restored.acknowledgedMessageIds, ['persona-delivery-ack']);
+});
+
+test('a review note never turns a genuine sending failure into success', async t => {
+  const f = fixture(t, ['收到你的问题，双曲线方程是 x²/a² − y²/b² = 1。'], { selectMedia: false,
+    sendFailure: new ChannelError('SEND_REJECTED', '微信拒绝了本次发送', { delivery: 'rejected' }) });
+  await f.receive('写出双曲线方程');
+  assert.equal(f.sent.length, 1); assert.equal(f.record().state, 'failed');
+  assert.equal(f.record().replyStyleWarning, REPLY_STYLE_REVIEW_NOTE);
+  assert.equal(f.record().acknowledgedMessageIds, undefined); assert.match(f.record().reason, /微信拒绝/);
 });
 
 test('image-only selection does not invent text or rewrite the unused assistant body', async t => {
@@ -148,6 +173,13 @@ test('legacy runners that do not select reply text still preserve tool captions'
   assert.equal(f.record().state, 'sent', f.record().reason);
   assert.equal(f.sent[0].message[0].data.text, '原样配文。');
   assert.deepEqual(f.sent[0].message.map(value => value.type), ['text', 'face']);
+});
+
+test('legacy caption review propagates its note and still sends the selected caption once', async t => {
+  const caption = '收到你的问题，原样配文。', f = fixture(t, [], { caption, legacy: true });
+  await f.receive(); assert.equal(f.record().state, 'sent', f.record().reason);
+  assert.equal(f.sent.length, 1); assert.equal(f.sent[0].message[0].data.text, caption);
+  assert.equal(f.record().replyStyleWarning, REPLY_STYLE_REVIEW_NOTE);
 });
 
 test('selecting delivery text does not bypass media availability checks after generation', async t => {
