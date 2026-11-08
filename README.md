@@ -19,28 +19,29 @@
 | 能力 | 你可以这样用 |
 | --- | --- |
 | **18 套完整人设** | 选择小胖、晚晴、北辰等角色，继续编辑；不同会话使用不同人设。 |
-| **共同的身份** | 用一份 `AGENT.md` 定义所有角色共有的身份与习惯，每轮对话重新读取。 |
-| **两层持久记忆** | 近期对话接住上下文，长期 Markdown 保存事实与约定；支持按需查询、纠正与清空。 |
+| **共同的身份** | 用一份 `AGENT.md` 定义共同的行为边界与明确约定，每个会话的人设决定性格与口吻。 |
+| **两层持久记忆** | 近期对话接住上下文，旧资料按相关性或需要查询；长期 Markdown 保存有来源的事实与约定。 |
 | **自然加入群聊** | 保留 @、`/agent`、昵称与数量设置，结合时间、话题和互动反馈择机参与，逐群控制。 |
 | **看图与表情回复** | 普通图片先保存，按当前问题选择查看；表情包跳过图像理解，可用内置或自备素材回复。 |
 | **把约定变成提醒** | 聊天中安排一次、每天或间隔任务，到期在授权会话发送消息，并真正 @ 群成员。 |
-| **查自己的知识库** | 导入 Markdown、TXT、PDF、DOCX，按明确请求查原文、带来源回答；默认关闭。 |
 | **查资料，带上来源** | 默认选择 Tavily，也可切换 DeepSeek 原生搜索；分别配置密钥，保留可核对的来源。 |
 
 ## 开始使用
 
-当前预览版为 **`0.2.0-preview.7`**，支持 **Windows x64 · DeepSeek Harness `0.2.1-rc.5`**。模型使用你在 DSH 中配置的服务。
+本页对应 **`0.2.0-preview.8`**，支持 **Windows x64 · DeepSeek Harness `0.2.1-rc.5`**。模型使用你在 DSH 中配置的服务。
+
+本版整合人设输入修复、显式推理强度选择、相关记忆筛选和新的工作台。知识库功能已移除，已有资料文件保留；模型仍可能补写事实或未完整遵守人设，具体限制及发布状态见[本版记录](docs/LOCAL-RELEASE-PREVIEW-8-2026-11-08.md)。
 
 在 DSH 插件管理页输入 `dsh-plugin-wechat-agent` 安装，或在 PowerShell 执行：
 
 ```powershell
-dsh plugin --profile desktop add dsh-plugin-wechat-agent@0.2.0-preview.7
+dsh plugin --profile desktop add dsh-plugin-wechat-agent@0.2.0-preview.8
 ```
 
 完整 npm 包包含微信认证组件、Python 与依赖，安装后即可打开侧栏 **微信 Agent**。
 
 1. **扫码连接** — 用手机微信扫码并确认。
-2. **选择角色** — 在设置中选择 DSH 模型与默认人设，也可逐会话自定义。
+2. **选择角色与模型** — 选择 DSH 模型及其支持的推理强度，设置默认人设，也可逐会话自定义。
 3. **授权会话** — 按微信名、备注或群名查找，选中会话，再开启自动回复。
 
 首次安装的自动回复和内置表情分组默认关闭，由你选择启用范围。
@@ -60,37 +61,39 @@ DSH `0.2.1-rc.5` 使用用户添加的自定义索引。索引提供版本目录
 
 ## 日常使用，在一个工作台里
 
-连接、会话授权、处理记录、记忆、任务和素材各有清晰的入口。冷白与石墨界面跟随 DSH 明暗主题，工作台将日常入口、连接控制与会话概况分开呈现。金属与玻璃双环的轻微动效可以暂停，也会跟随系统的“减少动态效果”设置。运行、等待、失败与微信已确认的结果分别显示，能看清当前发生了什么。
+连接、会话授权、处理记录、记忆、任务和素材各有清晰的入口。新版工作台以暖纸色与墨绿组织明暗主题，用对话便笺、留白和清晰的标题区分内容；首页可直接调整人设、查看记忆。动效可以暂停，也会跟随系统的“减少动态效果”设置。运行、等待、失败与微信已确认的结果分别显示，能看清当前发生了什么。
 
-<img src="https://raw.githubusercontent.com/Bozheng-Li/dsh-Wechat-Agent/main/docs/images/visual-refresh-overview-light.png" alt="冷白主题的微信 Agent 工作台：双环主视觉、独立连接面板与会话概况" width="100%" />
+<img src="https://raw.githubusercontent.com/Bozheng-Li/dsh-Wechat-Agent/main/docs/images/studio-overview-light.png" alt="暖纸色工作台：对话便笺、独立连接面板、人设入口与会话概况" width="100%" />
 
 ## 角色可以不同，记忆各有归属
 
 内置人设库支持分类、搜索与全文预览，载入后继续编辑，保存才生效。每个会话分别积累记忆；自动提取的事实保留原会话来源，跨会话共同约定可以由你写入全局备注。
 
-<img src="https://raw.githubusercontent.com/Bozheng-Li/dsh-Wechat-Agent/main/docs/images/visual-refresh-personas-dark.png" alt="深色主题中的 18 套内置人设分类与预览界面" width="100%" />
+<img src="https://raw.githubusercontent.com/Bozheng-Li/dsh-Wechat-Agent/main/docs/images/studio-persona-editor-light.png" alt="人设编辑工作区：完整正文、角色卡片与编写提示" width="100%" />
 
-记忆库集中管理会话上下文、全局备注、长期事实、图片记忆和维护。默认文字窗口为 100000 字符，可按群自定义；达到窗口自动整理，临时失败自动重试。切换标签保留未保存草稿，保存时锁定当前会话，避免改错对象；文件无法安全读取时显示原因并暂停编辑。
+记忆库集中管理会话上下文、全局备注、长期事实、图片记忆和维护。默认保存窗口为 100000 字符，可按群自定义；这不是每轮全部发送给模型的内容。普通接话优先使用近期对话，旧记忆按相关性筛选或按需查询，避免无关历史带偏话题。达到窗口后在后台整理，临时失败保留原文并自动重试。切换标签保留未保存草稿，保存时锁定当前会话；文件无法安全读取时显示原因并暂停编辑。
 
-<img src="https://raw.githubusercontent.com/Bozheng-Li/dsh-Wechat-Agent/main/docs/images/visual-refresh-memory-light.png" alt="长期记忆工作区：共同备注、来自各会话的事实与记忆概况" width="100%" />
+<img src="https://raw.githubusercontent.com/Bozheng-Li/dsh-Wechat-Agent/main/docs/images/studio-memory-light.png" alt="长期记忆工作区：共同备注、来源会话事实与记忆概况" width="100%" />
 
 ## 认真记下，也按时提醒
 
 “小胖，一分钟后提醒我吃饭。”保存成功后，约定进入当前任务列表。执行、取消与过期结果归入历史，每项一行，展开即可核对内容和真实回执。
 
-<img src="https://raw.githubusercontent.com/Bozheng-Li/dsh-Wechat-Agent/main/docs/images/visual-refresh-tasks-light.png" alt="紧凑的定时任务历史，可展开查看执行结果和回执" width="100%" />
+<img src="https://raw.githubusercontent.com/Bozheng-Li/dsh-Wechat-Agent/main/docs/images/studio-tasks-light.png" alt="定时任务历史，可展开查看执行结果和回执" width="100%" />
 
 ## 给聊天一点表情
 
 **猫咪心情 · 软萌动物 · 元气心情**，三组共 30 张 Microsoft Fluent Emoji 原图，随包提供来源和 MIT 许可证。可以整组启用、单张编辑，也能导入 ZIP 或自己的图片，调整使用概率与间隔。
 
-<img src="https://raw.githubusercontent.com/Bozheng-Li/dsh-Wechat-Agent/main/docs/images/visual-refresh-stickers-light.png" alt="三组内置 3D 表情：猫咪心情、软萌动物与元气心情" width="100%" />
+<img src="https://raw.githubusercontent.com/Bozheng-Li/dsh-Wechat-Agent/main/docs/images/studio-stickers-light.png" alt="素材库：猫咪心情、软萌动物与元气心情三组内置表情" width="100%" />
 
-以上应用截图使用隔离的合成账号与会话，展示本版构建的实际界面。
+以上应用截图来自本版界面的真实渲染，使用隔离的合成账号与会话；截图验证没有连接真实微信或调用付费模型。历史版本截图与验收记录仍保留在文档中。
 
 ## 消息与数据，都能核对
 
 回复取得微信服务端回执后才记为成功。部分确认或结果不明时保留已知回执，暂停相应任务；发送恢复位于“处理记录”，核对后可处理或整理记录。升级和重启保留授权、设置、记忆与历史。
+
+新版处理记录还显示本轮记忆模式、近期对话条数、预载旧记忆字数及关联线索。按需模式的“预载 0 字”只表示开始回复前没有灌入旧历史，不冒充已完成的记忆查询。
 
 数据默认保存在 `~/.dsh/wechat-agent`，也可指定一个全局工作目录，统一管理身份、会话、记忆、素材与任务。模型请求发往你配置的 DSH 模型服务，开启搜索后公开查询发往选中的 Tavily 或 DeepSeek 搜索服务。
 
@@ -106,7 +109,7 @@ DSH `0.2.1-rc.5` 使用用户添加的自定义索引。索引提供版本目录
 | [更新日志](https://github.com/Bozheng-Li/dsh-Wechat-Agent/blob/main/CHANGELOG.md) | 与应用内共用的版本记录。 |
 | [图片发送修复](https://github.com/Bozheng-Li/dsh-Wechat-Agent/blob/main/docs/IMAGE-HANDOFF-2026-11-06.md) | 反复扫码仍无法发图的原因、修复与验证范围。 |
 | [联网搜索](https://github.com/Bozheng-Li/dsh-Wechat-Agent/blob/main/docs/SEARCH-2026-11-06.md) | Tavily、DeepSeek 原生搜索、独立凭据与实际查询验证。 |
-| [界面与动效](https://github.com/Bozheng-Li/dsh-Wechat-Agent/blob/main/docs/VISUAL-REFRESH-2026-11-06.md) | 明暗配色、动效偏好、窄窗口预览与验证。 |
+| [界面与动效](docs/USER-GUIDE.md#界面与动效) | 当前源码的明暗配色、动效偏好与窄窗口布局；[旧版验收](docs/VISUAL-REFRESH-2026-11-06.md)继续保留。 |
 | [第三方说明](https://github.com/Bozheng-Li/dsh-Wechat-Agent/blob/main/THIRD_PARTY_NOTICES.md) | 原项目、表情作品、运行环境与许可。 |
 
 源码仓库可独立构建与测试。Node.js **22.18+**，执行 `npm ci`、`npm test`；完整安装包的准备方法见开发文档。

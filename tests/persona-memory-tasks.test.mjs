@@ -11,6 +11,7 @@ import { StateStore, WechatChannel, TaskScheduler, ConversationMemory, DshAgentR
 
 const temp = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../storage/tmp');
 const owner = 'fixture_owner', room = 'fixture-room@chatroom', other = 'other-room@chatroom';
+const suppliedContext = request => JSON.stringify({ memory: request.memory, history: request.history });
 function fixture(t) {
   fs.mkdirSync(temp, { recursive: true }); const root = fs.mkdtempSync(path.join(temp, 'features-'));
   const store = new StateStore(root);
@@ -86,11 +87,13 @@ test('named directories disambiguate same-named rooms and migrate renamed rooms 
 
 test('every reply receives room memory, including other speakers and confirmed answers, after a restart', async t => {
   const f = fixture(t);
+  f.receive('另一群的未公开计划 OTHER_ROOM_SECRET。', { peerId: other });
   f.receive('我叫阿禾，喜欢猫。'); f.receive('我叫小林，喜欢狗。', { sender: { id: 'bob', nickname: '小林' } });
   f.receive('/agent 我们刚才说了什么'); await f.channel.whenIdle();
   f.receive('/agent 再接着聊'); await f.channel.whenIdle();
-  assert(f.calls[0].memory.includes('喜欢猫') && f.calls[0].memory.includes('喜欢狗'));
-  assert(f.calls[1].memory.includes('好，就按这个来。')); assert.equal(f.calls[1].sessionId, undefined);
+  assert(suppliedContext(f.calls[0]).includes('喜欢猫') && suppliedContext(f.calls[0]).includes('喜欢狗'));
+  assert(suppliedContext(f.calls[1]).includes('好，就按这个来。')); assert.equal(f.calls[1].sessionId, undefined);
+  assert(f.calls.every(call => !suppliedContext(call).includes('OTHER_ROOM_SECRET')));
   const restored = new ConversationMemory(new StateStore(f.root));
   assert(restored.view(f.scope).text.includes('喜欢猫'));
   assert(!restored.view({ ...f.scope, peerId: other }).text.includes('喜欢猫'));
@@ -133,7 +136,14 @@ test('a requested one-minute reminder is durable and runs once with real deliver
   f.store.setConversationSettings(owner, 'group', room, { mode: 'nickname', minMessages: 5, maxMessages: 20, recordsPath: '' });
   f.receive('小胖，一分钟后提醒我吃饭'); await f.channel.whenIdle();
   const task = f.scheduler.list(owner).tasks[0]; assert(task); assert.equal(task.nextRunAt, f.now() + 60000);
-  assert.equal(f.calls.length, 0); assert.equal(f.sent[0].message[0].data.text, '好，一分钟后提醒你。');
+  assert.equal(f.calls.length, 1); assert.equal(f.calls[0].mode, 'confirmation');
+  assert.deepEqual(f.calls[0].tools, []);
+  assert.equal(f.calls[0].persona.name, '小胖');
+  const saved = JSON.parse(f.calls[0].text).savedTask;
+  assert.equal(saved.id, task.id); assert.equal(saved.when, new Date(task.nextRunAt).toISOString());
+  assert(saved.content.includes('吃饭'));
+  assert(f.sent[0].message[0].data.text.includes('提醒你：吃饭。'), 'the receipt retains the saved audience and activity');
+  assert(!f.sent[0].message[0].data.text.includes('一分钟后'), 'an absolute deadline remains correct after generation latency');
   assert.equal(new TaskScheduler({ store: f.store, channel: f.channel, now: f.now }).list(owner).tasks.length, 1);
   f.advance(59999); await f.scheduler.tick(); assert.equal(f.sent.length, 1);
   f.advance(1); await f.scheduler.tick(); assert.equal(f.sent.length, 2);
@@ -234,7 +244,7 @@ test('vision descriptions survive restart and enter subsequent model memory with
   const source = f.channel.memory.load(f.scope).entries[0];
   await f.channel.memory.enrich(f.scope, f.runner, f.transport, new AbortController().signal, { imageRequest: { key: source.key, resourceId } });
   f.receive('/agent 刚才图里的猫在哪'); await f.channel.whenIdle();
-  assert(f.calls.at(-1).memory.includes('蓝色椅子'));
+  assert(suppliedContext(f.calls.at(-1)).includes('蓝色椅子'));
   assert(new ConversationMemory(new StateStore(f.root)).view(f.scope).text.includes('今天休息'));
   assert(!f.channel.memory.view({ ...f.scope, peerId: other }).text.includes('蓝色椅子'));
 });

@@ -12,6 +12,7 @@ export async function call(connection, endpoint, payload = {}, signal) {
         'records.list',
         'changelog',
         'identity.get',
+        'model.info',
         'memory.list',
         'memory.get',
         'tasks.list',

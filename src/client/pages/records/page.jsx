@@ -184,6 +184,22 @@ export function Records({
                           </p>
                         )}
                         {record.reply && <p className="wa-record-reply">{record.reply}</p>}
+                        {record.memoryContext && (
+                          <div className="wa-record-memory" data-testid="record-memory-context">
+                            <span className="wa-record-memory-label">本轮记忆准备</span>
+                            <div className="wa-row">
+                              <span>{record.memoryContext.mode === 'on-demand' ? '按需查阅' : '自动筛选'}</span>
+                              <span>近期对话 {record.memoryContext.recentMessages || 0} 条</span>
+                              <span>预载旧记忆 {record.memoryContext.referenceChars || 0} 字</span>
+                            </div>
+                            <p>{record.memoryContext.mode === 'on-demand'
+                              ? '旧记忆由模型需要时查阅；此处显示回复开始前提供的内容，不代表已经调用查询。'
+                              : record.memoryContext.referenceChars > 0
+                                ? '只提供与本轮相关的历史，作为回答参考。'
+                                : '未预载相关旧记忆，先依据本轮消息与近期对话回答。'}</p>
+                            {!!record.memoryContext.matchedTerms?.length && <p>关联线索：{record.memoryContext.matchedTerms.join('、')}</p>}
+                          </div>
+                        )}
                         {record.reason && <p className="wa-alert">{record.reason}</p>}
                         {record.replyStyleWarning && (
                           <p className="wa-note-box" data-testid="reply-style-review">

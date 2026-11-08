@@ -4,7 +4,6 @@ import { MediaLibraryPage } from './pages/media/library-page.jsx';
 import { DiagnosticsPage } from './pages/diagnostics/page.jsx';
 import { RecoveryPage } from './pages/recovery/page.jsx';
 import { DigestsPage } from './pages/digests/page.jsx';
-import { KnowledgePage } from './pages/knowledge/page.jsx';
 import { peerId, peerType, splitLines } from './shared/conversations.mjs';
 import { same, personaDraft, modelDraft, storageDraft, configDraft, configPayload } from './shared/drafts.mjs';
 import { call } from './shared/rpc.mjs';
@@ -93,8 +92,8 @@ export function PanelContent({ connection, catalog, state }) {
     );
   else if (page === 'overview')
     content = <Overview status={status} busy={busy} blocked={blocked} onAction={action} onNavigate={navigate} />;
-  else if (['diagnostics', 'digests', 'knowledge'].includes(page)) {
-    const Page = { diagnostics: DiagnosticsPage, digests: DigestsPage, knowledge: KnowledgePage }[page];
+  else if (['diagnostics', 'digests'].includes(page)) {
+    const Page = { diagnostics: DiagnosticsPage, digests: DigestsPage }[page];
     content = (
       <Page
         key={page + ':' + (status.account?.id || 'offline')}
@@ -148,6 +147,7 @@ export function PanelContent({ connection, catalog, state }) {
   else if (page === 'model')
     content = (
       <ModelSettings
+        connection={connection}
         catalog={catalog}
         status={status}
         draft={drafts.model}
@@ -202,7 +202,7 @@ export function PanelContent({ connection, catalog, state }) {
             {
               area: 'model',
               text: selection
-                ? '回复模型已保存，从下一个任务开始生效。'
+                ? '回复模型与推理强度设置已保存，从下一个任务开始生效。'
                 : '已跟随 DSH 默认模型，从下一个任务开始生效。',
             }
           )

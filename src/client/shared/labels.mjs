@@ -35,7 +35,6 @@ export const pageLabels = {
   recovery: '发送恢复',
   'memory-review': '记忆维护',
   digests: '群聊简报',
-  knowledge: '知识库',
   overview: '工作台',
   authorization: '会话授权',
   records: '处理记录',

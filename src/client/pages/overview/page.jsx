@@ -11,7 +11,7 @@ export function Overview({ status, busy, blocked, onAction, onNavigate }) {
     privates = settings.privatePeers?.length || 0;
   return (
     <>
-      <PageHead title="工作台" description="你的 Agent、会话与日常，都在这里。">
+      <PageHead title="工作台" eyebrow="A SPACE FOR CONVERSATION" description="让每次对话，都多一点熟悉。">
         <span className={'wa-badge ' + (settings.enabled ? 'is-success' : '')}>
           <span className={'wa-status-dot ' + (settings.enabled ? 'is-online' : '')} />
           {settings.enabled ? '自动回复已开启' : '自动回复已暂停'}
@@ -23,17 +23,17 @@ export function Overview({ status, busy, blocked, onAction, onNavigate }) {
             <div className="wa-intro-copy">
               <span className="wa-intro-kicker">
                 <i />
-                你的对话空间
+                性格 · 记忆 · 日常
               </span>
               <h2>
-                有性格，
+                好的对话，
                 <br />
-                <span>也有记忆。</span>
+                <span>从相互了解开始。</span>
               </h2>
               <p>
-                把 Agent 带进日常，
+                留住重要的事，
                 <br />
-                让交流自然发生。
+                用熟悉的方式回应。
               </p>
               <div className="wa-row wa-intro-actions">
                 <Button primary onClick={() => onNavigate('authorization')}>
@@ -47,10 +47,30 @@ export function Overview({ status, busy, blocked, onAction, onNavigate }) {
             </div>
             <ConversationSculpture />
             <span className="wa-intro-edition" aria-hidden="true">
-              CONVERSATION, WITH CHARACTER.
+              EVERY CONVERSATION LEAVES A TRACE.
             </span>
           </section>
           <AccountCard status={status} busy={busy} blocked={blocked} onAction={onAction} />
+        </div>
+        <div className="wa-persona-ribbon">
+          <div className="wa-persona-ribbon-identity">
+            <span className="wa-persona-ribbon-avatar" aria-hidden="true">
+              {Array.from(status.persona?.name || '微信助手')[0]}
+            </span>
+            <div>
+              <span>当前默认人设</span>
+              <strong>{status.persona?.name || '微信助手'}</strong>
+            </div>
+          </div>
+          <p>为不同会话保留不同性格，让记忆服务于当下的交流。</p>
+          <div className="wa-row">
+            <Button quiet onClick={() => onNavigate('persona', 'overview')}>
+              调整人设 <Glyph name="arrow" className="wa-icon-small" />
+            </Button>
+            <Button quiet onClick={() => onNavigate('memory')}>
+              查看记忆 <Glyph name="arrow" className="wa-icon-small" />
+            </Button>
+          </div>
         </div>
         <div className="wa-stat-grid">
           <div className="wa-stat">

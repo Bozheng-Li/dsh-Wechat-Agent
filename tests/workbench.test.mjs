@@ -2,15 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
-import { StateStore, WechatChannel, TaskScheduler, createPluginService, rpcHandler, ChannelError } from '../lib/testing.js';
-import { KnowledgeLibrary, extractDocument } from '../src/features/knowledge/library.mjs';
-import { WorkbenchStore, scopeKey } from '../src/features/workbench/store.mjs';
+import { StateStore, WechatChannel, TaskScheduler, createPluginService, rpcHandler, ChannelError, messageText } from '../lib/testing.js';
 
 const base = path.resolve('storage/tmp'), signal = () => new AbortController().signal;
 const accountId = 'workspace-owner', group = { accountId, chatType: 'group', peerId: 'workspace@chatroom' };
-function fixture(t) {
-  fs.mkdirSync(base, { recursive: true }); const root = fs.mkdtempSync(path.join(base, 'workbench-test-')), store = new StateStore(root), sends = [];
+function fixture(t, prepare = () => {}) {
+  fs.mkdirSync(base, { recursive: true }); const root = fs.mkdtempSync(path.join(base, 'workbench-test-'));
+  prepare(root);
+  const store = new StateStore(root), sends = [];
   store.configure(accountId, { enabled: true, groups: [group.peerId, 'other@chatroom'], privatePeers: [], prompt: '' });
   store.rememberConversationNames(accountId, { privatePeers: [], groups: [{ id: group.peerId, name: '项目组' }, { id: 'other@chatroom', name: '其他群' }] });
   let current = { account: { id: accountId }, online: true, good: true, runtimeReady: true, imageUploadReady: true };
@@ -22,52 +21,6 @@ function fixture(t) {
   const addRecord = patch => { const key = 'failed:' + Math.random(), record = { ...group, key, contextKey: key, senderId: 'alice', sender: '阿禾', messageId: key, state: 'failed', question: '请回答产品价格', replyDraft: '产品为 120 元。', createdAt: Date.now(), updatedAt: Date.now(), ...patch }; store.add(record); return record; };
   return { root, store, transport, runner, channel, scheduler, workbench, service, sends, addRecord, switchAccount: value => { current = { ...current, account: { id: value } }; } };
 }
-async function importText(library, id, text, name = '产品手册.md') {
-  const bytes = Buffer.from(text), upload = library.begin(accountId, { libraryId: id, name, size: bytes.length });
-  library.append(accountId, { uploadId: upload.uploadId, offset: 0, data: bytes.toString('base64') }); return library.finish(accountId, upload.uploadId, signal());
-}
-function collection(library) { library.configureSettings(accountId, { enabled: true, revision: library.list(accountId).revision }); return library.configure(accountId, { revision: library.list(accountId).revision, title: '产品资料', description: '权威产品说明', scopes: [scopeKey(group)], enabled: true }).libraries[0]; }
-
-test('knowledge import is durable, deduplicated, scoped and revoked without leaking other account documents', async t => {
-  const f = fixture(t), lib = f.workbench.knowledge, c = collection(lib);
-  const imported = await importText(lib, c.id, '退款期限为七天。产品价格为 120 元。');
-  assert((await importText(lib, c.id, '退款期限为七天。产品价格为 120 元。')).duplicate);
-  assert.equal(lib.list(accountId).documents.length, 1);
-  assert((await lib.search(accountId, { query: '退款期限', scope: group })).results[0].text.includes('七天'));
-  assert(!(await lib.search(accountId, { query: '退款期限', scope: { ...group, peerId: 'other@chatroom' } })).found);
-  lib.configureSettings('another-owner', { enabled: true, revision: 0 });
-  assert(!(await lib.search('another-owner', { query: '退款期限' })).found);
-  const reopened = new KnowledgeLibrary(new StateStore(f.root)); assert.equal(reopened.view(accountId, imported.document.id).title, '产品手册.md');
-  lib.configure(accountId, { ...c, libraryId: c.id, enabled: false, revision: lib.list(accountId).revision });
-  assert(!(await lib.search(accountId, { query: '退款期限', scope: group })).found);
-  assert((await lib.search(accountId, { query: '退款期限', libraryId: c.id })).found);
-  lib.remove(accountId, { documentId: imported.document.id, revision: lib.list(accountId).revision }); assert(!(await lib.search(accountId, { query: '退款期限' })).found);
-});
-
-test('knowledge rejects stale saves, wrong upload offsets, cross-account chunks and invalid UTF-8', async t => {
-  const f = fixture(t), lib = f.workbench.knowledge, c = collection(lib), upload = lib.begin(accountId, { libraryId: c.id, name: '笔记.txt', size: 3 });
-  assert.throws(() => lib.append(accountId, { uploadId: upload.uploadId, offset: 1, data: 'YWJj' }), { code: 'KNOWLEDGE_UPLOAD_INVALID' });
-  assert.throws(() => lib.append('another-owner', { uploadId: upload.uploadId, offset: 0, data: 'YWJj' }), { code: 'KNOWLEDGE_UPLOAD_EXPIRED' });
-  await assert.rejects(lib.finish(accountId, upload.uploadId, signal()), { code: 'KNOWLEDGE_UPLOAD_INCOMPLETE' });
-  assert.throws(() => lib.configure(accountId, { ...c, libraryId: c.id, revision: 0 }), { code: 'WORKBENCH_CHANGED' });
-  assert.throws(() => extractDocument('坏文件.txt', Buffer.from([255, 254]), signal()), { code: 'DOCUMENT_ENCODING' });
-  assert.equal(lib.list(accountId).documents.length, 0);
-});
-
-test('a corrupt knowledge file stays intact instead of becoming an empty library', t => {
-  const f = fixture(t), disk = new WorkbenchStore(f.store, 'knowledge'), file = disk.path(accountId), bytes = Buffer.from([255, 254, 1]); fs.writeFileSync(file, bytes);
-  assert.throws(() => disk.load(accountId), { code: 'WORKBENCH_STORAGE_INVALID' }); assert.deepEqual(fs.readFileSync(file), bytes);
-});
-
-test('source deletion during knowledge answer generation discards the stale answer', async t => {
-  const f = fixture(t), lib = f.workbench.knowledge, c = collection(lib), imported = await importText(lib, c.id, '退款期限七天。');
-  const reached = Promise.withResolvers(), finish = Promise.withResolvers(); t.after(() => finish.resolve());
-  f.runner.run = async () => { reached.resolve(); await finish.promise; return { text: '七天。' }; };
-  const job = f.workbench.call('knowledge.ask', { accountId, query: '退款期限', libraryId: c.id }, signal()); await reached.promise;
-  lib.remove(accountId, { documentId: imported.document.id, revision: lib.list(accountId).revision }); finish.resolve();
-  await assert.rejects(job, { code: 'KNOWLEDGE_CHANGED' });
-});
-
 test('recovery prepares without sending and explicit submission is idempotent after a server ACK', async t => {
   const f = fixture(t), original = f.addRecord(), view = f.workbench.recoveryList(accountId).records[0];
   const draft = await f.workbench.prepare({ ...group, recordKey: original.key, revision: view.revision, mode: 'text' }, signal()); assert.equal(f.sends.length, 0);
@@ -107,8 +60,62 @@ test('owner can cancel while recovery waits for a transport ACK; a late genuine 
 
 test('new workbench RPCs remain owner-only and cannot be invoked by ordinary peers', async t => {
   const f = fixture(t), rpc = rpcHandler(f.service);
-  const result = await rpc('knowledge.list', { accountId }, signal(), { principal: { kind: 'peer' } }); assert.equal(result.ok, false); assert.equal(result.error.code, 'OWNER_REQUIRED');
-  const read = await rpc('knowledge.list', { accountId }, signal(), { principal: { kind: 'owner' } }); assert.equal(read.ok, true);
+  const result = await rpc('digest.list', { accountId }, signal(), { principal: { kind: 'peer' } }); assert.equal(result.ok, false); assert.equal(result.error.code, 'OWNER_REQUIRED');
+  const read = await rpc('digest.list', { accountId }, signal(), { principal: { kind: 'owner' } }); assert.equal(read.ok, true);
+});
+
+test('retired document RPCs are unavailable even to the owner and do not create storage', async t => {
+  const f = fixture(t), rpc = rpcHandler(f.service);
+  for (const method of ['list', 'settings', 'index.rebuild', 'configure', 'delete', 'document', 'search', 'ask', 'upload.start', 'upload.chunk', 'upload.finish', 'upload.abort']) {
+    const result = await rpc('knowledge.' + method, { accountId }, signal(), { principal: { kind: 'owner' } });
+    assert.equal(result.ok, false, method);
+    assert.equal(result.error.code, 'UNKNOWN_OPERATION', method);
+  }
+  assert.equal(Object.hasOwn(f.workbench, 'knowledge'), false);
+  assert.equal(typeof f.workbench.answerKnowledge, 'undefined');
+  assert.equal(fs.existsSync(path.join(f.root, 'storage/knowledge')), false);
+  assert.equal(fs.existsSync(path.join(f.root, 'storage/knowledge-index')), false);
+  assert.equal(f.sends.length, 0);
+});
+
+test('retired commands do not bypass the normal group wake-up policy', () => {
+  const message = { chatType: 'group', peerId: group.peerId, sender: { id: 'alice' } }, account = { id: accountId };
+  for (const text of ['/kb 退款期限', '/知识库：退款期限']) {
+    const result = messageText({ ...message, message: [{ type: 'text', data: { text } }] }, account);
+    assert(result.reason, text);
+    assert.equal(result.trigger, undefined);
+    assert(!result.reason.includes('/kb'));
+  }
+  const result = messageText({ ...message, message: [{ type: 'text', data: { text: '/agent 你好' } }] }, account);
+  assert.equal(result.text, '你好');
+  assert.equal(result.trigger, 'command');
+});
+
+test('starting and diagnosing leaves former document files byte-for-byte intact', async t => {
+  const legacy = { 'knowledge/legacy.json': Buffer.from([255, 254, 1]), 'knowledge/original.md': Buffer.from('original document'), 'knowledge-index/old.sqlite': Buffer.from('old index') };
+  const f = fixture(t, root => {
+    for (const [name, bytes] of Object.entries(legacy)) {
+      const file = path.join(root, 'storage', name);
+      fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, bytes);
+    }
+  });
+  const result = await f.workbench.diagnose(accountId, signal());
+  assert.deepEqual(result.checks.map(check => check.id), ['wechat', 'model', 'search', 'image']);
+  for (const [name, bytes] of Object.entries(legacy)) assert.deepEqual(fs.readFileSync(path.join(f.root, 'storage', name)), bytes);
+  assert.equal(f.sends.length, 0);
+});
+
+test('saved diagnostics hide retired checks and require a fresh run without rewriting the old report', async t => {
+  const f = fixture(t);
+  await f.workbench.diagnose(accountId, signal());
+  const data = f.workbench.disk.load(accountId);
+  data.diagnostics.checks.push({ id: 'knowledge', title: 'former check', state: 'passed' });
+  f.workbench.disk.save(data);
+  const file = f.workbench.disk.path(accountId), before = fs.readFileSync(file);
+  const result = f.workbench.diagnostics(accountId);
+  assert.equal(result.stale, true);
+  assert(!result.checks.some(check => check.id === 'knowledge'));
+  assert.deepEqual(fs.readFileSync(file), before);
 });
 
 test('diagnostics distinguish disabled search, real model failure and image readiness without sending messages', async t => {
@@ -143,26 +150,7 @@ test('expired memory is excluded after restart, conflicts remain withheld until 
   assert.throws(() => memory.updateFact(accountId, { factId: fact.id, revision: doc.revision, expiresAt: null }), { code: 'LONG_MEMORY_CHANGED' });
 });
 
-test('real PDF and DOCX imports preserve source text and reject encrypted, scanned, corrupt and oversized documents atomically', async t => {
-  const f = fixture(t), lib = f.workbench.knowledge, c = collection(lib);
-  const generated = spawnSync('python', ['-B', 'tests/fixtures/knowledge-documents.py'], { windowsHide: true, encoding: 'utf8', maxBuffer: 3 * 1024 * 1024 });
-  assert.equal(generated.status, 0, generated.stderr || generated.error?.message);
-  const samples = JSON.parse(generated.stdout);
-  const upload = name => importText(lib, c.id, Buffer.from(samples[name], 'base64'), name);
-  const pdf = await upload('guide.pdf'), docx = await upload('guide.docx');
-  assert(lib.view(accountId, pdf.document.id).chunks.some(chunk => chunk.label === '第 1 页' && chunk.text.includes('within seven days')));
-  assert(lib.view(accountId, docx.document.id).chunks.some(chunk => chunk.text.includes('退款期限为七天。松石三号。') && chunk.text.includes('价格\t120 元\n需要订单号。')));
-  for (const name of ['scan.pdf', 'locked.pdf', 'many-pages.pdf', 'broken.pdf', 'entity.docx', 'archive-limit.docx', 'text-limit.docx', 'broken.docx']) {
-    await assert.rejects(upload(name), error => error.code === 'DOCUMENT_READ_FAILED' && (name !== 'scan.pdf' || error.message.includes('OCR')) && (name !== 'locked.pdf' || error.message.includes('解密')), name);
-    assert.equal(lib.list(accountId).documents.length, 2, name + ' must never enter the knowledge index');
-  }
-  const bytes = Buffer.from(samples['guide.pdf'], 'base64'), pending = lib.begin(accountId, { libraryId: c.id, name: 'cancelled.pdf', size: bytes.length });
-  lib.append(accountId, { uploadId: pending.uploadId, offset: 0, data: bytes.toString('base64') });
-  const controller = new AbortController(), job = lib.finish(accountId, pending.uploadId, controller.signal); controller.abort();
-  await assert.rejects(job, { name: 'AbortError' }); assert.equal(lib.list(accountId).documents.length, 2);
-});
-
-test('diagnostics expire when connection, upload readiness, resolved model or knowledge changes', async t => {
+test('diagnostics expire when connection, upload readiness, resolved model or search settings change', async t => {
   const f = fixture(t);
   await f.workbench.diagnose(accountId, signal()); assert.equal(f.workbench.diagnostics(accountId).stale, false);
   f.transport.status().online = false; assert.equal(f.workbench.diagnostics(accountId).stale, true);
@@ -171,24 +159,10 @@ test('diagnostics expire when connection, upload readiness, resolved model or kn
   f.transport.status().imageUploadReady = true;
   f.runner.selection = () => ({ provider: 'fixture', model: 'another-default' }); assert.equal(f.workbench.diagnostics(accountId).stale, true);
   await f.workbench.diagnose(accountId, signal()); assert.equal(f.workbench.diagnostics(accountId).stale, false);
-  collection(f.workbench.knowledge); assert.equal(f.workbench.diagnostics(accountId).stale, true);
+  f.runner.search.status = () => ({ credentials: { tavily: false } }); assert.equal(f.workbench.diagnostics(accountId).stale, true);
   f.runner.run = async () => { f.transport.status().good = false; return { text: 'OK' }; };
   await assert.rejects(f.workbench.diagnose(accountId, signal()), { code: 'DIAGNOSTICS_CHANGED' });
   assert.equal(f.sends.length, 0);
-});
-
-test('invalid or stale knowledge changes do not cancel an unrelated reply already generating', async t => {
-  const f = fixture(t), c = collection(f.workbench.knowledge), started = Promise.withResolvers(), finish = Promise.withResolvers();
-  f.runner.run = async request => { started.resolve(request.signal); await finish.promise; return { text: '原来的回复继续完成。' }; };
-  f.channel.receive({ id: 'knowledge-invalid-save', serverMessageId: 'knowledge-invalid-save', direction: 'incoming', chatType: 'group', peerId: group.peerId, sender: { id: 'alice' }, time: Date.now() / 1000, message: [{ type: 'text', data: { text: '/agent 请继续处理原问题' } }] }, accountId);
-  const runningSignal = await Promise.race([started.promise, f.channel.whenIdle().then(() => { throw new Error('Fixture reply ended before generation began'); })]);
-  try {
-    const revision = f.workbench.knowledge.list(accountId).revision;
-    await assert.rejects(async () => f.service.call('knowledge.configure', { ...c, accountId, libraryId: c.id, title: '', revision }, signal()), { code: 'INVALID_INPUT' });
-    await assert.rejects(async () => f.service.call('knowledge.delete', { accountId, libraryId: c.id, revision: revision - 1 }, signal()), { code: 'WORKBENCH_CHANGED' });
-    assert.equal(runningSignal.aborted, false); assert.equal(f.workbench.knowledge.list(accountId).revision, revision);
-  } finally { finish.resolve(); await f.channel.whenIdle(); }
-  assert.equal(f.sends.length, 1);
 });
 
 test('a rejected recovery queue preserves a retryable draft and never leaves a fictitious submitting state', async t => {

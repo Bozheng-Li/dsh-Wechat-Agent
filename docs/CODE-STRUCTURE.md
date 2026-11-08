@@ -38,7 +38,6 @@ src/
 │     ├─ media/              表情与图片素材库
 │     ├─ tasks/              定时任务、提醒对象、任务详情
 │     ├─ digests/            群聊简报
-│     ├─ knowledge/          知识库
 │     ├─ diagnostics/        运行检查
 │     └─ settings/           模型、身份、人设、存储、更新日志
 ├─ features/
@@ -48,8 +47,7 @@ src/
 │  ├─ media/                 素材库、格式检查、ZIP 读取、校验、内置素材
 │  ├─ tasks/                 定时调度、对话中的任务与素材工具
 │  ├─ search/                外部搜索服务
-│  ├─ knowledge/             文档库、本地索引、显式检索请求识别
-│  └─ workbench/             诊断、发送恢复、简报、知识回答、工作台存储
+│  └─ workbench/             诊断、发送恢复、简报、工作台存储
 ├─ storage/
 │  ├─ state-store.mjs        配置、会话状态、记录及事务协调
 │  ├─ initialize.mjs         状态加载、旧数据与目录迁移
@@ -83,6 +81,7 @@ src/
 | 生成、发送及回执记录 | `features/conversation/reply.mjs` |
 | 记忆压缩与重试调度 | `features/conversation/memory-maintenance.mjs` |
 | 提示词及模型执行 | `features/agent/prompts.mjs`、`features/agent/runner.mjs` |
+| 人设保存格式与字段原则 | `features/agent/persona-input.mjs` 无损识别编辑器标准正文；`prompts.mjs` 统一分块，自由正文保留原样 |
 | 素材读取或格式校验 | `features/media/image-format.mjs`、`features/media/zip.mjs` |
 | 定时提醒 | `features/tasks/scheduler.mjs`、`features/tasks/conversation-tools.mjs` |
 | 发送恢复、简报、诊断 | `features/workbench/recovery.mjs`、`digests.mjs`、`diagnostics.mjs` |

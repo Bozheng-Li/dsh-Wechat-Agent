@@ -58,7 +58,13 @@ try {
   assert.deepEqual(task.targets, [{ id: senderId, name: '阿禾' }]);
   assert.equal(sends.length, 1, 'Only the immediate acknowledgement is sent before the due time');
   assert.deepEqual(sends[0].mentions, [], 'The immediate confirmation must not send an extra mention');
-  assert.match(sends[0].text, /一分钟后提醒你/);
+  const confirmation = sends[0].text.match(/(\d{1,2})\/(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})提醒你：吃饭。$/u);
+  assert(confirmation, 'The confirmation must state the saved absolute deadline and activity');
+  // Check the reported components against the persisted timestamp independently
+  // of the receipt formatter. Shanghai currently uses UTC+08:00.
+  const localDeadline = new Date(task.nextRunAt + 8 * 60 * 60 * 1000);
+  assert.deepEqual(confirmation.slice(1).map(Number), [localDeadline.getUTCMonth() + 1, localDeadline.getUTCDate(),
+    localDeadline.getUTCHours(), localDeadline.getUTCMinutes(), localDeadline.getUTCSeconds()]);
   assert(task.nextRunAt >= startedAt + 60000);
   report.dueAt = task.nextRunAt;
   report.mentionTargets = task.targets;

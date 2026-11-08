@@ -17,7 +17,6 @@ export function projectPaths(root: string) {
     "state",
     "private",
     "media",
-    "knowledge",
     "logs",
     "cache",
     "tmp",

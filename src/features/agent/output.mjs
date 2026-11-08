@@ -13,6 +13,10 @@ export function completedText(events, allowEmpty = false, selectReplyText) {
           ? '模型请求超时，未使用不完整的输出，请稍后重试'
           : reason === 'error' && failureCode === 'ACCOUNT_QUOTA'
             ? '模型账号余额或额度不足，请在 DSH 检查当前模型账号；未发送不完整回复'
+            : reason === 'error' && failureCode === 'QUOTA'
+              ? '模型服务的请求额度或调用频率已达上限，请等待恢复或在 DSH 检查配额；未发送回复'
+            : reason === 'error' && failureCode === 'INVALID_REQUEST'
+              ? '模型拒绝了请求参数，请检查所选模型的推理强度、温度及输出设置；未发送回复'
             : 'DSH 模型任务未完成，请在 DSH 检查模型连接；未发送回复';
     throw new ChannelError(
       'MODEL_INCOMPLETE',

@@ -342,7 +342,7 @@ export function ConversationSettings({
             <Field
               label="记忆读取"
               id="wa-memory-mode"
-              help="每轮读取会把记忆带入回复上下文；全局备注始终读取，按需模式由 Agent 查阅其他长期事实。"
+              help="自动读取只带入与本轮相关的记忆；按需模式由 Agent 在提及往事、偏好或约定时查阅。近期对话仍用于接话，全局备注每轮提供共同背景与明确约定。"
             >
               <select
                 className="wa-select"
@@ -351,7 +351,7 @@ export function ConversationSettings({
                 disabled={blocked}
                 onChange={(event) => onChange({ ...draft, memoryMode: event.target.value })}
               >
-                <option value="always">每轮读取</option>
+                <option value="always">自动筛选相关记忆</option>
                 <option value="on-demand">按需读取</option>
               </select>
             </Field>
@@ -360,7 +360,7 @@ export function ConversationSettings({
               help={
                 '留空使用默认 ' +
                 (status.memory?.windowChars || 100000) +
-                ' 字符；至少 1000 字符，可按模型容量自定义。满窗口自动压缩，旧记忆快照保留。'
+                ' 字符；至少 1000 字符，用于保存与整理记忆，不代表每轮全部读取。满窗口后台压缩，原文快照保留。'
               }
             >
               <input

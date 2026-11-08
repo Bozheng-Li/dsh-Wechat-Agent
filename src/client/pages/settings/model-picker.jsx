@@ -2,10 +2,12 @@ import { useEffect, useState, useSyncExternalStore } from 'react';
 import { modelKey } from '../../shared/drafts.mjs';
 import { Button } from '../../components/button.jsx';
 import { Field } from '../../components/form-ui.jsx';
+import { useModelInfo } from '../../hooks/use-model-info.mjs';
 
-export function ModelPicker({ catalog, status, blocked, busy, onSelect }) {
+export function ModelPicker({ connection, catalog, status, blocked, busy, onSelect }) {
   const snapshot = useSyncExternalStore(catalog.store.subscribe, catalog.store.getSnapshot);
   const [refreshError, setRefreshError] = useState('');
+  const [refreshing, setRefreshing] = useState(false);
   useEffect(() => {
     void catalog.load().catch(() => {});
   }, [catalog]);
@@ -14,13 +16,23 @@ export function ModelPicker({ catalog, status, blocked, busy, onSelect }) {
   const find = (selection) =>
     groups.find((group) => group.id === selection?.provider)?.models.find((model) => model.id === selection?.model);
   const defaultModel = snapshot.value?.default ?? status.defaultModel,
-    missing = choice && !find(choice);
-  const loading = ['idle', 'loading'].includes(snapshot.status);
+    selectedModel = find(choice),
+    missing = choice && !selectedModel;
+  const details = useModelInfo(connection, choice, snapshot.value);
+  const reasoning = details.value?.reasoning,
+    efforts = reasoning?.efforts || [],
+    savedEffort = choice?.reasoningEffort,
+    selectedEffort = efforts.find((effort) => effort.id === savedEffort),
+    defaultEffort = efforts.find((effort) => effort.id === reasoning?.defaultEffort),
+    missingEffort = !!savedEffort && details.status === 'ready' && !selectedEffort;
+  const loading = refreshing || ['idle', 'loading'].includes(snapshot.status);
   const refresh = () => {
     setRefreshError('');
+    setRefreshing(true);
     void Promise.resolve()
       .then(() => catalog.refresh())
-      .catch(() => setRefreshError('暂时无法刷新模型列表，请稍后重试。'));
+      .catch(() => setRefreshError('暂时无法刷新模型列表，请稍后重试。'))
+      .finally(() => { details.reload(); setRefreshing(false); });
   };
   return (
     <>
@@ -59,6 +71,66 @@ export function ModelPicker({ catalog, status, blocked, busy, onSelect }) {
           ))}
         </select>
       </Field>
+      {choice && (details.status !== 'ready' || efforts.length > 0 || savedEffort) && (
+        <Field
+          label="推理强度"
+          id="wa-reasoning-effort"
+          help={
+            (savedEffort ? selectedEffort?.description : defaultEffort?.description) ||
+            (!savedEffort && details.status === 'ready' && !defaultEffort
+              ? 'DSH 未提供默认档位信息。选择具体强度后自动保存，从下一个任务开始生效。'
+              : '档位由 DSH 提供。选择后自动保存，从下一个任务开始生效。')
+          }
+        >
+          <select
+            id="wa-reasoning-effort"
+            className="wa-select"
+            value={savedEffort || ''}
+            disabled={blocked || (details.status !== 'ready' && !savedEffort)}
+            aria-describedby={'wa-reasoning-effort-help' + (missingEffort ? ' wa-reasoning-effort-warning' : '')}
+            aria-invalid={missingEffort ? true : undefined}
+            onChange={(event) => {
+              const selection = { provider: choice.provider, model: choice.model };
+              if (event.target.value) selection.reasoningEffort = event.target.value;
+              onSelect(selection);
+            }}
+          >
+            <option value="">
+              使用模型默认{reasoning?.defaultEffort ? '（' + (defaultEffort?.name || reasoning.defaultEffort) + '）' : ''}
+            </option>
+            {savedEffort && !selectedEffort && (
+              <option value={savedEffort} disabled>
+                {savedEffort} · {details.status === 'ready' ? '暂不可用' : '已保存，等待确认'}
+              </option>
+            )}
+            {efforts.map((effort) => (
+              <option key={effort.id} value={effort.id}>
+                {effort.name || effort.id}
+              </option>
+            ))}
+          </select>
+          {missingEffort && (
+            <p className="wa-alert wa-section-space" id="wa-reasoning-effort-warning" role="alert">
+              已保存的推理强度不在该模型当前支持的档位中，请重新选择或使用模型默认。
+            </p>
+          )}
+        </Field>
+      )}
+      {choice && details.status === 'loading' && (
+        <p className="wa-help" role="status">正在向 DSH 查询该模型的推理强度…</p>
+      )}
+      {choice && details.status === 'error' && (
+        <div className="wa-stack wa-section-space">
+          <p className="wa-alert" role="alert">{details.error} 已保存的选择继续保留。</p>
+          <div><Button icon="refresh" onClick={details.reload}>重试读取强度</Button></div>
+        </div>
+      )}
+      {choice && details.status === 'ready' && !efforts.length && !savedEffort && (
+        <p className="wa-help" role="status">DSH 未为此模型提供可选推理强度，将使用模型默认。</p>
+      )}
+      {!choice && (
+        <p className="wa-help">推理强度同时跟随 DSH 默认。需要单独设置时，请先选择具体模型。</p>
+      )}
       <div className="wa-row">
         <Button icon="refresh" disabled={loading} onClick={refresh}>
           {loading ? '正在同步…' : '刷新模型列表'}

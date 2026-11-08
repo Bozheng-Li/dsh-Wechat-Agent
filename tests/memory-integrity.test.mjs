@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { StateStore, ConversationMemory, conversationMemoryTool } from '../lib/testing.js';
+import { StateStore, ConversationMemory } from '../lib/testing.js';
+import { conversationMemoryTool } from '../src/features/memory/tool.mjs';
 import { LongTermMemory } from '../src/features/memory/long-term-memory.mjs';
 
 const base = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../storage/tmp');

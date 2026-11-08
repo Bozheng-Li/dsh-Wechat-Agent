@@ -69,7 +69,11 @@ if (process.argv.includes('--pack')) {
     } else { fs.mkdirSync(path.dirname(to), { recursive: true }); fs.copyFileSync(from, to); }
   }
   const cache = path.join(root, 'storage/cache');
-  const python = path.join(cache, 'dsh-plugin-python-3.13.9-v1');
+  const requirements = fs.readFileSync(path.join(root, 'runtime/requirements.txt'));
+  const requirementsHash = hash(requirements);
+  // A changed dependency set gets a fresh runtime. Installing over an older
+  // cache would retain dependencies that were removed from requirements.
+  const python = path.join(cache, `dsh-plugin-python-3.13.9-${requirementsHash.slice(0, 16)}`);
   const zip = path.join(cache, 'python-3.13.9-embed-amd64.zip');
   const pythonHash = '91d828c2da3a029b41699e918674a0cb379c02cf20dab9c501306885f837402a';
   fs.mkdirSync(cache, { recursive: true });
@@ -85,7 +89,6 @@ if (process.argv.includes('--pack')) {
     }
   }
   if (hash(fs.readFileSync(zip)) !== pythonHash) throw new Error('Embedded Python hash mismatch');
-  const requirementsHash = hash(fs.readFileSync(path.join(root, 'runtime/requirements.txt')));
   let pythonReady; try { pythonReady = JSON.parse(fs.readFileSync(path.join(python, 'ready.json'), 'utf8')); } catch {}
   if (pythonReady?.requirementsHash !== requirementsHash) {
     const quote = value => `'${value.replaceAll("'", "''")}'`;
@@ -93,8 +96,7 @@ if (process.argv.includes('--pack')) {
     fs.writeFileSync(path.join(python, 'python313._pth'), 'python313.zip\n.\n..\nLib/site-packages\nimport site\n');
     run('python', ['-m', 'pip', 'install', '--upgrade', '--disable-pip-version-check', '--only-binary=:all:', '--target', path.join(python, 'Lib/site-packages'), '--python-version', '3.13', '--platform', 'win_amd64', '--implementation', 'cp', '--abi', 'cp313', '-r', path.join(root, 'runtime/requirements.txt')], root, 300000);
     run(path.join(python, 'python.exe'), ['-c', 'import cryptography,PIL,frida; assert cryptography.__version__=="50.0.0"; assert PIL.__version__=="12.3.0"; assert frida.__version__=="17.24.3"; print("Plugin Python verified")']);
-    run(path.join(python, 'python.exe'), ['-c', 'import pypdf; assert pypdf.__version__=="6.16.1"']);
-    fs.writeFileSync(path.join(python, 'ready.json'), JSON.stringify({ pythonHash, requirementsHash, dependencies: ['cryptography==50.0.0', 'Pillow==12.3.0', 'frida==17.24.3', 'pypdf==6.16.1'] }));
+    fs.writeFileSync(path.join(python, 'ready.json'), JSON.stringify({ pythonHash, requirementsHash, dependencies: requirements.toString('utf8').split(/\r?\n/).map(value => value.trim()).filter(value => value && !value.startsWith('#')) }));
   }
   // A new staging directory prevents stale/developer files entering the tarball.
   const stage = fs.mkdtempSync(path.join(cache, 'dsh-plugin-package-'));
@@ -115,7 +117,7 @@ if (process.argv.includes('--pack')) {
     if (licenseDirectory !== directory) licenses.push('NOTICE.md');
     for (const file of licenses) copy(path.join(licenseDirectory, file), path.join(stage, 'licenses', dependency.name.replaceAll('/', '__'), file));
   }
-  for (const file of ['native_login_worker.py', 'native_login_agent.js', 'native_engine.py', 'prepare_reply_image.py', 'read_knowledge_document.py', 'make_image_memory_thumbnail.py']) copy(path.join(root, 'runtime', file), path.join(stage, 'runtime', file));
+  for (const file of ['native_login_worker.py', 'native_login_agent.js', 'native_engine.py', 'prepare_reply_image.py', 'make_image_memory_thumbnail.py']) copy(path.join(root, 'runtime', file), path.join(stage, 'runtime', file));
   copy(path.join(root, 'runtime/wechat39/proto'), path.join(stage, 'runtime/wechat39/proto'));
   const engine = JSON.parse(fs.readFileSync(path.join(engineSource, 'manifest.json'), 'utf8'));
   for (const file of engine.files) {
@@ -128,7 +130,6 @@ if (process.argv.includes('--pack')) {
   fs.writeFileSync(path.join(stage, 'runtime/wechat39-engine/manifest.json'), JSON.stringify({ format: engine.format, coreVersion: engine.coreVersion, reportedVersion: engine.reportedVersion, files: engine.files }, null, 2));
   copy(python, path.join(stage, 'runtime/python'));
   fs.unlinkSync(path.join(stage, 'runtime/python/ready.json'));
-  run(path.join(stage, 'runtime/python/python.exe'), ['-B', '-c', 'import pypdf; assert pypdf.__version__=="6.16.1"']);
   run(path.join(stage, 'runtime/python/python.exe'), ['-B', path.join(stage, 'runtime/native_login_worker.py'), '--help'], stage);
   const outputFlag = process.argv.indexOf('--output-dir');
   if (outputFlag >= 0 && (!process.argv[outputFlag + 1] || process.argv[outputFlag + 1].startsWith('--'))) throw new Error('--output-dir requires a directory');

@@ -92,6 +92,141 @@ async function assertLayout(label) {
 function check(name) { report.assertions.push(name); }
 const peer = (state, id) => state.conversations.find(item => item.peerId === id);
 
+async function waitForReasoning(expectedValue = '') {
+  await waitFor(expected => {
+    const select = document.querySelector('#wa-reasoning-effort');
+    return isUsable(select) && select.value === expected && [...select.options].some(option => option.value === 'high' && !option.disabled);
+  }, [expectedValue]);
+}
+
+async function verifyModelReasoning() {
+  await waitFor(() => isUsable(document.querySelector('#wa-model')));
+  const originalDefault = (await fixture('state')).defaultModel;
+  assert.equal(await value('#wa-model'), '');
+  assert.equal(await evaluate(() => !!document.querySelector('#wa-reasoning-effort')), false);
+  assert((await fixture('modelCatalog', { mode: 'full' })).models.every(model => !model.reasoning), 'Shared catalog must omit reasoning to exercise detail discovery');
+  await input('#wa-model', JSON.stringify(['fixture', 'beta']));
+  await stateMatches(state => state.modelChoice?.model === 'beta' && !Object.hasOwn(state.modelChoice, 'reasoningEffort'));
+  await waitForReasoning();
+  assert.deepEqual(await evaluate(() => [...document.querySelector('#wa-reasoning-effort').options].map(option => option.value)), ['', 'low', 'high']);
+  assert.equal(await evaluate(() => document.querySelector('#wa-reasoning-effort').selectedOptions[0].textContent.trim()), '使用模型默认（高）');
+  await input('#wa-reasoning-effort', 'low');
+  await stateMatches(state => state.modelChoice?.reasoningEffort === 'low');
+  await waitFor(() => document.querySelector('#wa-reasoning-effort-help')?.textContent.includes('适合简单问答'));
+  await click('[data-testid="nav-overview"]'); await click('[data-testid="nav-settings"]'); await click('[data-testid="open-model"]');
+  await waitForReasoning('low');
+  await fixture('failNext', { endpoint: 'model.select' }); await input('#wa-reasoning-effort', 'high');
+  await waitFor(() => [...document.querySelectorAll('[role="alert"]')].some(element => element.textContent.includes('模拟保存失败')));
+  assert.equal((await fixture('state')).modelChoice.reasoningEffort, 'low');
+  assert.equal(await value('#wa-reasoning-effort'), 'low');
+  await input('#wa-reasoning-effort', 'high');
+  await stateMatches(state => state.modelChoice?.reasoningEffort === 'high');
+  await input('#wa-model', JSON.stringify(['fixture', 'alpha']));
+  await stateMatches(state => state.modelChoice?.model === 'alpha' && !Object.hasOwn(state.modelChoice, 'reasoningEffort'));
+  await waitFor(() => !document.querySelector('#wa-reasoning-effort'));
+  await input('#wa-model', JSON.stringify(['fixture', 'beta']));
+  await waitForReasoning();
+  assert(!Object.hasOwn((await fixture('state')).modelChoice, 'reasoningEffort'));
+  check('reasoning options are resolved for the selected model despite absent list metadata; explicit values save, survive navigation and failed saves, and clear when changing models');
+
+  await input('#wa-reasoning-effort', 'low');
+  await stateMatches(state => state.modelChoice?.reasoningEffort === 'low');
+  await fixture('modelCatalog', { mode: 'without-low' });
+  await waitFor(() => document.querySelector('#wa-reasoning-effort')?.getAttribute('aria-invalid') === 'true');
+  assert.equal(await value('#wa-reasoning-effort'), 'low');
+  assert(await evaluate(() => document.querySelector('#wa-reasoning-effort').selectedOptions[0].textContent.includes('暂不可用')));
+  assert.equal((await fixture('state')).modelChoice.reasoningEffort, 'low');
+  await input('#wa-reasoning-effort', 'high');
+  await stateMatches(state => state.modelChoice?.reasoningEffort === 'high');
+  await waitFor(() => !document.querySelector('#wa-reasoning-effort-warning'));
+  await fixture('modelCatalog', { mode: 'empty' });
+  await waitFor(() => document.querySelector('#wa-reasoning-effort')?.getAttribute('aria-invalid') === 'true');
+  assert.equal(await value('#wa-reasoning-effort'), 'high');
+  assert.deepEqual(await evaluate(() => [...document.querySelector('#wa-reasoning-effort').options].filter(option => !option.disabled).map(option => option.value)), ['']);
+  assert.equal((await fixture('state')).modelChoice.reasoningEffort, 'high');
+  await input('#wa-reasoning-effort', '');
+  await stateMatches(state => state.modelChoice?.model === 'beta' && !Object.hasOwn(state.modelChoice, 'reasoningEffort'));
+  await waitFor(() => !document.querySelector('#wa-reasoning-effort'));
+  await fixture('modelCatalog', { mode: 'full' });
+  await waitForReasoning();
+  await input('#wa-reasoning-effort', 'low');
+  await stateMatches(state => state.modelChoice?.reasoningEffort === 'low');
+  await input('#wa-model', '');
+  await stateMatches(state => state.modelChoice === null);
+  await waitFor(() => !document.querySelector('#wa-reasoning-effort'));
+  assert.deepEqual((await fixture('state')).defaultModel, originalDefault);
+  await input('#wa-model', JSON.stringify(['fixture', 'beta']));
+  await waitForReasoning();
+  check('catalog changes retain and mark unavailable saved efforts, allow correction or default reset, and never change the host default selection');
+  await verifyModelReasoningLookups();
+}
+
+async function verifyModelReasoningLookups() {
+  await input('#wa-reasoning-effort', 'low');
+  await stateMatches(state => state.modelChoice?.reasoningEffort === 'low');
+  const before = (await fixture('state')).modelChoice;
+  await fixture('modelInfoFailure', { enabled: true });
+  await clickText('刷新模型列表');
+  await waitFor(() => [...document.querySelectorAll('[role="alert"]')].some(el => el.textContent.includes('暂时无法读取所选模型的推理强度')));
+  assert.deepEqual((await fixture('state')).modelChoice, before);
+  assert.equal(await value('#wa-reasoning-effort'), 'low');
+  assert.equal(await evaluate(() => document.querySelector('#wa-reasoning-effort').getAttribute('aria-invalid')), null);
+  assert(!await evaluate(() => document.querySelector('.wa-workspace').textContent.includes('未为此模型提供可选推理强度')));
+  assert(!await evaluate(() => document.body.textContent.includes('SYNTHETIC_PRIVATE_MODEL_LOOKUP_FAILURE')));
+  await screenshot('model-reasoning-read-error-dark', 'dark', '#wa-reasoning-effort');
+  await fixture('modelInfoFailure', { enabled: false });
+  await clickText('重试读取强度');
+  await waitForReasoning('low');
+  check('detail lookup failures retain the saved effort, report a readable error, and retry without exposing private provider diagnostics');
+
+  await fixture('modelInfoFailure', { enabled: true });
+  await clickText('刷新模型列表');
+  await waitFor(() => [...document.querySelectorAll('button')].some(el => el.textContent.trim() === '重试读取强度'));
+  await input('#wa-reasoning-effort', '');
+  await stateMatches(state => state.modelChoice?.model === 'beta' && !Object.hasOwn(state.modelChoice, 'reasoningEffort'));
+  await fixture('modelInfoFailure', { enabled: false });
+  await clickText('重试读取强度');
+  await waitForReasoning();
+  check('resetting an effort to the model default remains available during a metadata outage');
+
+  await fixture('modelCatalog', { mode: 'expanded' });
+  await waitFor(() => document.querySelector('#wa-reasoning-effort')?.options.length === 6);
+  assert.deepEqual(await evaluate(() => [...document.querySelector('#wa-reasoning-effort').options].map(option => option.value)), ['', 'off', 'low', 'medium', 'high', 'adaptive/custom']);
+  assert.equal(await evaluate(() => document.querySelector('#wa-reasoning-effort').selectedOptions[0].textContent.trim()), '使用模型默认');
+  assert(await evaluate(() => document.querySelector('#wa-reasoning-effort-help').textContent.includes('DSH 未提供默认档位信息')));
+  await input('#wa-reasoning-effort', 'adaptive/custom');
+  await stateMatches(state => state.modelChoice?.reasoningEffort === 'adaptive/custom');
+  await input('#wa-reasoning-effort', 'medium');
+  await stateMatches(state => state.modelChoice?.reasoningEffort === 'medium');
+  await screenshot('model-reasoning-expanded-light', 'light', '#wa-reasoning-effort');
+  check('effort options follow live metadata including off, medium and provider-defined IDs; absent defaults are never invented');
+
+  await input('#wa-model', JSON.stringify(['fixture', 'alpha']));
+  await stateMatches(state => state.modelChoice?.model === 'alpha');
+  await waitFor(() => !document.querySelector('#wa-reasoning-effort'));
+  await evaluate(() => { window.__uiIgnoreModelInfoAbort = true; });
+  await fixture('holdNext', { endpoint: 'model.info' });
+  await input('#wa-model', JSON.stringify(['fixture', 'beta']));
+  await waitFor(async () => (await window.__uiFixture('heldRequest', { endpoint: 'model.info' })).started);
+  const pendingIndex = (await fixture('stats')).modelInfoRequests.length - 1;
+  await waitFor(() => document.querySelector('.wa-workspace').textContent.includes('正在向 DSH 查询该模型的推理强度'));
+  assert.equal(await evaluate(() => document.querySelector('#wa-reasoning-effort').disabled), true);
+  await input('#wa-model', JSON.stringify(['fixture', 'alpha']));
+  await stateMatches(state => state.modelChoice?.model === 'alpha');
+  await waitFor(() => !document.querySelector('#wa-reasoning-effort'));
+  assert(await evaluate(() => document.querySelector('.wa-workspace').textContent.includes('未为此模型提供可选推理强度')));
+  await fixture('releaseRequest', { endpoint: 'model.info' });
+  await waitFor(async index => (await window.__uiFixture('stats')).modelInfoRequests[index]?.completed, [pendingIndex]);
+  await evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)))));
+  assert.equal(await evaluate(() => !!document.querySelector('#wa-reasoning-effort')), false, 'Late beta capabilities must not appear for alpha even if the transport ignored abort');
+  assert.equal((await fixture('state')).modelChoice.model, 'alpha');
+  await evaluate(() => { window.__uiIgnoreModelInfoAbort = false; });
+  await fixture('modelCatalog', { mode: 'full' });
+  await input('#wa-model', JSON.stringify(['fixture', 'beta']));
+  await waitForReasoning();
+  check('loading capabilities remain distinct from unsupported models; switching models discards late results even when the transport ignores cancellation');
+}
+
 async function captureNaturalChat() {
   for (const [size, width, height] of [['desktop', 1280, 1100], ['narrow', 430, 900]]) {
     window.setContentSize(width, height);
@@ -183,6 +318,35 @@ async function verifyVisualDesign() {
       }
     }
     check('all seven pages and navigation fit 1024, 768, 430, 360 and 320px widths without horizontal overflow');
+    for (const width of [1280, 430]) {
+      window.setContentSize(width, 940);
+      for (const selectedTheme of ['light', 'dark']) {
+        for (const page of ['overview', 'authorization', 'records', 'memory', 'tasks', 'assets', 'settings', 'digests', 'diagnostics']) {
+          await click('[data-testid="nav-' + page + '"]');
+          await waitFor(page => document.querySelector('.wa-panel').dataset.page === page, [page]);
+          await assertLayout('studio ' + width + '/' + selectedTheme + '/' + page);
+          await screenshot('studio-' + page + '-' + width + '-' + selectedTheme, selectedTheme);
+          if (page === 'memory') {
+            for (const tab of ['conversation', 'global', 'images', 'review']) {
+              await click('[data-testid="memory-tab-' + tab + '"]');
+              await waitFor(tab => document.querySelector('#wa-memory-panel-' + tab)?.hidden === false, [tab]);
+              await assertLayout('studio memory ' + tab + '/' + width + '/' + selectedTheme);
+              await screenshot('studio-memory-' + tab + '-' + width + '-' + selectedTheme, selectedTheme);
+            }
+          }
+          if (page === 'settings') {
+            for (const detail of ['persona', 'identity', 'model', 'storage', 'changelog']) {
+              await click('[data-testid="open-' + detail + '"]');
+              await waitFor(detail => document.querySelector('.wa-panel').dataset.page === detail, [detail]);
+              await assertLayout('studio settings ' + detail + '/' + width + '/' + selectedTheme);
+              await screenshot('studio-settings-' + detail + '-' + width + '-' + selectedTheme, selectedTheme);
+              await click('[data-testid="nav-settings"]');
+            }
+          }
+        }
+      }
+    }
+    check('every navigation page, all four memory tabs and all five settings editors render at desktop and narrow widths in both themes');
   } finally { window.webContents.debugger.detach(); }
 }
 
@@ -508,6 +672,17 @@ app.whenReady().then(async () => {
     await window.loadURL(origin);
     await waitFor(() => typeof window.__uiFixture === 'function' && document.querySelector('.wa-account-name')?.textContent.includes('界面测试'));
     assert.equal((await fixture('state')).account.id, 'wxid_ui_fixture', 'Refuse to operate outside the synthetic fixture');
+    if (process.env.WECHAT_UI_TEST_MODEL_ONLY === '1') {
+      await click('[data-testid="nav-settings"]'); await click('[data-testid="open-model"]');
+      await verifyModelReasoning();
+      for (const [size, width, height] of [['desktop', 1280, 940], ['narrow', 430, 900]]) {
+        window.setContentSize(width, height);
+        await assertLayout(size + ' model reasoning');
+        await screenshot('model-reasoning-' + size + '-dark', 'dark', '.wa-model-card');
+        await screenshot('model-reasoning-' + size + '-light', 'light', '.wa-model-card');
+      }
+      assert.deepEqual(report.errors, [], 'Browser errors must be resolved'); report.ok = true; return;
+    }
     if (process.env.WECHAT_UI_TEST_NATURAL_ONLY === '1') {
       await click('[data-testid="nav-authorization"]');
       await clickText('设置', '.wa-session-row[data-peer-id="group_alpha@chatroom"]');
@@ -644,8 +819,7 @@ app.whenReady().then(async () => {
     check('loading can replace identity explicitly; failed save preserves rich draft; retry saves complete persona');
 
     await clickText('返回模型设置');
-    await input('#wa-model', JSON.stringify(['fixture', 'beta']));
-    await stateMatches(s => s.modelChoice?.model === 'beta');
+    await verifyModelReasoning();
     assert.equal(await value('#wa-max-tokens'), '', 'new configuration must show automatic model output');
     assert.equal(await evaluate(() => document.querySelector('#wa-max-tokens').hasAttribute('max')), false);
     await input('#wa-max-tokens', '131072'); await clickText('保存生成参数');
@@ -855,6 +1029,18 @@ app.whenReady().then(async () => {
     assert(await evaluate(() => document.querySelector('.wa-record[open] [data-testid="reply-style-review"]').textContent.includes('此标记不影响发送')));
     await screenshot('records-style-review-light', 'light');
     check('a pending style review remains a local note beside the original reply and true WeChat acknowledgement');
+    await fixture('recordMemoryContext', { recordKey: flagged.key, mode: 'always' });
+    await waitFor(() => document.querySelector('.wa-record[open] [data-testid="record-memory-context"]')?.textContent.includes('预载旧记忆 128 字'));
+    assert(await evaluate(() => document.querySelector('.wa-record[open] [data-testid="record-memory-context"]').textContent.includes('关联线索：喝茶、偏好')));
+    assert(await evaluate(() => document.querySelector('.wa-record[open] [data-testid="record-memory-context"]').textContent.includes('近期对话 4 条')));
+    await screenshot('records-memory-automatic-light', 'light');
+    await fixture('recordMemoryContext', { recordKey: flagged.key, mode: 'on-demand' });
+    await waitFor(() => document.querySelector('.wa-record[open] [data-testid="record-memory-context"]')?.textContent.includes('预载旧记忆 0 字'));
+    assert(await evaluate(() => document.querySelector('.wa-record[open] [data-testid="record-memory-context"]').textContent.includes('不代表已经调用查询')));
+    assert.equal(await evaluate(() => document.querySelector('.wa-record[open] .wa-record-reply').textContent), flagged.reply);
+    assert(await evaluate(() => document.querySelector('.wa-record[open]').textContent.includes('微信服务端已确认 1 条消息')));
+    await screenshot('records-memory-on-demand-dark', 'dark');
+    check('persisted memory context reports recent messages and bounded references, distinguishes preload from on-demand lookup, and preserves reply and acknowledgement');
     await click('.wa-records-peer[data-peer-id="group_beta@chatroom"]');
     await waitFor(() => document.querySelectorAll('.wa-record').length === 3);
     assert(await evaluate(() => Array.from(document.querySelectorAll('.wa-record-question')).every(el => el.textContent.includes('BETA'))));

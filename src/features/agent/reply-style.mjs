@@ -2,11 +2,73 @@
 export const REPLY_STYLE_REVIEW_NOTE = '表达待优化：回复可能含套话或机械格式，正文保留，此标记不影响发送。';
 export const NATURAL_REPLY_RULES = `默认表达习惯（只补足人设和明确要求未规定的部分）：
 直接接对方当前这句话，不从旁观者角度点评“这条消息该怎么回”。闲聊通常一到三句；对方需要解释、作品或长文时完整回答。本轮专用输出协议优先于表达习惯。
-用当前角色自己的语气表达观点，不默认热情附和，也不把认真回答变成客服口吻。对方只想闲聊时，接一个具体细节、玩笑或自己的看法，不机械安排建议。
+用当前角色自己的语气表达观点，不默认热情附和，也不把认真回答变成客服口吻。
 记得的人或事直接回答；不记得就简短说不知道。只有对方问依据或要求复盘时，才解释记忆和判断来源，不用取证式铺垫。
 格式服务于内容。默认使用微信容易阅读的正文；人设或当前请求需要古风、角色动作、诗歌分行、对白、标题、列表或代码时保留。不要为统一格式削掉角色特点或有效内容。
 少用无意义的问候、重复称呼、空泛夸奖和服务式收尾。缺少关键资料时问必要的问题；闲聊中的好奇与接话可以自然发生，不强迫每句带问题。
 完成请求后收在内容上，不额外赠送版本、菜单或说明过程；管理员明确要求的语言、署名、固定开头和结尾仍保留。`;
+
+// Placed after the complete persona: professional interests determine the
+// angle of a response, not whether an ordinary remark becomes a coaching job.
+export const CURRENT_TURN_REPLY_RULES = `本轮明确要求决定回应范围，人设决定其中的关注点、态度和语气。职业习惯、默认主动帮助和上一轮的做法不改换本轮目的；对方后来转为求助，再跟着转。出现迫近危险时仍给必要的安全帮助。
+表达时分清已知事实、试探理解和修辞想象。人物、地点、时间、数量、单位和现实经过按材料保留：角色用词不能改换计量单位，半小时仍是三十分钟，不能写成半个时辰；只有对方要求换算时才计算后换写。闲聊沿用原话中的数字，不自行增补时长或用未给出的数值做算术。未说明的去向、身体状态和决定理由保持未知，不从“拿走”“选了这个”等结果补出回家、饿极了或特定动机。需要理解原因而线索有限时，可以问感受，或依据已有线索提出留待确认的猜想。对方只说“拿到通知后发了会儿呆”，感受仍是未知；“也许”只是标明不确定，不能替一套凭空的心理解释提供依据。
+拟人、夸张、反话和角色意象可以自然使用，修辞承载的现实细节仍需有出处。例如把一件未用上的物品说成“来凑热闹的”是拟人，把它放进对方没提过的具体地点或交通工具，就是另添经历。创作任务中的虚构按创作要求展开，不当作对方真实发生的事。接下一句换自然切入，不复读口头禅；管理员要求固定复用的文字仍逐字保留。`;
+
+export const CONFIGURED_CONVERSATION_REPLY_TASK = `根据当前处境理解话意：对已经发生的小事自嘲、分享或开玩笑时，用角色的观察、感受或玩笑接住，停在话题里就是完整回应。自嘲式反问不等于征求改进办法，不顺手安排对方下次怎么做。当前确有需要处理的困难时认真帮助，知识解释、作品和步骤按实际需求完整交付。`;
+
+export const DEFAULT_CONVERSATION_REPLY_TASK = `${CONFIGURED_CONVERSATION_REPLY_TASK}
+下面只示范接话分寸，实际措辞和态度仍用当前角色：
+对方：“收拾了一小时书桌，转眼找不到笔了。我是不是给它藏得太好了。” → 接话：“这桌子收拾得，连笔都没认出自己的座位。” 说到这里就结束这次回应。
+对方接着说：“可是马上要考试了，备用笔也没墨。” → 帮忙：“先向旁边的人借一支能写的，免得耽误开考。桌上的等考完再找。” 这是新的实际困难，继续开玩笑反而错过了话意。
+对方：“早上好。” → “早上好呀。” 这一声招呼已经完整，不必另起话题或加俏皮尾句。`;
+
+export const EXPLICIT_CHAT_REPLY_TASK = `本轮对方明确选择闲聊。当前任务是陪对方把眼前这段话聊下去：用当前角色回应一个已经给出的细节、感受或笑点，对未来重复的设想也沿着这个话题接。回应本身就是本轮所需的结果，内容在这个话题内收住；不附带劝告、做法或“下次别这样”的指导，即使包装成关心、玩笑或角色口吻也不追加。前述事实、安全与管理员固定约定仍然生效。`;
+
+/** Read only explicit presentation preferences, not general conversational intent. */
+export function explicitConversationPreference(request) {
+  if (typeof request !== 'string') return undefined;
+  const direct = proseWithoutCode(request)
+    .split('\n').filter(line => !/^\s*>/u.test(line)).join('\n')
+    .replace(/“[^”]*”|「[^」]*」|『[^』]*』|‘[^’]*’|"[^"\n]*"|'[^'\n]*'/gu, ' ');
+  let preference, referenced = false;
+  // A clause boundary ends the scope of a negation. Later explicit choices
+  // supersede earlier ones; quoted choices never enter this scan.
+  for (const clause of direct.split(/[，,。！？!?；;\n]|但是|不过|而是|还是|可是|所以|因此|但|(?=请(?:给|帮|告诉))/u)) {
+    // A request for an explanation, transformation or authored work ends an
+    // earlier chat-only choice. Words inside that requested content are data.
+    if (/^\s*(?:(?:我|我们)?(?:现在|这次|本轮)?(?:想|要|需要)(?:请)?(?:你|您)?|(?:现在|这次|本轮)?(?:请)?(?:(?:给|帮|替)(?:我|我们))?)(?:先|再|具体|完整)?(?:解释|翻译|分析|改写|写|创作|讲解)/u.test(clause)) {
+      preference = 'help';
+      referenced = true;
+      continue;
+    }
+    if (/^\s*(?:(?:如果|假如|假设|比如|例如)|当(?:他|她|对方|有人|别人|我)(?:说|表示|想)|(?:他|她|对方|别人|有人|朋友|同事)(?:们)?(?:说|表示|想|只|就|不)|(?:请|帮我|请帮我)?(?:翻译|解释|分析|改写|引用|举例|例句|原话|台词))/u.test(clause)) {
+      referenced = true;
+      continue;
+    }
+    if (/^\s*(?:我(?:们)?|请|(?:现在|这次|本轮)?(?:给我|帮我|告诉我|别给我|不要给我))/u.test(clause)) referenced = false;
+    if (referenced) continue;
+    // An independent knowledge question starts a new task, including after an
+    // earlier chat-only preference. Reported/quoted questions were excluded above.
+    if (/(?:是什么|有什么区别|等于(?:多少|几)|怎么(?:计算|算|安装|配置)|如何(?:计算|证明|推导))[^。！？!?]*[？?]?$/u.test(clause)) {
+      preference = 'help';
+    }
+    const topics = /(?<chat>(?:只|就|光|单纯|随便)(?:是)?(?:想|要)?(?:先|暂时)?(?:(?:跟|和|与|陪)(?:我|你|我们|你们))?(?:随便)?(?:聊(?:聊|天|两句)?|闲聊|说说话)|(?:聊(?:聊|天|两句)?|闲聊|说说话)(?:就|便)(?:好|行|够了))|(?<advice>建议|方案|计划|安排|攻略|办法|方法|做法|步骤|道理)|(?<question>(?:怎么|如何)(?:做|修|改|选|实现|安排|处理|解决)|怎么办)|(?<request>(?:帮|替)(?:我|我们)(?:先|具体|直接|再)?(?:做|修|改|选|安排|处理|解决|实现|列|写))/gu;
+    let previousEnd = 0;
+    for (const topic of clause.matchAll(topics)) {
+      const prefix = clause.slice(previousEnd, topic.index);
+      const scopedPrefix = topic.groups.chat
+        ? prefix.match(/(?:(?:不是|并非|不想|不要|不愿|别|不)(?:再|光|只|一直|仅仅|现在)?)+\s*$/u)?.[0] || ''
+        : prefix;
+      const negatives = [...scopedPrefix.matchAll(/不是|并非|不(?:想|要|用|需要|听|看|求)|无需|别|不(?=\s*$)/gu)];
+      const negated = negatives.length % 2 === 1;
+      const directive = negatives.length > 0 || /想|要|需要|请|给|帮|告诉|听|看|列|讲|提|做|写|提供|来/u.test(prefix);
+      if (topic.groups.chat) preference = negated ? 'help' : 'chat';
+      else if (directive || topic.groups.question || topic.groups.request) preference = negated ? 'chat' : 'help';
+      previousEnd = topic.index + topic[0].length;
+    }
+  }
+  return preference;
+}
 
 const STRUCTURED_REQUEST =
   /分析|复盘|依据|总结|代码|步骤|清单|列表|逐条|分点|分条|分步|要点|大纲|选项|教程|表格|markdown|为什么这样判断|怎么(?:安装|配置|实现)|如何(?:安装|配置|实现)|\b(?:steps?|options?|checklist|lists?|code|tutorial|outline|table|markdown)\b/iu;

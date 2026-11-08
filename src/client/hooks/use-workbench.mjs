@@ -43,9 +43,8 @@ export function useWorkbench(rpc, accountId, endpoint, refreshKey = '') {
       current.current?.abort();
     };
   }, [accountId, endpoint, refreshKey]);
-  const execute = async (method, payload = {}, reload = true, { interrupt = false } = {}) => {
-    if (!accountId || (current.current && !interrupt)) return null;
-    if (interrupt) current.current?.abort();
+  const execute = async (method, payload = {}, reload = true) => {
+    if (!accountId || current.current) return null;
     const controller = new AbortController(),
       epoch = generation.current;
     const owns = () => live.current && generation.current === epoch && current.current === controller;

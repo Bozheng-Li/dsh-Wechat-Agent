@@ -6,6 +6,7 @@ import { Field, FormActions } from '../../components/form-ui.jsx';
 import { ModelPicker, VisionModelPicker } from './model-picker.jsx';
 
 export function ModelSettings({
+  connection,
   catalog,
   status,
   draft,
@@ -48,7 +49,7 @@ export function ModelSettings({
               <Glyph name="model" />
             </div>
           </div>
-          <ModelPicker catalog={catalog} status={status} blocked={blocked} busy={busy} onSelect={onSelect} />
+          <ModelPicker connection={connection} catalog={catalog} status={status} blocked={blocked} busy={busy} onSelect={onSelect} />
           <div className="wa-model-summary">
             <div>
               <h3>默认人设 · {status.persona?.name || '微信助手'}</h3>

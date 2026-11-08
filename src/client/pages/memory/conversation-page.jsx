@@ -102,7 +102,7 @@ export function MemoryPage({ rpc, status, rows, initialPeer }) {
         <div>
           <p className="wa-eyebrow">CONVERSATION MEMORY</p>
           <h1>会话记忆库</h1>
-          <p className="wa-muted">每个会话保存自己的记忆，回复时一起交给 Agent；达到窗口后自动压缩。</p>
+          <p className="wa-muted">每个会话保留自己的上下文。旧记忆按相关性或需要查阅，达到窗口后整理为有用的摘要。</p>
         </div>
       </header>
       <Alert text={error} />
@@ -119,8 +119,8 @@ export function MemoryPage({ rpc, status, rows, initialPeer }) {
         <section className="wa-memory-preferences-body">
           <h2>默认记忆窗口</h2>
           <p className="wa-help">
-            默认 10 万字符，可按模型容量自定义；字符数与模型 token
-            数并不相同。原文和压缩前快照独立保存；压缩不会修改聊天处理记录。
+            默认保存 10 万字符，达到窗口后整理旧内容；这不等于每轮发送给模型的上下文大小。
+            字符数与模型 token 数不同。原文和压缩前快照独立保存，聊天处理记录不会被改写。
           </p>
           <div className="wa-row wa-section-space wa-window-setting">
             <input

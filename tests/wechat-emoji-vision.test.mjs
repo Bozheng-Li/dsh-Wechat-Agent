@@ -6,6 +6,21 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { StateStore, ConversationMemory, observedImage, loadObservedMedia, completedText, ChannelError } from '../lib/testing.js';
 
+test('request quotas are distinguishable from connection failures and never expose provider diagnostics or partial output', () => {
+  const events = [
+    { type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: '不可发送的半截回复' }] } } },
+    { type: 'turn/end', data: { turn: 1, reason: { kind: 'error', error: { code: 'QUOTA', message: 'PRIVATE_PROVIDER_DIAGNOSTICS' } } } },
+  ];
+  assert.throws(() => completedText(events), error => {
+    assert(error instanceof ChannelError);
+    assert.equal(error.code, 'MODEL_INCOMPLETE');
+    assert.match(error.message, /请求额度或调用频率已达上限/);
+    assert.match(error.message, /未发送/);
+    assert.doesNotMatch(error.message, /连接|余额|PRIVATE_PROVIDER|半截回复/);
+    return true;
+  });
+});
+
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jO1cAAAAASUVORK5CYII=', 'base64');
 const md5 = createHash('md5').update(png).digest('hex');
 const scope = { accountId: 'emoji-owner', chatType: 'group', peerId: 'emoji-room@chatroom' };

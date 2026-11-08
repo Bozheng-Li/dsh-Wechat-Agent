@@ -43,7 +43,8 @@ test('internal memory extraction, compaction and image notes exclude conversatio
     for (const marker of ['GLOBAL_PRESENTATION', 'SIGNATURE_PRESENTATION', 'PERSONA_PRESENTATION']) assert(!prompt.includes(marker), marker);
   }
   assert(f.prompts[0].includes('STRICT_MEMORY_JSON'));
-  assert(f.prompts[1].includes('记忆整理器'));
+  assert(f.prompts[1].includes('供后续聊天参考的会话记忆'));
+  assert(f.prompts[1].includes('[NO_USEFUL_MEMORY]'));
   assert(f.prompts[2].includes('只描述实际图像内容'));
   assert(f.allowedTools.every(tools => tools.length === 0));
 });
@@ -57,7 +58,7 @@ test('ordinary chat and due agent tasks still inherit global identity and the co
     assert(prompt.includes('SIGNATURE_PRESENTATION'));
     assert(prompt.includes('ROOM_PRESENTATION'));
     assert(!prompt.includes('PERSONA_PRESENTATION'));
-    assert(prompt.indexOf('GLOBAL_PRESENTATION') > prompt.indexOf('ROOM_PRESENTATION'), 'the administrator contract is kept after the persona defaults');
+    assert(prompt.indexOf('GLOBAL_PRESENTATION') < prompt.indexOf('ROOM_PRESENTATION'), 'the current role follows global defaults while explicit fixed requirements remain effective');
     assert(prompt.includes('管理员明确要求的语言、署名、固定开头和结尾仍保留'));
     assert.equal(prompt.split('GLOBAL_PRESENTATION').length, 2, 'the current global contract is included exactly once');
   }

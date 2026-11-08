@@ -177,8 +177,8 @@ test('group memory includes different speakers while rooms, private peers and ac
   f.store.configure(f.state.account.id, settings);
   f.receive(f.message('/agent ALICE 其他账号')); await f.channel.whenIdle();
   assert.deepEqual(f.calls[0].history.map(entry => entry.text), ['BOB 的普通发言', 'ALICE 的普通发言']);
-  assert(f.calls[1].memory.includes('BOB 的普通发言') && f.calls[1].memory.includes('ALICE 的普通发言'));
-  assert(f.calls[2].memory.includes('BOB 的问题'));
+  assert(JSON.stringify(f.calls[1].history).includes('BOB 的普通发言') && JSON.stringify(f.calls[1].history).includes('ALICE 的普通发言'));
+  assert(JSON.stringify(f.calls[2].history).includes('BOB 的问题'));
   assert.equal(f.calls[2].sessionId, undefined, 'each turn receives the current memory instead of reusing stale host history');
   for (const index of [1, 3, 4, 5]) assert.equal(f.calls[index].sessionId, undefined);
   for (const index of [3, 4, 5]) assert.deepEqual(f.calls[index].history, []);

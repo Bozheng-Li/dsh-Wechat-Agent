@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import { VERSION, ChannelError, emptySettings, emptyPersona, publicError } from '../shared/contracts.mjs';
 
 import { AgentIdentity } from '../features/agent/identity.mjs';
+import { readModelInfo } from '../features/agent/models.mjs';
 import { describeWorkspace } from '../storage/workspace.mjs';
 import { WORKBENCH_ENDPOINTS } from '../features/workbench/service.mjs';
 
@@ -77,11 +78,19 @@ export function createPluginService({
       defaultModel = null;
     try {
       const selected = runner.selection();
-      model = { provider: selected.provider, model: selected.model };
+      model = {
+        provider: selected.provider,
+        model: selected.model,
+        ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }),
+      };
     } catch {}
     try {
       const selected = runner.defaultSelection();
-      defaultModel = { provider: selected.provider, model: selected.model };
+      defaultModel = {
+        provider: selected.provider,
+        model: selected.model,
+        ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }),
+      };
     } catch {}
     return {
       version: VERSION,
@@ -176,14 +185,20 @@ export function createPluginService({
     call(endpoint, payload = {}, signal) {
       assertLive(signal);
       if (endpoint === 'status') return status();
+      if (endpoint === 'model.info') {
+        const combined = AbortSignal.any([lifetime, ...(signal ? [signal] : [])]);
+        const pending = readModelInfo(ctx, payload.selection, combined);
+        featureOperations.add(pending);
+        void pending.finally(() => featureOperations.delete(pending)).catch(() => {});
+        return pending;
+      }
       if (relocating) throw new ChannelError('WORKSPACE_MOVING', '正在切换全局工作目录，请等待完成后重试');
       if (endpoint === 'changelog') return { markdown: fs.readFileSync(resourcePath('CHANGELOG.md'), 'utf8') };
       if (startupError) throw new ChannelError(startupError.code, startupError.message);
       if (endpoint === 'identity.get') return identity.view();
       if (WORKBENCH_ENDPOINTS.includes(endpoint)) {
         const combined = AbortSignal.any([lifetime, ...(signal ? [signal] : [])]);
-        // Knowledge mutations validate and commit before cancelling only their own
-        // in-flight queries. Ordinary replies keep running; failed edits cancel none.
+        // Workbench operations share the instance lifetime and caller cancellation.
         const operation = channel.workbench.call(endpoint, payload, combined);
         const pending = Promise.resolve(operation);
         featureOperations.add(pending);

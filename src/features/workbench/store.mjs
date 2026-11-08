@@ -65,8 +65,6 @@ export class WorkbenchStore {
         ownerStoreId: this.store.data.storeId,
         accountId,
         revision: 0,
-        libraries: [],
-        documents: [],
         summaries: [],
         recovery: [],
         diagnostics: null,
@@ -81,7 +79,7 @@ export class WorkbenchStore {
         value.accountId !== accountId ||
         !Number.isSafeInteger(value.revision) ||
         value.revision < 0 ||
-        !['libraries', 'documents', 'summaries', 'recovery'].every((key) => Array.isArray(value[key])) ||
+        !['summaries', 'recovery'].every((key) => Array.isArray(value[key])) ||
         !this.validate(value)
       )
         throw Error();

@@ -264,7 +264,7 @@ test('offline, disabled, removed and other-account groups cannot generate or rec
   f.status.online = false; f.channel.natural.tick(); await f.channel.whenIdle(); assert.equal(f.calls.length, 0);
   f.status.online = true; f.store.configure(owner.id, { ...f.store.settings(owner.id), enabled: false }); f.channel.natural.tick(); assert.equal(f.calls.length, 0);
   f.store.configure(owner.id, { ...f.store.settings(owner.id), enabled: true, groups: [otherRoom] }); f.channel.natural.tick(); assert.equal(f.calls.length, 0);
-  f.status.account = { id: 'wxid_unconfigured', nickname: '其他账号' }; f.channel.natural.tick(); assert.equal(f.calls.length, 0);
+  f.status.account = { id: 'wxid_synthetic_other_account', nickname: '其他账号' }; f.channel.natural.tick(); assert.equal(f.calls.length, 0);
   assert.equal(f.sent.length, 0);
 });
 
@@ -275,12 +275,13 @@ test('per-room timing, messages, persona and skip feedback stay isolated', async
   f.receive(f.message('PRIVATE_ONLY', { chatType: 'private', peerId: 'alice' })); await f.channel.whenIdle();
   await f.advance(5 * 60000);
   const first = f.calls.find(call => call.naturalDecision);
-  assert(first.memory.includes('A_ROOM_ONLY')); assert(!first.memory.includes('B_ROOM_ONLY')); assert(!first.memory.includes('PRIVATE_ONLY'));
+  const firstContext = JSON.stringify({ history: first.history, memory: first.memory });
+  assert(firstContext.includes('A_ROOM_ONLY')); assert(!firstContext.includes('B_ROOM_ONLY')); assert(!firstContext.includes('PRIVATE_ONLY'));
   assert.equal(first.persona.name, '小胖');
   assert.equal(f.store.naturalState(owner.id, 'group', otherRoom).unanswered, 0);
   await f.advance(5 * 60000);
   const second = f.calls.filter(call => call.naturalDecision)[1]; assert.equal(second.persona.name, '小圆');
-  assert.equal(second.naturalDecision.temperament, 'quiet'); assert(!second.memory.includes('A_ROOM_ONLY'));
+  assert.equal(second.naturalDecision.temperament, 'quiet'); assert(!JSON.stringify({ history: second.history, memory: second.memory }).includes('A_ROOM_ONLY'));
 });
 
 test('normal restart retains counts and feedback while an overdue timer starts fresh without catch-up', async t => {

@@ -77,6 +77,7 @@ export function IdentitySettings({ connection, blocked, onSave, onBack, backLabe
       <Back label={backLabel} onClick={onBack} />
       <PageHead
         title="全局身份"
+        eyebrow="SHARED PRINCIPLES"
         description="在 AGENT.md 中定义所有会话共同遵循的身份与行为，再由各会话的人设决定名字、性格和表达方式。"
       />
       {error && (
@@ -108,7 +109,8 @@ export function IdentitySettings({ connection, blocked, onSave, onBack, backLabe
         </div>
         <div className="wa-note-box">
           <p>每轮先读取全局身份，再应用当前会话的人设。</p>
-          <p>近期上下文帮助衔接当前对话；历史与长期记忆按会话的记忆读取设置提供，或在需要时查阅。</p>
+          <p>共同规则负责行为边界，当前人设负责性格与表达。避免在这里给所有角色规定同一种口头禅或固定回复格式。</p>
+          <p>近期对话用于接话；旧记忆按相关性读取，或在需要回忆往事、偏好、约定时查阅。</p>
         </div>
         <Field
           label="全局身份 Markdown"

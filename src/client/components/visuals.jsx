@@ -70,7 +70,7 @@ export function MotionControl({ motion }) {
   );
 }
 
-// Decorative geometry only. Connection and reply states remain in the account copy.
+// Decorative conversation notes only. Connection states remain in the account copy.
 export function ConversationSculpture() {
   return (
     <div className="wa-conversation-sculpture" aria-hidden="true" data-testid="conversation-sculpture">

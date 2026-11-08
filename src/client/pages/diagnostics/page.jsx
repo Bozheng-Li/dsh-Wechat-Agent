@@ -43,7 +43,7 @@ export function DiagnosticsPage({ rpc, status, onNavigate }) {
           </div>
           <div>
             <span>验证范围</span>
-            <strong>连接 · 模型 · 搜索 · 图片 · 资料</strong>
+            <strong>连接 · 模型 · 搜索 · 图片</strong>
           </div>
           <Tag state={state.data?.stale ? 'draft' : 'passed'}>
             {state.data?.stale ? '需要重新检查' : '五分钟内的检查结果'}
@@ -52,7 +52,7 @@ export function DiagnosticsPage({ rpc, status, onNavigate }) {
         <div className="wa-wb-grid">
           {(checks.length
             ? checks
-            : ['微信连接', '聊天模型', '联网搜索', '图片发送条件', '知识库索引'].map((title, index) => ({
+            : ['微信连接', '聊天模型', '联网搜索', '图片发送条件'].map((title, index) => ({
                 id: index,
                 title,
                 state: 'draft',

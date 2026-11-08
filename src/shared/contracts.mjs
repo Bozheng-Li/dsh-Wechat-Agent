@@ -294,7 +294,7 @@ export function validateModelChoice(value) {
     !value ||
     typeof value !== 'object' ||
     Array.isArray(value) ||
-    Object.keys(value).some((key) => !['provider', 'model'].includes(key)) ||
+    Object.keys(value).some((key) => !['provider', 'model', 'reasoningEffort'].includes(key)) ||
     ['provider', 'model'].some(
       (key) =>
         typeof value[key] !== 'string' ||
@@ -304,7 +304,17 @@ export function validateModelChoice(value) {
     )
   )
     throw new ChannelError('INVALID_MODEL', '请从 DSH 模型列表中选择，或选择跟随 DSH 默认模型');
-  return { provider: value.provider.trim(), model: value.model.trim() };
+  const effort = value.reasoningEffort;
+  if (
+    effort !== undefined &&
+    (typeof effort !== 'string' || !effort.trim() || effort.length > 300 || /[\u0000-\u001f\u007f]/.test(effort))
+  )
+    throw new ChannelError('INVALID_REASONING_EFFORT', '请从所选模型支持的推理强度中选择，或使用模型默认');
+  return {
+    provider: value.provider.trim(),
+    model: value.model.trim(),
+    ...(effort === undefined ? {} : { reasoningEffort: effort.trim() }),
+  };
 }
 
 export function validateSettings(input) {
@@ -383,7 +393,6 @@ export function messageText(message, account, { mode = 'default', persona = empt
     text = text.replace(/^@[^\r\n\u2005]{1,150}\u2005\s*/u, '').trim();
   }
   const command = /^\/agent(?:\s|$)/i.test(text);
-  const knowledgeCommand = /^\/(?:kb|知识库)(?:\s|[：:]|$)/iu.test(text);
   const nickname =
     mode !== 'default' && nicknameMentioned(text, [persona.name, ...(persona.aliases || []), account.nickname]);
   if (
@@ -391,14 +400,13 @@ export function messageText(message, account, { mode = 'default', persona = empt
     !['participate', 'natural'].includes(mode) &&
     !mentioned &&
     !command &&
-    !knowledgeCommand &&
     !nickname
   )
     return {
       reason:
         mode === 'nickname'
-          ? '群消息没有呼叫 Agent 名字，也未 @ 当前账号或使用 /agent、/kb'
-          : '群消息未 @ 当前账号，也未使用 /agent、/kb',
+          ? '群消息没有呼叫 Agent 名字，也未 @ 当前账号或使用 /agent'
+          : '群消息未 @ 当前账号，也未使用 /agent',
     };
   if (command) text = text.replace(/^\/agent\s*/i, '').trim();
   if (!text && visual) text = '当前只收到图片或表情消息，没有文字问题。仅在上下文确有看图需求时按需查看普通图片；否则简短接话，不主动分析。表情包不调用图像理解。';
@@ -408,7 +416,7 @@ export function messageText(message, account, { mode = 'default', persona = empt
     text,
     trigger: mentioned
       ? 'mention'
-      : command || knowledgeCommand
+      : command
         ? 'command'
         : nickname
           ? 'nickname'

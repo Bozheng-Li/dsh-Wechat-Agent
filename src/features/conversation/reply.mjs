@@ -1,10 +1,10 @@
 import { ChannelError, publicError } from '../../shared/contracts.mjs';
 import { identity } from '../../storage/keys.mjs';
-import { memoryText } from '../memory/conversation-memory.mjs';
+import { replyMemoryContext } from './reply-context.mjs';
+import { REMINDER_REACTIONS, reminderReaction, reminderReceipt } from './task-confirmation.mjs';
 import { simpleReminder } from '../tasks/scheduler.mjs';
 import { conversationTaskTool, mediaReplyTool } from '../tasks/conversation-tools.mjs';
 import { conversationMemoryTool } from '../memory/tool.mjs';
-import { knowledgeRequest } from '../knowledge/request.mjs';
 import { NATURAL_REASONS, parseNaturalDecision } from './natural-chat.mjs';
 import { imageMemoryTool } from '../memory/image-tool.mjs';
 import { conversationImageTool } from '../memory/image-request-tool.mjs';
@@ -20,9 +20,7 @@ export async function processReply(channel, item) {
     channel.timeoutMs
   );
   timeout.unref?.();
-  let replySignal = controller.signal,
-    knowledgeRevision,
-    knowledgeSnapshotId;
+  let replySignal = controller.signal;
   try {
     channel.assertAllowed(item);
     if (item.naturalDecision)
@@ -30,6 +28,7 @@ export async function processReply(channel, item) {
     item.externalSignal?.throwIfAborted();
     channel.store.update(record, { state: 'generating' });
     let result;
+    let confirmationTask;
     let selectedMedia;
     const imageReferences = [];
     let replySelectionApplied = false;
@@ -55,10 +54,6 @@ export async function processReply(channel, item) {
       channel.scheduler
         ? simpleReminder(item.text, [persona.name, ...persona.aliases], record.createdAt)
         : null;
-    const knowledge =
-      !item.ambient && !item.naturalDecision && !item.scheduled
-        ? knowledgeRequest(item.text, [persona.name, ...persona.aliases])
-        : { requested: false };
     if (item.scheduled?.kind === 'message' || item.scheduled?.retryText) {
       result = { text: item.scheduled.retryText || item.scheduled.content };
       if (item.scheduled.retryAsset)
@@ -71,41 +66,6 @@ export async function processReply(channel, item) {
           asset: channel.library.resolveAsset(record.accountId, item.scheduled.recovery.asset.id),
           caption: result.text,
         };
-    } else if (knowledge.requested) {
-      // Consent is derived only from this incoming text. Do not enrich images,
-      // compress history, or ask a model to decide whether retrieval is needed.
-      replySignal = channel.workbench.knowledge.operationSignal(record.accountId, controller.signal);
-      let usage = { queries: 0, modelCalls: 0, chunks: 0, chars: 0 };
-      if (!knowledge.query) result = { text: '请在命令后写具体问题，例如：/kb 退款期限。' };
-      else if (knowledge.query.length > 200) result = { text: '知识库问题最多 200 字，请缩短为具体问题或关键词。' };
-      else {
-        try {
-          const answer = await channel.workbench.answerKnowledge(
-            { accountId: record.accountId, query: knowledge.query, scope },
-            replySignal,
-            () => channel.assertAllowed(item),
-            {
-              group: record.chatType === 'group',
-              persona,
-              prompt: item.prompt,
-              speaker: { id: record.senderId, name: record.sender },
-              account: channel.transport.status().account,
-              adminNotes: channel.longMemory.adminNotes(record),
-              onSession: (id) => channel.store.update(record, { sessionId: id }),
-            }
-          );
-          result = { text: answer.answer };
-          knowledgeRevision = answer.revision;
-          knowledgeSnapshotId = answer.snapshotId;
-          usage = answer.usage;
-        } catch (error) {
-          if (!['KNOWLEDGE_DISABLED', 'KNOWLEDGE_QUERY_EMPTY', 'INVALID_INPUT'].includes(error?.code)) throw error;
-          result = { text: error.message };
-        }
-      }
-      channel.store.update(record, {
-        knowledge: { mode: 'explicit', query: knowledge.query.slice(0, 200), revision: knowledgeRevision, ...usage },
-      });
     } else if (reminder) {
       channel.assertAllowed(item);
       controller.signal.throwIfAborted();
@@ -116,12 +76,42 @@ export async function processReply(channel, item) {
           controller.signal
         );
       const task = channel.scheduler.create(reminder, scope);
+      confirmationTask = task;
       channel.store.update(record, { createdTaskIds: [task.id] });
-      const when =
-        channel.now() - record.createdAt < 5000
-          ? reminder.delayLabel + '后'
-          : new Date(task.nextRunAt).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
-      result = { text: `好，${when}提醒${reminder.audience === 'everyone' ? '大家' : '你'}。` };
+      const audience = reminder.audience === 'everyone' ? '大家' : '你';
+      result = { text: reminderReceipt(task, audience) };
+      // Do not spend a short countdown generating decorative wording. Longer
+      // confirmations use absolute deadlines, so latency cannot reset a timer.
+      if (task.nextRunAt - channel.now() > 20000) try {
+        let selected = false;
+        const selectReplyText = raw => {
+          selected = true;
+          return reminderReceipt(task, audience, reminderReaction(raw));
+        };
+        const reply = await channel.runner.run({
+          text: JSON.stringify({ request: item.text, savedTask: { id: task.id, content: task.content, when: new Date(task.nextRunAt).toISOString(),
+            audience: reminder.audience === 'everyone' ? '大家' : '你' } }),
+          mode: 'confirmation',
+          group: record.chatType === 'group',
+          persona,
+          prompt: item.prompt,
+          adminNotes: channel.longMemory.adminNotes(record),
+          speaker: { id: record.senderId, name: record.sender },
+          account: channel.transport.status().account,
+          tools: [],
+          systemOverride: `后台已保存提醒，时间、对象和事项由程序直接确认。只从以下短应答中选一个最符合当前角色口吻的词，逐字使用，不另造句：${JSON.stringify(REMINDER_REACTIONS)}。只输出 JSON 对象 {"reaction":"选中的短应答"}；固定首末行由后台加在完整确认正文，不加在 JSON 内。`,
+          selectReplyText,
+          signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15000)]),
+          onSession: (id) => channel.store.update(record, { sessionId: id }),
+        });
+        result = selected ? reply : { ...reply, text: selectReplyText(reply.text) };
+      } catch (error) {
+        controller.signal.throwIfAborted();
+        channel.assertAllowed(item);
+        channel.store.update(record, { taskConfirmationFallback: '角色确认暂时不可用，已使用保存结果' });
+      }
+      if (typeof channel.runner.polishReply === 'function')
+        result.text = await channel.runner.polishReply(result.text, item.text, controller.signal, persona, { prompt: item.prompt });
     } else {
       try {
         const history = channel.context(item);
@@ -136,7 +126,8 @@ export async function processReply(channel, item) {
           channel.store.update(record, { state: 'skipped', reason: '最近群聊没有可理解的文字，本轮未生成回复' });
           return;
         }
-        await channel.memory.compact(record, channel.runner, controller.signal);
+        // Compaction is background maintenance. A slow or failed summary must
+        // not prevent this message from receiving a bounded, current reply.
         let doc = item.memorySnapshot || channel.memory.snapshot(record);
         // Preserve the receive-time boundary while attaching descriptions that
         // were just learned from the exact same images.
@@ -155,7 +146,6 @@ export async function processReply(channel, item) {
           doc.entries.push(...preceding);
         }
         const lookupSnapshot = doc;
-        doc = await channel.memory.fitSnapshot(doc, channel.runner, controller.signal);
         const currentImage = currentMemory.entries.find((entry) => entry.key === record.key);
         const imageContext = currentImage?.attachments
           ?.map((image) =>
@@ -222,7 +212,7 @@ export async function processReply(channel, item) {
             )
           );
         const onDemand = item.config.memoryMode === 'on-demand';
-        if (onDemand && !item.naturalDecision)
+        if (!item.naturalDecision)
           tools.push(
             conversationMemoryTool(
               channel.memory,
@@ -283,13 +273,32 @@ export async function processReply(channel, item) {
             );
           }
         }
-        const longMemory =
-          onDemand && !item.naturalDecision ? '' : channel.longMemory.prompt(record, { includeGlobal: false });
+        const longMemory = onDemand ? '' : channel.longMemory.prompt(record, {
+          includeGlobal: false,
+          beforeTime: record.createdAt,
+        });
+        const context = replyMemoryContext({
+          snapshot: { ...doc, triggerKey: item.ambient ? undefined : record.key },
+          history,
+          text: item.text,
+          longTerm: longMemory,
+          onDemand,
+          ambient: item.ambient,
+          persona,
+        });
+        channel.store.update(record, { memoryContext: {
+          mode: context.mode,
+          recentMessages: context.history.length,
+          referenceChars: context.referenceChars,
+          ...(context.matchedTerms ? { matchedTerms: context.matchedTerms, omitted: context.omitted } : {}),
+        } });
         let decision;
         const chooseNatural = (raw) => {
           decision = parseNaturalDecision(raw);
           return decision.text;
         };
+        controller.signal.throwIfAborted();
+        channel.assertAllowed(item);
         result = await channel.runner.run({
           text: item.text + (imageContext ? `\n\n当前消息的图片资料（未查看的图片不能猜测）：\n${imageContext}` : ''),
           group: item.message.chatType === 'group',
@@ -297,8 +306,8 @@ export async function processReply(channel, item) {
           prompt: item.prompt,
           persona,
           adminNotes: channel.longMemory.adminNotes(record),
-          history,
-          memory: [longMemory, memoryText(doc)].filter(Boolean).join('\n\n'),
+          history: context.history,
+          memory: context.memory,
           tools,
           scheduledTask: item.scheduled,
           speaker: item.ambient && item.naturalDecision ? undefined : { id: record.senderId, name: record.sender },
@@ -390,8 +399,11 @@ export async function processReply(channel, item) {
       message.unshift(...targets.map((target) => ({ type: 'at', data: { qq: target.id, name: target.name } })));
     replySignal.throwIfAborted();
     channel.assertAllowed(item);
-    if (knowledgeRevision !== undefined)
-      channel.workbench.knowledge.assertRevision(record.accountId, knowledgeRevision, knowledgeSnapshotId);
+    if (confirmationTask) {
+      const currentTask = channel.scheduler.get(confirmationTask.id, scope, true);
+      if (!['pending', 'running'].includes(currentTask.state) || currentTask.revision !== confirmationTask.revision)
+        throw new ChannelError('TASK_CHANGED', '提醒已取消、暂停或修改，旧确认未发送');
+    }
     if (replyMedia) channel.library.resolveAsset(record.accountId, replyMedia.id);
     for (const reference of imageReferences) channel.imageMemory.assertReference(reference);
     // Commit intent before crossing the side-effect boundary.
@@ -440,7 +452,7 @@ export async function processReply(channel, item) {
       (record.sendAttempted && !['rejected', 'not-sent', 'partially-acknowledged'].includes(details.delivery));
     const cancelled =
       replySignal.aborted ||
-      ['AUTH_CHANGED', 'KNOWLEDGE_CHANGED', 'NATURAL_PAUSE', 'NATURAL_CONTEXT_CHANGED'].includes(error?.code);
+      ['AUTH_CHANGED', 'NATURAL_PAUSE', 'NATURAL_CONTEXT_CHANGED'].includes(error?.code);
     channel.store.update(record, {
       errorCode: typeof error?.code === 'string' ? error.code : 'REPLY_FAILED',
       delivery: details.delivery || (record.sendAttempted ? 'unknown' : 'not-sent'),

@@ -5,7 +5,9 @@ import { matches } from './helpers.mjs';
 
 export function scheduleMemoryMaintenance(channel, selector) {
   if (channel.closed || channel.fault) return;
-  channel.memoryPending.set(identity([selector.accountId, selector.chatType, selector.peerId]), selector);
+  const key = identity([selector.accountId, selector.chatType, selector.peerId]);
+  if (channel.memoryRetries?.get(key)?.nextAt > channel.now()) return;
+  channel.memoryPending.set(key, selector);
   queueMicrotask(() => channel.drain());
 }
 
@@ -23,7 +25,9 @@ export function checkMemoryPressure(channel) {
     if (channel.memoryRetries.get(peer.key)?.nextAt > channel.now()) continue;
     try {
       const doc = channel.memory.load(peer);
-      if (memoryText(doc).length >= channel.memory.windowChars(peer)) channel.memory.onPressure?.(peer);
+      const pendingFacts = typeof channel.runner.extractLongTermMemory === 'function' &&
+        !!channel.longMemory.state(accountId).pending[peer.key]?.entries.length;
+      if (memoryText(doc).length >= channel.memory.windowChars(peer) || pendingFacts) channel.memory.onPressure?.(peer);
       else {
         channel.memoryRetries.delete(peer.key);
         channel.memory.errors.delete(peer.key);
@@ -37,6 +41,7 @@ export function checkMemoryPressure(channel) {
 export async function maintainConversationMemory(channel, selector) {
   const status = channel.transport.status();
   if (
+    channel.memoryRetries.get(identity([selector.accountId, selector.chatType, selector.peerId]))?.nextAt > channel.now() ||
     !status.online ||
     status.account?.id !== selector.accountId ||
     !eligible(channel.store.settings(selector.accountId), selector) ||
@@ -49,6 +54,7 @@ export async function maintainConversationMemory(channel, selector) {
   const timeout = setTimeout(() => controller.abort(), channel.timeoutMs);
   timeout.unref?.();
   try {
+    let extractionFailure;
     try {
       await channel.memory.enrich(selector, channel.runner, channel.transport, controller.signal);
     } catch (error) {
@@ -61,8 +67,12 @@ export async function maintainConversationMemory(channel, selector) {
         await channel.longMemory.extract(selector, channel.runner, controller.signal);
     } catch (error) {
       if (error.code === 'STATE_WRITE_FAILED' || controller.signal.aborted) throw error;
+      extractionFailure = error;
     }
     await channel.memory.compact(selector, channel.runner, controller.signal);
+    // Window compaction can succeed while durable facts remain pending. Keep
+    // the failure visible and retry it even if the window is now below limit.
+    if (extractionFailure) throw extractionFailure;
     channel.memoryRetries.delete(identity([selector.accountId, selector.chatType, selector.peerId]));
   } catch (error) {
     if (error.code === 'STATE_WRITE_FAILED') throw error;

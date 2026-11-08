@@ -15,7 +15,7 @@ export function SettingsIndex({ status, onNavigate }) {
       icon: 'shield',
       title: '全局身份',
       text: '编辑所有会话共同遵循的身份与行为规则，每轮从 AGENT.md 读取。',
-      value: '全局身份 → 会话人设 → 相关记忆',
+      value: '共同边界 · 会话口吻 · 相关记忆',
     },
     {
       page: 'persona',
@@ -48,26 +48,54 @@ export function SettingsIndex({ status, onNavigate }) {
   ];
   return (
     <>
-      <PageHead title="设置" description="按职责配置你的 Agent，每个入口都有独立的设置页面。" />
-      <div className="wa-setting-grid">
-        {items.map((item) => (
-          <button
-            type="button"
-            className="wa-setting-link"
-            data-testid={'open-' + item.page}
-            key={item.page}
-            onClick={() => onNavigate(item.page, 'settings')}
-          >
-            <div className="wa-card-icon">
-              <Glyph name={item.icon} />
+      <PageHead
+        title="设置"
+        eyebrow="MAKE IT YOURS"
+        description="从性格到日常习惯，让这个 Agent 更像你期待的样子。"
+      />
+      <div className="wa-settings-sections">
+        {[
+          {
+            title: '表达与性格',
+            description: '决定它是谁，如何理解与回应。',
+            pages: ['persona', 'identity', 'model'],
+          },
+          {
+            title: '会话与工作空间',
+            description: '安排相处方式，管理数据与更新。',
+            pages: ['authorization', 'storage', 'changelog'],
+          },
+        ].map((group, index) => (
+          <section className="wa-settings-section" key={group.title}>
+            <header className="wa-settings-section-head">
+              <span aria-hidden="true">0{index + 1}</span>
+              <div>
+                <h2>{group.title}</h2>
+                <p>{group.description}</p>
+              </div>
+            </header>
+            <div className="wa-setting-grid">
+              {group.pages.map((page) => items.find((item) => item.page === page)).map((item) => (
+                <button
+                  type="button"
+                  className="wa-setting-link"
+                  data-testid={'open-' + item.page}
+                  key={item.page}
+                  onClick={() => onNavigate(item.page, 'settings')}
+                >
+                  <div className="wa-card-icon">
+                    <Glyph name={item.icon} />
+                  </div>
+                  <div>
+                    <h3>{item.title}</h3>
+                    <p>{item.text}</p>
+                    <span className="wa-setting-caption">{item.value}</span>
+                  </div>
+                  <Glyph name="arrow" className="wa-icon-small" />
+                </button>
+              ))}
             </div>
-            <div>
-              <h3>{item.title}</h3>
-              <p>{item.text}</p>
-              <span className="wa-setting-caption">{item.value}</span>
-            </div>
-            <Glyph name="arrow" className="wa-icon-small" />
-          </button>
+          </section>
         ))}
       </div>
     </>

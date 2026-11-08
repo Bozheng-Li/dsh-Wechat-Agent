@@ -77,6 +77,21 @@ test('necessary questions and explicitly requested choices or signatures do not 
   assert(!needsConversationalRewrite('你现在用的是哪个版本？', '这个软件打不开'));
 });
 
+test('figurative conversation, tentative understanding and requested fiction remain complete deliverable text', async () => {
+  const cases = [
+    ['带了一本书出门，却一页没看。', '这本书今日只管作陪，倒也清闲。', { name: '墨白', prompt: '用通顺白话带一点古意。' }],
+    ['我盯着邀请函，既期待又怕自己讲不好。', '听着像是期待和担心挤到一块儿了。最让你在意的是哪一段？', { name: '晚晴', prompt: '温柔，耐心倾听。' }],
+    ['只陪我接梗，不用给办法：逛了一圈又回到第一家。', '选品会开了一圈，第一家居然连任了。', { name: '阿策', prompt: '直接、干燥，喜欢取舍的笑点。' }],
+    ['写两句童话，让杯子坐火车去看海。', '杯子买了一张靠窗的票。到了海边，它才发现浪花比自己更会盛水。', { name: '墨白', prompt: '喜欢轻巧意象。' }],
+  ];
+  const f = agentFixture([]), runner = new DshAgentRunner(f.ctx);
+  for (const [request, reply, persona] of cases) {
+    assert.equal(needsConversationalRewrite(reply, request, { persona }), false);
+    assert.equal(await runner.polishReply(reply, request, new AbortController().signal, persona, {}), reply);
+  }
+  assert.equal(f.messages.length, 0, 'these boundaries add no repair model call');
+});
+
 test('code and quoted boilerplate stay intact, but an unsolicited prose footer is checked even for technical requests', () => {
   assert(!needsConversationalRewrite('```js\nconsole.log("有什么需要随时告诉我");\n```', '给我示例代码'));
   assert(!needsConversationalRewrite('“收到你的问题”会让开场显得像客服。', '分析这句话的语气'));
@@ -170,7 +185,7 @@ test('poetry review keeps the complete works and captured generation settings wi
     assert(prompt.indexOf('GLOBAL_CAPTURED') > prompt.indexOf('ACCOUNT_CAPTURED'), 'generation keeps the final global contract');
   }
   assert(f.scopes[0].prompt.indexOf(NATURAL_REPLY_RULES) < f.scopes[0].prompt.indexOf('MOBAI_CAPTURED'));
-  assert(f.scopes[0].prompt.indexOf('MOBAI_CAPTURED') < f.scopes[0].prompt.indexOf('ACCOUNT_CAPTURED'));
+  assert(f.scopes[0].prompt.indexOf('MOBAI_CAPTURED') > f.scopes[0].prompt.indexOf('GLOBAL_CAPTURED'));
   assert.deepEqual(f.scopes.map(scope => scope.definitions.map(tool => tool.name)), [['wechat_task']]);
   assert.equal(toolExecutions, 0);
   assert(f.requests.every(request => request.model === 'first' && request.maxTokens === 1536 && request.temperature === 0.2));

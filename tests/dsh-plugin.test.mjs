@@ -34,6 +34,7 @@ function fixture(t, options = {}) {
 }
 const assistant = (turn, content) => ({ type: 'assistant/message', data: { turn, message: { content } } });
 const end = (turn, kind = 'completed') => ({ type: 'turn/end', data: { turn, reason: { kind } } });
+const contextText = input => JSON.stringify({ history: input.history, memory: input.memory });
 
 test('settings validate account-bound private/group ID types without enabling defaults', () => {
   assert.deepEqual(validateSettings({ ...settings, privatePeers: ['alice', 'alice'] }), settings);
@@ -79,7 +80,7 @@ test('consecutive questions queue in order and each receives updated durable con
   gate.resolve(); await f.channel.whenIdle();
   assert.deepEqual(f.calls.map(c => c.text), ['问题 1', '问题 2', '问题 3']);
   assert.equal(f.calls[1].sessionId, undefined); assert.equal(f.calls[2].sessionId, undefined);
-  assert(f.calls[1].memory.includes('回答 问题 1')); assert(f.calls[2].memory.includes('回答 问题 2'));
+  assert(contextText(f.calls[1]).includes('回答 问题 1')); assert(contextText(f.calls[2]).includes('回答 问题 2'));
   assert.equal(f.sent.length, 3); assert(f.store.data.records.every(r => r.state === 'sent'));
 });
 
@@ -90,8 +91,8 @@ test('group speakers share room memory while private conversations remain separa
   await f.channel.whenIdle();
   assert.equal(f.calls[0].sessionId, undefined); assert.equal(f.calls[1].sessionId, undefined);
   assert.equal(f.calls[2].sessionId, undefined); assert.equal(f.calls[3].sessionId, undefined);
-  assert(f.calls[2].memory.includes('alice') && f.calls[2].memory.includes('bob'));
-  assert(!f.calls[3].memory.includes('bob'));
+  assert(contextText(f.calls[2]).includes('alice') && contextText(f.calls[2]).includes('bob'));
+  assert(!contextText(f.calls[3]).includes('bob'));
 });
 
 test('deduplication survives reload and uses account + peer + server message identity', async t => {

@@ -8,7 +8,7 @@ export interface AiConfig {
   privateMode: 'all' | 'prefix' | 'off'; prefix: string; privateAllowlist: string[];
   groupMention: boolean; groupKeywords: string[]; maxInboundAgeSeconds: number;
   assistantName: string; ownerWxid: string; readOnlyTools: boolean;
-  conversations: { accountId: string; peerId: string; mode: 'active' | 'paused' | 'human'; botId?: string; personaId?: string; knowledgeIds?: string[] }[];
+  conversations: { accountId: string; peerId: string; mode: 'active' | 'paused' | 'human'; botId?: string; personaId?: string }[];
 }
 export const AI_DEFAULTS: AiConfig = {
   enabled: false, baseUrl: 'https://api.openai.com/v1', apiKey: '', model: '', systemPrompt: '你是一个友善、准确、简洁的微信助手。',
@@ -40,8 +40,7 @@ export function validateAi(raw: unknown): AiConfig {
     const p = object(raw);
     if (typeof p.accountId !== 'string' || !/^[\w.:-]{1,256}$/.test(p.accountId) || typeof p.peerId !== 'string' || p.peerId.length > 256 || !/^[\w.:-]+(?:@chatroom)?$/.test(p.peerId) || !['active', 'paused', 'human'].includes(String(p.mode))) throw new BridgeError('ERR_AI_CONFIG', '会话策略无效');
     for (const key of ['botId', 'personaId'] as const) if (p[key] !== undefined && (typeof p[key] !== 'string' || p[key].length > 128)) throw new BridgeError('ERR_AI_CONFIG', '会话绑定 ID 无效');
-    if (p.knowledgeIds !== undefined && (!Array.isArray(p.knowledgeIds) || !p.knowledgeIds.every(id => typeof id === 'string' && id.length <= 128))) throw new BridgeError('ERR_AI_CONFIG', '会话知识库绑定无效');
-    return { accountId: p.accountId, peerId: p.peerId, mode: p.mode as 'active' | 'paused' | 'human', ...(p.botId ? { botId: p.botId as string } : {}), ...(p.personaId ? { personaId: p.personaId as string } : {}), ...(p.knowledgeIds ? { knowledgeIds: p.knowledgeIds as string[] } : {}) };
+    return { accountId: p.accountId, peerId: p.peerId, mode: p.mode as 'active' | 'paused' | 'human', ...(p.botId ? { botId: p.botId as string } : {}), ...(p.personaId ? { personaId: p.personaId as string } : {}) };
   });
   if (new Set(c.conversations.map(p => `${p.accountId}:${p.peerId}`)).size !== c.conversations.length) throw new BridgeError('ERR_AI_CONFIG', '会话策略不能重复');
   return c;

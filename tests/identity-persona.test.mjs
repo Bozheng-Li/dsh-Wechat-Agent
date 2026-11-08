@@ -54,8 +54,9 @@ test('on-demand memory keeps recent context and exposes only a scoped read tool'
   f.channel.longMemory.prompt = scope => scope.peerId === roomA ? 'A_ONLY：下周讨论摄影。' : 'B_ONLY：另一群的私事。';
   f.receive(roomA, '/agent 下周约好摄影。'); await f.channel.whenIdle();
   f.receive(roomA, '/agent 上次约好什么？'); await f.channel.whenIdle();
-  const request = f.calls[1]; assert(!request.memory.includes('A_ONLY')); assert(!request.memory.includes('B_ONLY'));
-  assert(request.memory.includes('下周约好摄影'));
+  const request = f.calls[1]; assert.equal(request.memory, undefined);
+  assert(request.history.some(entry => entry.text.includes('下周约好摄影')));
+  assert(!request.history.some(entry => /A_ONLY|B_ONLY/u.test(entry.text)));
   const read = request.tools.find(value => value.name === 'wechat_memory'); assert(read);
   const result = JSON.parse(await read.execute({ section: 'long-term', query: '摄影' }, { signal: new AbortController().signal }));
   assert(result.text.includes('A_ONLY')); assert(!result.text.includes('B_ONLY'));
@@ -103,8 +104,9 @@ test('on-demand lookups cannot introduce room messages received after a queued q
   assert(lookup.text.includes('之前约好周六去摄影'));
   assert(!lookup.text.includes('LATER_ONLY'), 'a read tool must respect the same receive boundary as the prompt');
   assert(!lookup.text.includes('LATER_QUESTION'));
-  assert(f.calls[2].memory.includes('LATER_ONLY'), 'later questions still receive the later context');
-  assert(f.calls[2].memory.includes('先回答这一问'), 'the preceding real reply remains available');
+  assert.equal(f.calls[2].memory, undefined);
+  assert(f.calls[2].history.some(entry => entry.text.includes('LATER_ONLY')), 'later questions still receive the later context');
+  assert(f.calls[2].history.some(entry => entry.text.includes('先回答这一问')), 'the preceding real reply remains available');
   assert.equal(f.sent.length, 3);
 });
 
@@ -118,15 +120,17 @@ test('identity reads accept UTF-8 with a BOM and reject malformed bytes before t
   assert.deepEqual(fs.readFileSync(identity.file), malformed, 'invalid bytes are retained for repair');
 });
 
-test('on-demand lookup recovers details omitted by turn compression and stops after memory is cleared', async t => {
+test('on-demand lookup recovers details outside recent context and stops after memory is cleared', async t => {
   const f = fixture(t), scope = { accountId: owner, chatType: 'group', peerId: roomA };
   f.receive(roomA, '周六阿禾负责带相机 ARCHIVE_DETAIL。' + '较长的活动背景资料。'.repeat(180));
   await f.channel.whenIdle();
-  f.store.setConversationSettings(owner, 'group', roomA, { ...f.store.conversationSettings(owner, 'group', roomA), memoryMode: 'on-demand', memoryWindowChars: 1000 });
-  f.channel.runner.summarize = async () => '本群讨论过周末活动。';
+  f.store.setConversationSettings(owner, 'group', roomA, { ...f.store.conversationSettings(owner, 'group', roomA), memoryMode: 'on-demand' });
+  for (let index = 0; index < 24; index++) f.receive(roomA, '后来的普通讨论 ' + index);
+  await f.channel.whenIdle();
   f.receive(roomA, '/agent 周六谁负责带相机？'); await f.channel.whenIdle();
   const request = f.calls[0], tool = request.tools.find(value => value.name === 'wechat_memory');
-  assert(!request.memory.includes('ARCHIVE_DETAIL'), 'the bounded prompt has lost this detail through compression');
+  assert.equal(request.memory, undefined, 'on-demand mode does not inject an old archive');
+  assert(!request.history.some(entry => entry.text.includes('ARCHIVE_DETAIL')), 'the older detail is outside the recent context budget');
   const lookup = JSON.parse(await tool.execute({ section: 'conversation', query: 'ARCHIVE_DETAIL' }, { signal: request.signal }));
   assert.equal(lookup.found, true); assert(lookup.text.includes('阿禾负责带相机'));
   f.channel.memory.clear(scope);

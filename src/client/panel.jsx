@@ -37,10 +37,9 @@ export function WechatPanel({ connection, catalog }) {
                 ],
               ],
               [
-                '资料与记忆',
+                '记忆与素材',
                 [
                   ['memory', 'folder', '记忆库'],
-                  ['knowledge', 'folder', '知识库'],
                   ['assets', 'image', '素材'],
                 ],
               ],

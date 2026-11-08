@@ -27,7 +27,7 @@ async function verifyContrast(page, theme) {
     const rgba = css => { ctx.clearRect(0, 0, 1, 1); ctx.fillStyle = css; ctx.fillRect(0, 0, 1, 1); return [...ctx.getImageData(0, 0, 1, 1).data].map((n, i) => i === 3 ? n / 255 : n); };
     const over = (fg, bg) => fg.slice(0, 3).map((value, i) => value * fg[3] + bg[i] * (1 - fg[3])).concat(1);
     const luminance = color => color.slice(0, 3).map(n => { n /= 255; return n <= .04045 ? n / 12.92 : ((n + .055) / 1.055) ** 2.4; }).reduce((sum, n, i) => sum + n * [.2126, .7152, .0722][i], 0);
-    return [...document.querySelectorAll('.wa-wb-card h2,.wa-wb-library-card h2,.wa-wb-card>p,.wa-wb-button:not(:disabled),.wa-wb-knowledge-flow span,.wa-wb-knowledge-flow strong,.wa-wb-knowledge-flow small,.wa-wb-switch:not(:disabled) strong,.wa-wb-index strong,.wa-wb-index p,.wa-wb-index small')].filter(el => {
+    return [...document.querySelectorAll('.wa-wb-card h2,.wa-wb-card>p,.wa-wb-button:not(:disabled)')].filter(el => {
       if (!el.getClientRects().length) return false;
       for (let parent = el; parent; parent = parent.parentElement) if (parent.tagName === 'DETAILS' && !parent.open && !parent.querySelector('summary')?.contains(el)) return false;
       return true;
@@ -58,48 +58,15 @@ app.whenReady().then(async () => {
     await window.loadURL(origin); await wait(() => document.querySelectorAll('.wa-nav-group').length === 3); await click('[data-testid="visual-motion-toggle"]');
     assert.equal(await evaluate(() => !!document.querySelector('[data-testid="nav-recovery"],[data-testid="nav-memory-review"]')), false);
     report.checks.push('three menu groups retain the workbench pages with recovery nested under records and review nested under memory');
-    await nav('knowledge'); await wait(() => document.querySelectorAll('.wa-wb-library-card').length === 2); await click('.wa-wb-library-card'); await capture('knowledge-light');
-    await input('[aria-label="知识库问题"]', '退款期限');
-    assert.equal(await evaluate(() => document.querySelector('[role=switch][aria-label="知识库查询总开关"]').getAttribute('aria-checked')), 'false');
-    assert.equal(await evaluate(() => [...document.querySelectorAll('button')].filter(el => ['检索原文', '依据资料回答'].includes(el.textContent)).every(el => el.disabled)), true);
-    const initialKnowledge = await fixtureSummary(); assert.equal(initialKnowledge.knowledge.index.state, 'pending'); assert.equal(initialKnowledge.simulated.modelRequests, 0);
-    await click('.wa-wb-document button'); await wait(() => !!document.querySelector('[aria-label="知识文档预览"]')); await click('button', '收起预览');
-    report.checks.push('query switch defaults off, blocks search and answer, and retains original-document reading without model usage');
-    await click('[aria-label="知识库查询总开关"]'); await wait(() => document.querySelector('[aria-label="知识库查询总开关"]').getAttribute('aria-checked') === 'true');
-    await click('button', '检索原文'); await wait(() => document.querySelector('.wa-wb-search-results')?.textContent.includes('七天'));
-    await wait(() => document.querySelector('[aria-label="本地索引状态"]')?.textContent.includes('已就绪'));
-    assert.equal((await fixtureSummary()).simulated.modelRequests, 0); report.checks.push('explicit retrieval lazily builds local FTS5 and returns cited text with no model usage');
-    await click('button', '重建本地索引'); await wait(() => document.querySelector('[role=status]')?.textContent.includes('已重建')); assert.equal((await fixtureSummary()).simulated.modelRequests, 0);
-    report.checks.push('manual index rebuild reports completion without enabling any model call');
-    await click('button', '依据资料回答'); await wait(() => document.querySelector('.wa-wb-search-results .wa-wb-paper')?.textContent.includes('来源'));
-    assert.equal((await fixtureSummary()).simulated.modelRequests, 1); report.checks.push('knowledge answer uses one bounded retrieval and one model request, with visible usage');
-    await input('[aria-label="知识库问题"]', 'missinglookupzxq'); await click('button', '依据资料回答'); await wait(() => document.querySelector('.wa-wb-search-results .wa-wb-paper')?.textContent.includes('没有'));
-    assert.equal((await fixtureSummary()).simulated.modelRequests, 1);
-    await click('[aria-label="知识库查询总开关"]'); await wait(() => document.querySelector('[aria-label="知识库查询总开关"]').getAttribute('aria-checked') === 'false'); assert.equal(await evaluate(() => !!document.querySelector('.wa-wb-search-results')), false);
-    await click('[aria-label="知识库查询总开关"]'); report.checks.push('no-match answer makes zero additional model requests and disabling clears prior results');
-    await evaluate(() => window.__uiFixture('hold-next-knowledge')); await input('[aria-label="知识库问题"]', '退款期限'); await click('button', '依据资料回答');
-    await wait(async () => (await window.__uiFixture('summary')).controls.heldKnowledge === 1);
-    assert.equal(await evaluate(() => document.querySelector('[aria-label="知识库查询总开关"]').disabled), false, 'the stop switch stays available during a paid query');
-    await click('[aria-label="知识库查询总开关"]'); await wait(() => document.querySelector('[aria-label="知识库查询总开关"]').getAttribute('aria-checked') === 'false');
-    await wait(async () => (await window.__uiFixture('summary')).controls.abortedKnowledge === 1);
-    await click('[aria-label="知识库查询总开关"]'); await evaluate(() => window.__uiFixture('hold-next-knowledge')); await click('button', '依据资料回答');
-    await wait(async () => (await window.__uiFixture('summary')).controls.heldKnowledge === 2);
-    await evaluate(() => window.__uiFixture('release-first-knowledge')); await wait(async () => (await window.__uiFixture('summary')).controls.heldKnowledge === 1);
-    assert.equal(await evaluate(() => [...document.querySelectorAll('button')].find(el => el.textContent === '依据资料回答').disabled), true, 'a late cancelled response cannot clear the next query busy state');
-    assert.equal(await evaluate(() => !!document.querySelector('.wa-wb-search-results')), false);
-    await evaluate(() => window.__uiFixture('release-first-knowledge')); await wait(() => document.querySelector('.wa-wb-search-results .wa-wb-paper')?.textContent.includes('来源'));
-    assert.equal(await evaluate(() => !!document.querySelector('.wa-alert.is-error')), false);
-    report.checks.push('switching off cancels an in-flight query and a late result cannot overwrite the next query or its busy state');
-    await click('button', '新建知识库'); await input('[aria-label="知识库名称"]', '验收知识库'); await input('[aria-label="知识库说明"]', '验证真实导入、检索与删除。'); await click('button', '保存知识库'); await wait(() => document.querySelectorAll('.wa-wb-library-card').length === 3);
-    await evaluate(() => { const file = new File(['退款测试口令是松石三号。'], '验收资料.md', { type: 'text/markdown' }), data = new DataTransfer(); data.items.add(file); const input = document.querySelector('[aria-label="导入知识文档"]'); input.files = data.files; input.dispatchEvent(new Event('change', { bubbles: true })); });
-    await wait(() => document.querySelector('.wa-wb-document-list')?.textContent.includes('验收资料.md')); assert.equal((await fixtureSummary()).knowledge.index.state, 'pending'); await input('[aria-label="知识库问题"]', '松石三号'); await click('button', '检索原文'); await wait(() => document.querySelector('.wa-wb-search-results')?.textContent.includes('松石三号')); report.checks.push('file upload saves original bytes and defers index rebuilding until explicit retrieval');
-    await click('.wa-wb-document button'); await wait(() => document.querySelector('[aria-label="知识文档预览"]')?.textContent.includes('松石三号')); await click('button', '收起预览'); await click('.wa-wb-document button', '删除'); await click('button', '确认删除'); await wait(() => !document.querySelector('.wa-wb-document-list')?.textContent.includes('验收资料.md')); report.checks.push('document preview and confirmed deletion operate on the durable knowledge store');
+    assert.equal(await evaluate(() => !!document.querySelector('[data-testid="nav-knowledge"],[data-testid="knowledge-page"]')), false);
+    assert.equal((await fixtureSummary()).simulated.modelRequests, 0);
+    report.checks.push('removed document-library page and navigation are absent; opening the workspace makes no model request');
     await nav('memory-review'); await wait(() => document.querySelector('.wa-wb-fact')?.textContent.includes('980')); await capture('memory-conflict-light'); await click('.wa-wb-tabs button', '有效记忆'); assert.equal(await evaluate(() => [...document.querySelectorAll('.wa-wb-fact')].some(el => el.textContent.includes('800') || el.textContent.includes('980'))), false); await click('.wa-wb-tabs button', '冲突待确认'); await click('button', '采用新事实'); await wait(() => !document.querySelector('.wa-wb-fact')); await click('.wa-wb-tabs button', '有效记忆'); await wait(() => document.querySelector('.wa-wb-fact')?.textContent.includes('980')); await click('button', '调整有效期'); const later = new Date(Date.now() + 86400000); const local = new Date(later - later.getTimezoneOffset() * 60000).toISOString().slice(0, 16); await input('[aria-label="记忆到期时间"]', local); await click('button', '保存有效期'); await wait(() => document.querySelector('.wa-wb-expiry')?.textContent.includes('有效至')); report.checks.push('conflict acceptance and expiry save update memory cards and effective facts');
     await nav('digests'); await click('button', '生成简报草稿'); await wait(() => document.querySelector('.wa-wb-todo')); await capture('digest-light'); await click('button', '确认待办'); await wait(() => document.querySelector('.wa-wb-todo')?.textContent.includes('已确认')); await click('button', '设为定时提醒'); await click('button', '确认创建提醒'); await wait(() => document.querySelector('.wa-wb-todo')?.textContent.includes('已创建提醒')); report.checks.push('group digest cites source messages and only creates a reminder after explicit todo confirmation');
     const savedReminder = (await fixtureSummary()).workbench.summaries[0].todos[0].reminder;
     assert.equal(savedReminder.state, 'pending');
     assert(await evaluate(at => { const shown = new Date(at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }); return document.querySelector('.wa-wb-todo').textContent.includes(shown) && document.querySelector('[role=status]').textContent.includes(shown); }, savedReminder.at));
-    await evaluate(() => window.__uiFixture('cancel-first-reminder')); await nav('knowledge'); await nav('digests');
+    await evaluate(() => window.__uiFixture('cancel-first-reminder')); await nav('overview'); await nav('digests');
     await wait(() => document.querySelector('.wa-wb-todo')?.textContent.includes('提醒已取消'));
     report.checks.push('digest cards show the persisted reminder time and reload its cancelled scheduler state');
     await nav('memory-review'); await click('.wa-wb-tabs button', '有效记忆');
@@ -130,7 +97,7 @@ app.whenReady().then(async () => {
     report.checks.push('single and category fact deletion update the same global memory, including historical facts, without redundant stored copies');
     await nav('digests');
     await nav('recovery'); await click('.wa-wb-list-item'); await click('button', '仅恢复文字'); await wait(() => document.querySelector('[aria-label="发送前预览"]')); assert.equal(await evaluate(() => Array.from(document.querySelectorAll('button')).find(el => el.textContent === '发送并核对回执').disabled), true); await capture('recovery-light'); await click('[aria-label="发送前预览"] input[type=checkbox]'); await click('button', '发送并核对回执'); await wait(() => document.querySelector('[role=status]')?.textContent.includes('微信服务端已确认')); report.checks.push('recovery preserves the original reply, requires confirmation and records a simulated server ACK');
-    await nav('diagnostics'); await click('button', '检查现在能做什么'); await wait(() => document.querySelectorAll('.wa-wb-capability').length === 5 && !Array.from(document.querySelectorAll('button')).find(el => el.textContent.includes('检查现在能做什么'))?.disabled); await capture('diagnostics-light'); report.checks.push('diagnostics render five actual probe results with separate image-readiness status');
+    await nav('diagnostics'); await click('button', '检查现在能做什么'); await wait(() => document.querySelectorAll('.wa-wb-capability').length === 4 && !Array.from(document.querySelectorAll('button')).find(el => el.textContent.includes('检查现在能做什么'))?.disabled); await capture('diagnostics-light'); report.checks.push('diagnostics render four actual probe results with separate image-readiness status');
     await nav('recovery');
     assert.equal(await evaluate(() => document.querySelector('[data-testid="nav-records"]').getAttribute('aria-current')), 'page');
     assert.equal(await evaluate(() => document.querySelectorAll('.wa-wb-recovery-row button button').length), 0);
@@ -171,15 +138,15 @@ app.whenReady().then(async () => {
     report.checks.push('record deletion preserves failed and uncertain archives; failed and stale confirmations keep their targets and never silently expand after refresh');
     for (const theme of ['dark', 'light']) {
       await evaluate(theme => { document.documentElement.dataset.theme = theme; document.documentElement.className = theme; }, theme);
-      for (const page of ['knowledge', 'memory-review', 'digests', 'recovery', 'diagnostics']) { await nav(page); if (page === 'knowledge') { await wait(() => document.querySelector('.wa-wb-library-card')); await click('.wa-wb-library-card'); } await capture(page + '-' + theme + '-desktop'); await verifyContrast(page, theme); }
+      for (const page of ['memory-review', 'digests', 'recovery', 'diagnostics']) { await nav(page); await capture(page + '-' + theme + '-desktop'); await verifyContrast(page, theme); }
     }
     report.checks.push('card headings, explanations and enabled buttons meet 4.5:1 contrast in both themes');
     await nav('digests'); await click('button', '删除简报'); await wait(() => document.querySelector('[aria-label="确认删除简报"]')?.textContent.includes('独立保留')); await click('button', '确认删除简报'); await wait(() => !document.querySelector('.wa-wb-digest')); report.checks.push('confirmed digest deletion removes its cards with a clear reminder-retention notice');
     for (const width of [768, 430, 320]) {
       window.setContentSize(width, 920);
-      for (const page of ['knowledge', 'memory-review', 'digests', 'recovery', 'diagnostics']) { await nav(page); await sleep(100); const overflow = await evaluate(() => [...document.querySelectorAll('.wa-panel,.wa-shell,.wa-workspace,.wa-wb-page')].filter(el => el.scrollWidth > el.clientWidth + 2).map(el => ({ className: el.className, width: el.clientWidth, scroll: el.scrollWidth }))); assert.deepEqual(overflow, [], page + ' must fit at ' + width); if (width === 320) await capture(page + '-320'); }
+      for (const page of ['memory-review', 'digests', 'recovery', 'diagnostics']) { await nav(page); await sleep(100); const overflow = await evaluate(() => [...document.querySelectorAll('.wa-panel,.wa-shell,.wa-workspace,.wa-wb-page')].filter(el => el.scrollWidth > el.clientWidth + 2).map(el => ({ className: el.className, width: el.clientWidth, scroll: el.scrollWidth }))); assert.deepEqual(overflow, [], page + ' must fit at ' + width); if (width === 320) await capture(page + '-320'); }
     }
-    report.checks.push('five pages fit 768, 430 and 320 pixel windows with reachable grouped navigation');
+    report.checks.push('four pages fit 768, 430 and 320 pixel windows with reachable grouped navigation');
     window.setContentSize(1280, 1000);
     await evaluate(() => window.__uiFixture('seed-blocked-natural'));
     await nav('authorization'); await click('.wa-session-row[data-peer-id="studio-team@chatroom"] button', '设置');

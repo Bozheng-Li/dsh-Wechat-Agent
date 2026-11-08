@@ -1,5 +1,6 @@
 import { visualCss } from './optical-theme.mjs';
 import { workbenchCss, workbenchTypeCss } from './workbench.mjs';
+import { studioCss } from './studio-theme.mjs';
 
 export const css =
   `
@@ -52,4 +53,5 @@ export const css =
 ` +
   visualCss +
   workbenchCss +
-  workbenchTypeCss;
+  workbenchTypeCss +
+  studioCss;

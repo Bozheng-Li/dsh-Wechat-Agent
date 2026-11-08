@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { deflateSync } from 'node:zlib';
 import { rolldown } from 'rolldown';
+import { uiFixtureModels } from '../tests/fixtures/model-catalog.mjs';
 import { StateStore, WechatChannel, TaskScheduler, AgentIdentity, VERSION, identity, createPluginService, rpcHandler, ChannelError, describeWorkspace, migrateWorkspaceRoot, SearchService, REPLY_STYLE_REVIEW_NOTE } from '../lib/testing.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -156,7 +157,18 @@ function appendFixtureRecord(peerId, queued = false) {
   return key;
 }
 const searchKeys = new Map();
-const ctx = { llm: { listProviders: () => [{ id: 'fixture' }], listModels: async () => [{ id: 'alpha' }, { id: 'beta' }] }, credentials: {
+let modelCatalog = structuredClone(uiFixtureModels);
+let modelInfoFailure = false;
+const modelInfoRequests = [];
+const listedModels = () => modelCatalog.map(({ reasoning, ...model }) => structuredClone(model));
+const ctx = { llm: {
+  listProviders: () => [{ id: 'fixture' }],
+  listModels: async () => listedModels(),
+  resolveModelInfo: async (provider, id) => {
+    if (modelInfoFailure) throw new Error('SYNTHETIC_PRIVATE_MODEL_LOOKUP_FAILURE');
+    return structuredClone(modelCatalog.find(model => provider === 'fixture' && model.id === id));
+  },
+}, credentials: {
   set: async (ref, value) => { searchKeys.set(ref, value); },
   resolve: async ref => searchKeys.has(ref) ? { value: searchKeys.get(ref) } : undefined,
   describe: async ref => ({ configured: searchKeys.has(ref) }),
@@ -193,14 +205,34 @@ const server = http.createServer(async (req, res) => {
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     if (req.url === '/fixture') {
       if (body.command === 'state') { json(res, service.call('status')); return; }
+      if (body.command === 'modelCatalog') {
+        if (!['full', 'without-low', 'empty', 'expanded'].includes(body.payload?.mode)) throw new Error('Invalid synthetic model catalog mode');
+        modelCatalog = structuredClone(uiFixtureModels);
+        const reasoning = modelCatalog.find(model => model.id === 'beta').reasoning;
+        if (['without-low', 'empty'].includes(body.payload.mode)) reasoning.efforts = reasoning.efforts.filter(effort => body.payload.mode === 'without-low' && effort.id !== 'low');
+        if (body.payload.mode === 'expanded') {
+          reasoning.efforts = [{ id: 'off', name: '关闭' }, reasoning.efforts[0], { id: 'medium', name: '中' }, reasoning.efforts[1], { id: 'adaptive/custom', name: '自适应' }];
+          delete reasoning.defaultEffort;
+        }
+        json(res, { models: listedModels() }); return;
+      }
+      if (body.command === 'modelInfoFailure') { modelInfoFailure = body.payload?.enabled === true; json(res, { ok: true }); return; }
       if (body.command === 'flagRecordStyle') {
         const record = store.data.records.find(value => value.key === body.payload?.recordKey && value.accountId === state.account?.id);
         if (!record || record.state !== 'sent') throw new Error('Choose a confirmed synthetic record');
         store.update(record, { replyStyleWarning: REPLY_STYLE_REVIEW_NOTE }); json(res, { key: record.key, reply: record.reply }); return;
       }
+      if (body.command === 'recordMemoryContext') {
+        const record = store.data.records.find(value => value.key === body.payload?.recordKey && value.accountId === state.account?.id);
+        if (!record || record.state !== 'sent' || !['always', 'on-demand'].includes(body.payload.mode)) throw new Error('Choose a confirmed synthetic record and memory mode');
+        const memoryContext = body.payload.mode === 'on-demand'
+          ? { mode: 'on-demand', recentMessages: 4, referenceChars: 0 }
+          : { mode: 'always', recentMessages: 4, referenceChars: 128, matchedTerms: ['喝茶', '偏好'], omitted: true };
+        store.update(record, { memoryContext }); json(res, { key: record.key, memoryContext }); return;
+      }
       if (body.command === 'searchFailure') { runner.searchStatus = () => ({ ok: false, provider: 'tavily', code: 'WEB_SEARCH_AUTH_FAILED', message: 'Tavily 搜索接口返回 HTTP 401，请检查 Tavily API Key 与访问权限。', checkedAt: new Date().toISOString() }); json(res, { ok: true }); return; }
       if (body.command === 'paths') { json(res, paths); return; }
-      if (body.command === 'stats') { json(res, { lastHistoryRequest, cancelRequests, tasks: scheduler.list(accountId).tasks, assetUploadRequests, assetAnalysisRequests, memberRequests, migrations, storageRequests, identityRequests, activeRoot, storeFile: store.file, identityPath: agentIdentity.file, preservedFiles }); return; }
+      if (body.command === 'stats') { json(res, { lastHistoryRequest, cancelRequests, tasks: scheduler.list(accountId).tasks, assetUploadRequests, assetAnalysisRequests, memberRequests, migrations, storageRequests, identityRequests, modelInfoRequests, activeRoot, storeFile: store.file, identityPath: agentIdentity.file, preservedFiles }); return; }
       if (body.command === 'identity') { json(res, agentIdentity.view()); return; }
       if (body.command === 'editIdentityExternally') {
         const markdown = body.payload?.markdown;
@@ -226,18 +258,27 @@ const server = http.createServer(async (req, res) => {
         if (channel.longMemory.view(accountId).sections.length) throw new Error('Long-memory source fixture already seeded');
         for (const [chatType, peerId, label] of [['group', 'group_alpha@chatroom', 'ALPHA_SOURCE_FACT'],
           ['group', 'group_beta@chatroom', 'BETA_SOURCE_FACT'], ['private', 'wxid_alice', 'PRIVATE_SOURCE_FACT']]) {
-          const scope = { accountId, chatType, peerId };
-          channel.longMemory.capture(scope, [{ key: 'ui-long-source-' + label, text: label + '：本会话的合成长事实。', direction: 'incoming',
+          const scope = { accountId, chatType, peerId }, factText = label + '：本会话的合成长事实。';
+          channel.longMemory.capture(scope, [{ key: 'ui-long-source-' + label, text: factText, direction: 'incoming',
             senderId: 'wxid_alice', senderName: 'Alice', time: Date.now() }]);
-          await channel.longMemory.extract(scope, { run: async () => ({ text: JSON.stringify({
-            facts: [{ text: label + '：本会话的合成长事实。', sources: ['s1'], replaces: [] }]
-          }) }) }, new AbortController().signal);
+          let added = false;
+          for (let attempt = 0; attempt < 10 && !added; attempt++) {
+            const result = await channel.longMemory.extract(scope, { run: async request => {
+              const sources = JSON.parse(request.text.split('\n\n本批原始消息：\n')[1].split('\n\n输出 ')[0]);
+              const reference = sources.find(source => source.direction === 'incoming' && source.text === factText);
+              return { text: JSON.stringify({ facts: reference ? [{ text: factText, sources: [reference.id],
+                evidence: [{ source: reference.id, quote: factText }], replaces: [] }] : [] }) };
+            } }, new AbortController().signal);
+            added = result.added === 1;
+            if (!added && !result.processed) break;
+          }
+          if (!added) throw new Error('Synthetic long-memory source was not extracted: ' + label);
         }
         json(res, channel.longMemory.view(accountId)); return;
       }
       if (body.command === 'localMemory') { json(res, await service.call('memory.get', { accountId, chatType: 'group', peerId: body.payload?.peerId || 'group_alpha@chatroom' })); return; }
       if (body.command === 'holdNext') {
-        if (body.payload?.endpoint !== 'memory.edit' || heldRequests.has(body.payload.endpoint)) throw new Error('Only one isolated memory save can be held');
+        if (!['memory.edit', 'model.info'].includes(body.payload?.endpoint) || heldRequests.has(body.payload.endpoint)) throw new Error('Only one isolated request per supported endpoint can be held');
         let release; const wait = new Promise(resolve => { release = resolve; });
         heldRequests.set(body.payload.endpoint, { wait, release, started: false, payload: null }); json(res, { ok: true }); return;
       }
@@ -305,6 +346,8 @@ const server = http.createServer(async (req, res) => {
     }
     if (body.endpoint === 'storage.save') storageRequests.push(structuredClone(body.payload));
     if (body.endpoint === 'identity.save') identityRequests.push(structuredClone(body.payload));
+    const modelInfoRequest = body.endpoint === 'model.info' ? { ...structuredClone(body.payload), completed: false } : null;
+    if (modelInfoRequest) modelInfoRequests.push(modelInfoRequest);
     if (failures.delete(body.endpoint)) { json(res, { ok: false, error: { code: 'FIXTURE_FAILURE', message: '界面测试：模拟保存失败，原设置保留' } }); return; }
     const held = heldRequests.get(body.endpoint);
     if (held && !held.started) { held.started = true; held.payload = structuredClone(body.payload); await held.wait; }
@@ -317,7 +360,9 @@ const server = http.createServer(async (req, res) => {
       if (relative.startsWith('..') || path.isAbsolute(relative)) throw new ChannelError('FIXTURE_PATH', '界面测试只能使用自己的临时目录');
     }
     const signal = new AbortController(); req.once('aborted', () => signal.abort());
-    json(res, await rpc(body.endpoint, body.payload, signal.signal, { principal: { kind: 'owner' } }));
+    const result = await rpc(body.endpoint, body.payload, signal.signal, { principal: { kind: 'owner' } });
+    if (modelInfoRequest) modelInfoRequest.completed = true;
+    json(res, result);
   } catch (error) { json(res, { message: error.message }, 400); }
 });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));

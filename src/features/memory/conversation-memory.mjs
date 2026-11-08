@@ -5,7 +5,7 @@ import { atomicJson } from '../../storage/atomic-json.ts';
 import { ChannelError } from '../../shared/contracts.mjs';
 import { conversationFolder, conversationKey, identity } from '../../storage/keys.mjs';
 import { ImageMemory } from './image-memory.mjs';
-import { DEFAULT_MEMORY_RETENTION_DAYS, defaultMemoryExpiry } from '../../shared/memory-policy.mjs';
+import { DEFAULT_MEMORY_RETENTION_DAYS, defaultMemoryExpiry, EMPTY_MEMORY_SUMMARY } from '../../shared/memory-policy.mjs';
 
 const clone = (value) => structuredClone(value);
 function read(file) {
@@ -30,6 +30,7 @@ export function memoryText(doc) {
     JSON.stringify({
       time: entry.time,
       speaker: entry.senderName || entry.senderId,
+      senderId: entry.senderId,
       direction: entry.direction,
       text: entry.text,
       ...(entry.attachments?.length
@@ -340,11 +341,11 @@ export class ConversationMemory {
       signal.throwIfAborted();
       const summary = await runner.summarize(material, target, signal, { attempt, observedChars, maximum });
       signal.throwIfAborted();
+      if (typeof summary === 'string' && summary.trim() === EMPTY_MEMORY_SUMMARY) return '';
       if (typeof summary === 'string' && summary.trim() && summary.trim().length <= maximum) return summary.trim();
       observedChars = typeof summary === 'string' ? summary.trim().length : 0;
-      // Shorten the candidate rather than asking for another full transcript.
-      // Raw sources remain untouched until a valid summary is committed.
-      if (typeof summary === 'string' && summary.trim()) material = summary;
+      // Every retry keeps the original evidence. Re-summarizing a bad candidate
+      // would amplify its omissions and inventions before committing them.
       target = Math.max(80, Math.floor(target * 0.5));
     }
     throw new ChannelError('MEMORY_COMPRESSION_FAILED', '模型摘要仍为空或过长，原文已保留，将自动重试压缩');
@@ -370,9 +371,9 @@ export class ConversationMemory {
       signal
     );
     signal.throwIfAborted();
-    if (typeof summary !== 'string' || !summary.trim() || summary.length > maximum)
+    if (typeof summary !== 'string' || summary.length > maximum)
       throw new ChannelError('MEMORY_COMPRESSION_FAILED', '记忆摘要不符合窗口要求，原文已保留');
-    return { ...doc, summary: summary.trim(), summaryExpiresAt: this.summaryExpiry(doc, covered), entries: keep };
+    return { ...doc, summary: summary.trim(), summaryExpiresAt: summary ? this.summaryExpiry(doc, covered) : null, entries: keep };
   }
   async enrich(input, runner, transport, signal, { retryFailed = false, imageRequest, executionSnapshot } = {}) {
     signal.throwIfAborted();
@@ -600,7 +601,7 @@ export class ConversationMemory {
           throw new ChannelError('MEMORY_CHANGED', '记忆已被修改，本次压缩未覆盖新内容');
         this.archive(doc, 'before-compaction');
         current.summary = summary.trim();
-        current.summaryExpiresAt = this.summaryExpiry(doc, covered);
+        current.summaryExpiresAt = summary ? this.summaryExpiry(doc, covered) : null;
         current.entries = current.entries.slice(covered.length);
         current.compressions++;
         current.lastCompactedAt = this.now();

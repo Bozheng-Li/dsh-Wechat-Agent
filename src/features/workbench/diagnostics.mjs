@@ -4,17 +4,11 @@ import { internal } from './helpers.mjs';
 
 export function runtimeFingerprint(workbench, accountId) {
   const state = workbench.channel.transport.status();
-  let selected = null,
-    knowledgeRevision;
+  let selected = null;
   try {
     const model = workbench.runner.selection?.();
     selected = model ? { provider: model.provider, model: model.model } : null;
   } catch {}
-  try {
-    knowledgeRevision = workbench.knowledge.disk.snapshot(accountId).revision;
-  } catch {
-    knowledgeRevision = 'unreadable';
-  }
   return digest([
     accountId,
     state.account?.id,
@@ -27,16 +21,20 @@ export function runtimeFingerprint(workbench, accountId) {
     workbench.store.modelChoice(),
     workbench.store.modelConfig(),
     workbench.runner.search?.status?.(),
-    knowledgeRevision,
   ]);
 }
 
 export function readDiagnostics(workbench, accountId) {
   const saved = workbench.disk.load(accountId).diagnostics;
+  const checks = saved?.checks?.filter((check) => ['wechat', 'model', 'search', 'image'].includes(check.id)) || [];
   return saved
     ? {
         ...saved,
-        stale: saved.fingerprint !== workbench.fingerprint(accountId) || workbench.now() - saved.finishedAt > 300000,
+        checks,
+        stale:
+          checks.length !== saved.checks?.length ||
+          saved.fingerprint !== workbench.fingerprint(accountId) ||
+          workbench.now() - saved.finishedAt > 300000,
       }
     : { checks: [], stale: true };
 }
@@ -50,9 +48,7 @@ export async function runDiagnostics(workbench, accountId, signal) {
     signal.throwIfAborted();
     workbench.current(accountId);
     const start = workbench.now();
-    const action = { wechat: 'overview', model: 'model', search: 'model', image: 'recovery', knowledge: 'knowledge' }[
-      id
-    ];
+    const action = { wechat: 'overview', model: 'model', search: 'model', image: 'recovery' }[id];
     try {
       const value = await run();
       checks.push({
@@ -125,17 +121,10 @@ export async function runDiagnostics(workbench, accountId, signal) {
       deliveryVerified: false,
     };
   });
-  await check('knowledge', '知识库索引', async () => {
-    const value = workbench.knowledge.list(accountId);
-    return {
-      detail: `${value.documents.length} 份原文可读取；${value.settings.enabled ? '仅明确请求时查询' : '查询已关闭'}；${value.index.state === 'ready' ? '本地全文索引已就绪' : '首次明确查询时建立本地索引'}`,
-      action: 'knowledge',
-    };
-  });
   signal.throwIfAborted();
   workbench.current(accountId);
   if (fingerprint !== workbench.fingerprint(accountId))
-    fail('DIAGNOSTICS_CHANGED', '检查期间连接、模型、搜索或资料发生变化，请重新检查');
+    fail('DIAGNOSTICS_CHANGED', '检查期间连接、模型或搜索设置发生变化，请重新检查');
   const data = workbench.disk.load(accountId);
   data.diagnostics = { startedAt, finishedAt: workbench.now(), fingerprint, checks };
   workbench.disk.save(data);

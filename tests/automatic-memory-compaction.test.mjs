@@ -24,7 +24,7 @@ function fixture(t, { prefill = false, offline = false } = {}) {
 
 test('window pressure automatically shrinks an overlong model candidate and commits an archived valid summary', async t => {
   const f = fixture(t); let calls = 0; const targets = [];
-  f.runner.summarize = async (material, target, signal, retry) => { calls++; targets.push(target); if (calls === 1) return '长摘要。'.repeat(200); assert.equal(retry.attempt, 1); assert(material.includes('长摘要')); return '阿禾喜欢猫，周五带咖啡。'; };
+  f.runner.summarize = async (material, target, signal, retry) => { calls++; targets.push(target); if (calls === 1) return '长摘要。'.repeat(200); assert.equal(retry.attempt, 1); assert(material.includes('阿禾喜欢猫')); assert(!material.includes('长摘要')); return '阿禾喜欢猫，周五带咖啡。'; };
   f.memory.append(f.scope, f.source('incoming-pressure')); await f.idle();
   const doc = f.memory.view(f.scope); assert.equal(calls, 2); assert(targets[1] < targets[0]); assert(doc.chars < 1000); assert(doc.compressions > 0); assert.equal(doc.error, null);
   assert(fs.readdirSync(path.join(path.dirname(doc.path), 'archive')).some(name => name.endsWith('before-compaction.json')));

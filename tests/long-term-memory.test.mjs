@@ -111,7 +111,7 @@ test('image descriptions recapture the same source key, while unchanged snapshot
   const understood = { ...picture, attachments: [{ type: 'image', resourceId: 'fixture', description: '图片上写着：每周五十点产品例会。' }] };
   assert.equal(f.memory.capture(f.scope, [understood]).pendingCount, 1);
   await f.memory.extract(f.scope, runner(request => { requests++; assert(request.text.includes('每周五十点')); return [fact('本群图片中的长期约定是每周五十点产品例会。')]; }), signal());
-  assert.equal(requests, 2); assert(f.memory.prompt(f.scope).includes('每周五十点'));
+  assert.equal(requests, 1); assert(f.memory.prompt(f.scope).includes('每周五十点'));
   assert.equal(f.memory.capture(f.scope, [understood]).pendingCount, 0);
 });
 

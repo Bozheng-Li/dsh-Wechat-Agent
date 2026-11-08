@@ -311,7 +311,7 @@ export function LongTermMemoryPage({ rpc, status, rows = [] }) {
               </Button>
             </div>
             <p className="wa-help wa-section-space">
-              默认有效期 30 天。全局备注每轮都会读取，角色关系与回答约定优先于默认人设；自动事实仍只用于来源会话。
+              默认有效期 30 天。全局备注用于所有会话的共同背景与明确约定，各会话人设负责具体口吻。普通聊天记忆不能覆盖这些设置；自动事实只在来源会话中按相关性使用。
               {doc.globalNotesExpiresAt
                 ? '全局备注' + (doc.globalNotesExpired ? '已于 ' : '有效至 ') + stamp(doc.globalNotesExpiresAt) + '。'
                 : ''}

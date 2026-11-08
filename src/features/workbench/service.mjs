@@ -18,10 +18,8 @@ import { reminderView } from './digests.mjs';
 import { listDigests } from './digests.mjs';
 import { generateDigest } from './digests.mjs';
 import { updateDigestTodo } from './digests.mjs';
-import { answerKnowledge } from './knowledge-answer.mjs';
 
 import { WorkbenchStore, fail } from './store.mjs';
-import { KnowledgeLibrary } from '../knowledge/library.mjs';
 
 export const WORKBENCH_ENDPOINTS = [
   'diagnostics.get',
@@ -36,18 +34,6 @@ export const WORKBENCH_ENDPOINTS = [
   'digest.todo',
   'digest.remind',
   'digest.delete',
-  'knowledge.list',
-  'knowledge.settings',
-  'knowledge.index.rebuild',
-  'knowledge.configure',
-  'knowledge.delete',
-  'knowledge.document',
-  'knowledge.search',
-  'knowledge.ask',
-  'knowledge.upload.start',
-  'knowledge.upload.chunk',
-  'knowledge.upload.finish',
-  'knowledge.upload.abort',
   'memory.fact.update',
   'memory.fact.resolve',
   'memory.fact.delete',
@@ -60,7 +46,6 @@ export class AgentWorkbench {
     this.runner = channel.runner;
     this.now = options.now || channel.now || Date.now;
     this.disk = new WorkbenchStore(this.store, 'workbench');
-    this.knowledge = new KnowledgeLibrary(this.store, { now: this.now, ...options });
     this.recoverySends = new Map();
   }
   current(accountId) {
@@ -137,9 +122,6 @@ export class AgentWorkbench {
   async todo(input, signal) {
     return updateDigestTodo(this, input, signal);
   }
-  async answerKnowledge(input, signal, assertAllowed = () => {}, replyContext) {
-    return answerKnowledge(this, input, signal, assertAllowed, replyContext);
-  }
   async call(endpoint, input, signal) {
     this.current(input.accountId);
     signal.throwIfAborted();
@@ -173,21 +155,6 @@ export class AgentWorkbench {
     if (endpoint === 'memory.fact.update') return this.channel.longMemory.updateFact(accountId, input);
     if (endpoint === 'memory.fact.resolve') return this.channel.longMemory.resolveFact(accountId, input);
     if (endpoint === 'memory.fact.delete') return this.channel.longMemory.deleteFacts(accountId, input);
-    if (endpoint === 'knowledge.list') return this.knowledge.list(accountId);
-    if (endpoint === 'knowledge.settings') return this.knowledge.configureSettings(accountId, input);
-    if (endpoint === 'knowledge.index.rebuild')
-      return this.knowledge.rebuild(accountId, signal, () => this.current(accountId));
-    if (endpoint === 'knowledge.configure') return this.knowledge.configure(accountId, input);
-    if (endpoint === 'knowledge.delete') return this.knowledge.remove(accountId, input);
-    if (endpoint === 'knowledge.document') return this.knowledge.view(accountId, input.documentId);
-    if (endpoint === 'knowledge.search')
-      return this.knowledge.search(accountId, input, signal, () => this.current(accountId));
-    if (endpoint === 'knowledge.upload.start') return this.knowledge.begin(accountId, input);
-    if (endpoint === 'knowledge.upload.chunk') return this.knowledge.append(accountId, input);
-    if (endpoint === 'knowledge.upload.finish')
-      return this.knowledge.finish(accountId, input.uploadId, signal, () => this.current(accountId));
-    if (endpoint === 'knowledge.upload.abort') return this.knowledge.abort(accountId, input.uploadId);
-    if (endpoint === 'knowledge.ask') return this.answerKnowledge(input, signal);
     fail('UNKNOWN_OPERATION', '不支持的工作台操作');
   }
 }

@@ -86,10 +86,11 @@ test('scheduled Agent reads durable facts and scoped memory, selects an image, a
   f.runner.run = async input => {
     f.calls.push(input);
     assert.equal(input.mode, 'scheduled');
-    assert(input.memory.includes('对花生过敏') && input.memory.includes('今天中午想吃面'));
+    const context = JSON.stringify({ history: input.history, memory: input.memory });
+    assert(context.includes('对花生过敏') && context.includes('今天中午想吃面'));
     assert(input.adminNotes.includes('重要提醒直接说明时间'));
-    assert(!input.memory.includes('秘密生日礼物'));
-    assert.deepEqual(input.tools.map(tool => tool.name), ['wechat_reply_media']);
+    assert(!context.includes('秘密生日礼物'));
+    assert.deepEqual(input.tools.map(tool => tool.name), ['wechat_reply_media', 'wechat_memory']);
     const tool = input.tools[0], execution = { signal: input.signal };
     const matches = JSON.parse(await tool.execute({ action: 'search', query: '吃饭' }, execution));
     assert.equal(matches.ok, true); assert.equal(matches.assets[0].id, assetId);
@@ -212,7 +213,7 @@ test('restart recovers only reminders interrupted before send and coalesces miss
 test('shared notes reach every on-demand reply without leaking automatic facts from another room', async t => {
   const f = await fixture(t, { seedLongMemory: true });
   f.store.setConversationSettings(owner, 'group', room, { ...f.store.conversationSettings(owner, 'group', room), memoryMode: 'on-demand' });
-  f.runner.run = async input => { f.calls.push(input); assert(input.adminNotes.includes('重要提醒')); assert(!input.memory.includes('秘密生日礼物')); return { text: '已核对。' }; };
+  f.runner.run = async input => { f.calls.push(input); assert(input.adminNotes.includes('重要提醒')); assert.equal(input.memory, undefined); assert(!JSON.stringify(input.history).includes('秘密生日礼物')); return { text: '已核对。' }; };
   f.receive('/agent 共同约定是什么？'); await f.channel.whenIdle(); assert.equal(f.calls.length, 1); assert.equal(f.sent.length, 1);
 });
 

@@ -2,27 +2,43 @@
  * memory and images are synthetic; no WeChat transport or chat history is used. */
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
+const { execFile } = require('node:child_process');
 const crypto = require('node:crypto');
 const assert = require('node:assert/strict');
 const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
 exports.runPersonaAudit = async ({ ctx, testing: T, outputRoot, signal, selection, onProgress }) => {
   const directory = path.join(outputRoot, 'persona'); fs.mkdirSync(directory, { recursive: true });
+  // Synthetic chats require no repository edits; do not make the host scan
+  // and dispose a Git working-tree snapshot for every audit-only session.
+  const syntheticWorkspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-active-prompt-audit-'));
+  const gitCheck = await new Promise(resolve => execFile('git', ['-C', syntheticWorkspaceRoot, 'rev-parse', '--show-toplevel'],
+    { windowsHide: true, timeout: 10000 }, (error, stdout, stderr) => resolve({ code: error?.code ?? 0, stderr })));
+  assert(gitCheck.code === 128 && /not a git repository/i.test(gitCheck.stderr), 'Synthetic audit workspace must be outside every Git repository');
   const report = { completed: false, automatedChecksPassed: false, reviewStatus: 'actual-output-review-pending',
-    actualWeChatMessages: 0, notificationsSent: 0, scenarios: [], failures: [], sessionIds: [], startedAt: new Date().toISOString() };
+    actualWeChatMessages: 0, notificationsSent: 0, syntheticWorkspaceRoot, syntheticWorkspaceIsGit: false, scenarios: [], failures: [], sessionIds: [], startedAt: new Date().toISOString() };
   const persist = () => fs.writeFileSync(path.join(directory, 'actual-prompt-responses.json'), JSON.stringify(report, null, 2), { mode: 0o600 });
   const origin = `${ctx.webServer.protocol}//127.0.0.1:${ctx.webServer.port}`;
   assert(/^https?:\/\/127\.0\.0\.1:\d+$/.test(origin));
   const login = await fetch(ctx.connection.authenticatedUrl(origin), { redirect: 'manual', signal }); assert.equal(login.status, 303);
   const cookie = login.headers.getSetCookie().map(value => value.split(';')[0]).join('; '); assert(cookie);
-  const read = async method => {
-    assert(['status', 'identity.get'].includes(method));
+  const read = async (method, payload = {}) => {
+    assert(['status', 'identity.get', 'memory.global.get'].includes(method));
     const response = await fetch(origin + '/wechat-agent/' + method, { method: 'POST', headers: { origin, cookie, 'content-type': 'application/json' }, signal,
-      body: JSON.stringify({ type: 'client-request', rpcId: 'prompt-config-audit-' + Date.now(), method, payload: {} }) });
+      body: JSON.stringify({ type: 'client-request', rpcId: 'prompt-config-audit-' + Date.now(), method, payload }) });
     assert(response.ok); const result = (await response.json()).result; assert(result?.ok, method + ': ' + (result?.error?.code || 'RPC_FAILED')); return result.value;
   };
   const status = await read('status'), identity = await read('identity.get');
-  const fingerprint = value => hash({ persona: value.persona, modelConfig: value.modelConfig, settings: value.settings,
+  const activeSelection = status.modelChoice || ctx.agentDefaultModel?.currentSelection();
+  assert(activeSelection?.provider && activeSelection?.model, 'The running Agent model selection is unavailable');
+  for (const key of ['provider', 'model', 'reasoningEffort']) assert.equal(selection?.[key], activeSelection[key], 'Audit selection must match the running Agent');
+  const notesDocument = await read('memory.global.get', { accountId: status.account.id });
+  const notes = notesDocument.globalNotesExpired ? '' : notesDocument.globalNotes;
+  assert.equal(typeof notes, 'string');
+  const notesBefore = hash(notes);
+  report.adminNotes = { hash: notesBefore, chars: notes.length, expired: notesDocument.globalNotesExpired, rawTextStored: false };
+  const fingerprint = value => hash({ persona: value.persona, modelChoice: value.modelChoice, modelConfig: value.modelConfig, settings: value.settings,
     conversations: value.conversations?.map(c => ({ key: c.key, config: c.config })).sort((a, b) => a.key.localeCompare(b.key)) });
   const before = fingerprint(status), identityBefore = hash(identity.markdown);
   const configurations = new Map();
@@ -36,20 +52,48 @@ exports.runPersonaAudit = async ({ ctx, testing: T, outputRoot, signal, selectio
     accountPromptHash: hash(status.settings?.prompt || ''), accountPromptChars: (status.settings?.prompt || '').length,
     conversations: status.conversations?.length || 0, distinctPersonas: configurations.size,
     personas: [...configurations.values()].map(c => ({ hash: c.id, chars: T.personaText(c.persona).length, sourceCount: c.sources.length, modes: [...c.modes] })) };
-  report.model = { provider: selection.provider, model: selection.model };
+  report.model = structuredClone(activeSelection);
+  report.generationSettings = { temperature: status.modelConfig.temperature, maxTokens: status.modelConfig.maxTokens };
+  report.toolScope = 'Saved configuration and non-expired owner notes; synthetic dialogue and supplied memory; web disabled';
   const cases = [];
   const testCase = (id, run) => cases.push({ id, run });
   for (const config of configurations.values()) {
     const base = { persona: config.persona, identityMarkdown: identity.markdown, modelConfig: { ...status.modelConfig, webSearch: false },
-      workspacePath: path.join(directory, 'synthetic-workspaces', config.id) };
+      workspacePath: path.join(syntheticWorkspaceRoot, config.id) };
     fs.mkdirSync(base.workspacePath, { recursive: true });
     const invoke = async (item, request) => {
       const runner = new T.DshAgentRunner(ctx, () => report.model, () => base);
-      item.calls ??= []; const call = { mode: request.mode || 'default' }; item.calls.push(call);
-      const result = await runner.run({ ...request, prompt: status.settings?.prompt || '', tools: [],
+      item.calls ??= []; const call = { mode: request.mode || 'default', question: request.text, startedAt: new Date().toISOString() }; item.calls.push(call);
+      const result = await runner.run({ ...request, adminNotes: notes, prompt: status.settings?.prompt || '', tools: [],
         signal: AbortSignal.any([signal, AbortSignal.timeout(90000)]), onSession: id => { call.sessionId = id; report.sessionIds.push(id); } });
-      call.text = result.text; call.replyStyleWarning = result.replyStyleWarning; item.text = result.text; return result;
+      call.text = result.text; call.replyStyleWarning = result.replyStyleWarning; call.finishedAt = new Date().toISOString(); item.text = result.text; return result;
     };
+    testCase('active:sharing:' + config.id.slice(0, 12), async item => {
+      Object.assign(item, { manualReview: 'pending', expectedVoice: config.persona.style,
+        expectedInteraction: config.persona.personality,
+        reviewFocus: '普通生活分享和连续追问都自然接当前细节，不追加改善方案、不擅自推断心理或健康状态；保留实际已保存人设的态度，避免复读口头禅。' });
+      const text = '下楼倒垃圾，回来顺手拿了快递，垃圾倒是原封不动拎回来了。今天这记性也太有喜剧天分了。';
+      const speaker = { id: 'synthetic-visitor', name: '合成访客' }, account = { id: 'synthetic-owner', nickname: '合成账号' };
+      const first = await invoke(item, { text, group: config.group, speaker, account,
+        mode: config.modes.has('nickname') ? 'nickname' : 'default' });
+      const now = Date.now() / 1000;
+      const second = await invoke(item, { text: '对，快递拿了，垃圾还在手里。现在想起来还是想笑。', group: config.group, speaker, account,
+        mode: config.modes.has('nickname') ? 'nickname' : 'default', history: [
+          { time: now - 3, direction: 'incoming', senderId: speaker.id, senderName: speaker.name, text },
+          { time: now - 1, direction: 'outgoing', senderId: account.id, senderName: config.persona.name, text: first.text },
+        ] });
+      assert(first.text.trim() && second.text.trim());
+      assert.notEqual(first.text, second.text, 'the follow-up repeated the first answer');
+      for (const reply of [first.text, second.text]) assert(!/(?:^|\n)\s*(?:\d+[.)、]|[-*]\s)/u.test(reply), 'an ordinary life story became a plan');
+      item.text = first.text + '\n\n[连续追问]\n' + second.text;
+    });
+    testCase('active:greeting:' + config.id.slice(0, 12), async item => {
+      Object.assign(item, { manualReview: 'pending', expectedVoice: config.persona.style,
+        reviewFocus: '问候保持人设，不捏造迟起、作息、久别、冷落或共同经历。' });
+      await invoke(item, { text: '早上好呀。', group: config.group,
+        speaker: { id: 'synthetic-visitor', name: '合成访客' }, account: { id: 'synthetic-owner', nickname: '合成账号' } });
+      assert(!/才(?:想起|来|起床)|终于(?:想起|来|起床)|好久(?:没|不见)|(?:不|没)理我/u.test(item.text), 'a greeting invented a neglected relationship or routine');
+    });
     testCase('active:name:' + config.id.slice(0, 12), async item => {
       await invoke(item, { text: '请说出当前会话配置的完整名字，逐字保留不要简称，再回答 2 加 3 等于几。', group: config.group,
         mode: config.modes.has('nickname') ? 'nickname' : 'default',
@@ -75,31 +119,25 @@ exports.runPersonaAudit = async ({ ctx, testing: T, outputRoot, signal, selectio
       assert(item.text.includes('柚子') && item.text.includes('苹果')); assert(!item.text.includes(config.persona.name));
     });
   }
-  // Probe the exact FTS transaction in the running Electron process, retaining
-  // only runtime/SQL errors from this isolated file, never owner prompt text.
-  const sqliteProbe = { versions: { node: process.versions.node, electron: process.versions.electron, sqlite: process.versions.sqlite } };
-  let db;
-  try {
-    const { DatabaseSync } = require('node:sqlite'); db = new DatabaseSync(path.join(directory, 'synthetic-fts-probe.sqlite'));
-    db.exec("PRAGMA synchronous = OFF; PRAGMA journal_mode = MEMORY; PRAGMA max_page_count = 65536; CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT; CREATE VIRTUAL TABLE lookup USING fts5(title_tokens, body_tokens, document_id UNINDEXED, library_id UNINDEXED, chunk_id UNINDEXED, label UNINDEXED, title UNINDEXED, text UNINDEXED, tokenize='porter unicode61 remove_diacritics 2'); BEGIN IMMEDIATE;");
-    db.prepare('INSERT INTO lookup(title_tokens, body_tokens, document_id, library_id, chunk_id, label, title, text) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run('政策', '退款 期限 七天', 'doc', 'lib', 'chunk', 'label', '政策', '退款期限七天');
-    db.prepare('INSERT INTO metadata(key, value) VALUES (?, ?)').run('identity', '{}'); db.exec('COMMIT;'); sqliteProbe.ok = true;
-  } catch (error) { sqliteProbe.error = { code: error.code, message: error.message }; }
-  finally { db?.close(); }
-  report.sqliteProbe = sqliteProbe;
+  const selectedCases = exports.casePrefixes ? cases.filter(test => exports.casePrefixes.some(prefix => test.id.startsWith(prefix))) : cases;
   let next = 0;
   const worker = async () => {
-    while (next < cases.length) {
-      const scenario = cases[next++], item = { id: scenario.id, calls: [], automatedChecksPassed: false, startedAt: new Date().toISOString() };
+    while (next < selectedCases.length) {
+      const scenario = selectedCases[next++], item = { id: scenario.id, calls: [], automatedChecksPassed: false, startedAt: new Date().toISOString() };
       try { signal.throwIfAborted(); await scenario.run(item); item.automatedChecksPassed = true; }
       catch (error) { item.error = error.name === 'AssertionError' || error instanceof T.ChannelError ? error.message : error.code || error.name; report.failures.push({ id: item.id, error: item.error }); }
       item.finishedAt = new Date().toISOString(); report.scenarios.push(item); persist();
-      onProgress({ phase: 'active-prompt-audit', scenario: item.id, completed: report.scenarios.length, total: cases.length, passed: item.automatedChecksPassed });
+      onProgress({ phase: 'active-prompt-audit', scenario: item.id, completed: report.scenarios.length, total: selectedCases.length, passed: item.automatedChecksPassed });
     }
   };
   await Promise.all([worker(), worker()]);
   const after = await read('status'), identityAfter = await read('identity.get');
   assert.equal(fingerprint(after), before, 'owner configuration changed during prompt audit'); assert.equal(hash(identityAfter.markdown), identityBefore);
-  report.ownerConfigurationUnchanged = true; report.completed = true; report.automatedChecksPassed = !report.failures.length;
+  const finalSelection = after.modelChoice || ctx.agentDefaultModel?.currentSelection();
+  for (const key of ['provider', 'model', 'reasoningEffort']) assert.equal(finalSelection?.[key], report.model[key], 'running Agent model changed during prompt audit');
+  const notesAfter = await read('memory.global.get', { accountId: after.account.id });
+  assert.equal(hash(notesAfter.globalNotesExpired ? '' : notesAfter.globalNotes), notesBefore, 'owner notes changed during prompt audit');
+  report.ownerConfigurationUnchanged = true; report.ownerNotesUnchanged = true; report.runningModelUnchanged = true;
+  report.completed = true; report.automatedChecksPassed = !report.failures.length;
   report.modelCalls = report.scenarios.reduce((sum, s) => sum + s.calls.length, 0); report.finishedAt = new Date().toISOString(); persist(); return report;
 };

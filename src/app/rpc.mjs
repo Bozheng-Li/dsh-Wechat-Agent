@@ -15,6 +15,7 @@ export function rpcHandler(service, isDisposed = () => false) {
           'identity.get',
           'identity.save',
           'settings',
+          'model.info',
           'model.select',
           'model.configure',
           'search.credentials',
