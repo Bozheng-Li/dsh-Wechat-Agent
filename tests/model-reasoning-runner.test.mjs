@@ -3,9 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DshAgentRunner } from '../src/features/agent/runner.mjs';
-import { StateStore } from '../src/storage/state-store.mjs';
-import { createPluginService } from '../src/app/service.mjs';
+import { DshAgentRunner, StateStore, createPluginService } from '../lib/testing.js';
 
 const signal = () => new AbortController().signal;
 function fixture() {
