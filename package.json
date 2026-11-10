@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-wechat-agent",
   "version": "0.2.0-preview.8",
-  "description": "DeepSeek Harness 微信 Agent：独立人设、自然陪聊、持久记忆、按需看图、定时提醒与联网搜索",
+  "description": "DeepSeek Harness 微信 Agent：统一拟人助手、自然聊天、持久记忆、按需看图、定时提醒与联网搜索",
   "keywords": [
     "dsh-plugin",
     "deepseek-harness",
@@ -31,7 +31,35 @@
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
     "CHANGELOG.md",
-    "licenses"
+    "licenses",
+    "config.yaml",
+    "prompts/conversation/templates.json",
+    "prompts/diagnostics/templates.json",
+    "prompts/digests/templates.json",
+    "prompts/identity/default.md",
+    "prompts/memory/extraction.json",
+    "prompts/memory/query.json",
+    "prompts/recovery/templates.json",
+    "prompts/reply/chat-task.md",
+    "prompts/reply/configured-task.md",
+    "prompts/reply/continuing-chat.md",
+    "prompts/reply/current-turn.md",
+    "prompts/reply/default-task.md",
+    "prompts/reply/defaults.md",
+    "prompts/reply/language.md",
+    "prompts/tasks/templates.json",
+    "prompts/vision/requests.json",
+    "prompts/vision/tools.json",
+    "prompts/work/system.md",
+    "prompts/work/dialogue.md",
+    "prompts/work/dialogue-tools.json",
+    "prompts/work/tools.json",
+    "prompts/work/result-polish.md",
+    "prompts/work/progress.md",
+    "prompts/work/routing.md",
+    "prompts/remote/messages.json",
+    "prompts/moments/reply.md",
+    "prompts/moments/publish.md"
   ],
   "dsh": {
     "bundle": {
@@ -72,7 +100,12 @@
     "build": "node scripts/build-dsh-plugin.mjs",
     "test": "npm run build && node scripts/test.mjs",
     "test:native": "node scripts/test-dsh-native.cjs",
+    "test:work-native": "node scripts/test-work-native.cjs",
+    "test:work-parallel-native": "node scripts/test-work-parallel-native.cjs",
+    "test:work-tools-native": "node scripts/test-work-tools-native.cjs",
+    "test:remote-native": "node scripts/test-remote-native.cjs",
     "test:ui": "npm run build && node scripts/test-ui.mjs",
+    "test:visual": "npm run build && node scripts/test-visual-system.mjs",
     "preview:workbench": "npm run build && node scripts/preview-workbench.mjs",
     "test:workbench-ui": "npm run build && node scripts/preview-workbench.mjs --test",
     "test:python": "python -B -m unittest discover -s tests -p native_engine_test.py",
@@ -91,6 +124,7 @@
     "react-dom": "19.3.1",
     "rolldown": "1.2.15",
     "tar": "7.5.22",
+    "yaml": "2.9.1",
     "zod": "4.6.7"
   }
 }

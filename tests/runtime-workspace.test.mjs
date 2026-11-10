@@ -19,9 +19,11 @@ test('real plugin workers switch the complete workspace, recover a failed move a
   initial.setPersona({ name: '迁移测试', aliases: [], prompt: '保留这段人设' });
   const storeId = initial.data.storeId, workers = [];
   let dispose, rpc;
+  const registered = [];
   const start = async () => {
     const ctx = { effect: factory => { dispose = factory(); }, connection: { register: (_ctx, _channel, handler) => { rpc = handler; } },
       agentDefaultModel: { currentSelection: () => ({ provider: 'fixture', model: 'fixture' }) }, llm: {} };
+    ctx.workspaceRegistry = { create: async (directory, title) => { assert(fs.statSync(directory).isDirectory()); registered.push({ directory, title }); return { title }; } };
     await apply(ctx);
     const response = await rpc('status', {}, undefined, owner); assert(response.ok); assert(!response.value.startupError, JSON.stringify(response.value.startupError));
     const lock = JSON.parse(fs.readFileSync(path.join(bootstrap, 'owner.lock'), 'utf8')); workers.push(lock.workerPid);
@@ -35,13 +37,18 @@ test('real plugin workers switch the complete workspace, recover a failed move a
     fs.rmSync(fixture, { recursive: true, force: true });
   });
   const first = await start(); assert.equal(first.storage.basePath, bootstrap);
+  assert.equal(first.storage.agentWorkspacePath, path.join(bootstrap, 'workspace', '微信agent'));
+  assert.deepEqual(registered.slice(-2), [{ directory: first.storage.agentWorkspacePath, title: '微信聊天' },
+    { directory: path.dirname(first.storage.agentWorkspacePath), title: '微信工作' }]);
   const identity = await rpc('identity.get', {}, undefined, owner); assert(identity.ok);
   assert((await rpc('identity.save', { markdown: '# 全局身份\n这是实际迁移测试。', revision: identity.value.revision }, undefined, owner)).ok);
   const migrated = await rpc('storage.save', { storage: { basePath: target } }, undefined, owner);
   assert(migrated.ok, JSON.stringify(migrated.error)); assert.equal(migrated.value.storage.basePath, target);
+  assert.deepEqual(registered.slice(-2), [{ directory: migrated.value.storage.agentWorkspacePath, title: '微信聊天' },
+    { directory: path.dirname(migrated.value.storage.agentWorkspacePath), title: '微信工作' }]);
   assert.equal(migrated.value.persona.name, '迁移测试'); assert.equal(migrated.value.scheduler.enabled, true);
   assert.equal(JSON.parse(fs.readFileSync(path.join(target, 'storage/state/channel.json'), 'utf8')).storeId, storeId);
-  assert(fs.readFileSync(path.join(target, 'AGENT.md'), 'utf8').includes('实际迁移测试'));
+  assert(fs.readFileSync(path.join(target, 'prompts/AGENT.md'), 'utf8').includes('实际迁移测试'));
   assert(fs.existsSync(path.join(bootstrap, 'storage/state/channel.json')), 'old data is retained');
   assert(!alive(workers[0]));
   workers.push(JSON.parse(fs.readFileSync(path.join(bootstrap, 'owner.lock'), 'utf8')).workerPid);

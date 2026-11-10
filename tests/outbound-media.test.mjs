@@ -9,17 +9,18 @@ import { nativeQrSession, writeNativeQrRound } from './fixtures/native-qr-sessio
 
 // Keep protocol fixtures isolated from the running worker and its credentials.
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const entry = `export * from ${JSON.stringify(path.join(root, 'src/wechat/protocol/backend.ts'))};
-export * from ${JSON.stringify(path.join(root, 'src/wechat/protocol/wire.ts'))};
-export * from ${JSON.stringify(path.join(root, 'src/wechat/types.ts'))};`;
-const build = await rolldown({ input: 'virtual:outbound-test', platform: 'node', resolve: { alias: { '@napcat-wechat/protocol': path.join(root, 'src/wechat/types.ts') } }, plugins: [{ name: 'outbound-test', resolveId: id => id === 'virtual:outbound-test' ? id : null, load: id => id === 'virtual:outbound-test' ? entry : null }] });
+const entry = `export * from ${JSON.stringify(path.join(root, 'backend/wechat/protocol/backend.ts'))};
+export * from ${JSON.stringify(path.join(root, 'backend/wechat/protocol/wire.ts'))};
+export * from ${JSON.stringify(path.join(root, 'backend/wechat/protocol/file-upload.ts'))};
+export * from ${JSON.stringify(path.join(root, 'backend/wechat/types.ts'))};`;
+const build = await rolldown({ input: 'virtual:outbound-test', platform: 'node', resolve: { alias: { '@napcat-wechat/protocol': path.join(root, 'backend/wechat/types.ts') } }, plugins: [{ name: 'outbound-test', resolveId: id => id === 'virtual:outbound-test' ? id : null, load: id => id === 'virtual:outbound-test' ? entry : null }] });
 let api;
 try {
   const { output } = await build.generate({ format: 'esm' });
   assert.equal(output.length, 1);
   api = await import(`data:text/javascript;base64,${Buffer.from(output[0].code).toString('base64')}`);
 } finally { await build.close(); }
-const { ProtocolBackend, BridgeError, fields, bytes, num, unstring, ld, fv, encodeFrame, imageUploadRequest, imageUploadResponse, IMAGE_CHUNK_BYTES } = api;
+const { ProtocolBackend, BridgeError, fields, bytes, num, unstring, ld, fv, vi, readVi, encodeFrame, imageUploadRequest, imageUploadResponse, IMAGE_CHUNK_BYTES, FILE_CHUNK_BYTES, fileUploadRequest, fileUploadResponse, fileMessageRequest, fileMessageResponse, requestFileCgi, encodeCgiBody, decodeCgiBody } = api;
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jO1cAAAAASUVORK5CYII=', 'base64');
 const bigPng = Buffer.concat([png, Buffer.alloc(120_013, 0x61)]);
 const media = (content = png, mediaType = 'image/png', type = 'image') => ({ type, data: { base64: content.toString('base64'), mediaType } });
@@ -31,11 +32,35 @@ function imageAck(body, overrides = {}) {
   const item = { ret: 0, clientId: unstring(bytes(f, 2)), from: unstring(bytes(f, 3)), to: unstring(bytes(f, 4)), total: Number(num(f, 5)), start: start + length, length, id: start + length === Number(num(f, 5)) ? '9007199254740999' : undefined, ...overrides };
   return Buffer.concat([ld(1, fv(1, item.ret)), ld(3, ld(1, item.clientId)), ld(4, ld(1, item.from)), ld(5, ld(1, item.to)), fv(6, item.total), fv(7, item.start), fv(8, item.length), fv(9, 1700000000), ...(item.id === undefined ? [] : [fv(10, BigInt(item.id))])]);
 }
+function imageWindowAck(body, overrides = {}) {
+  const f = fields(body), remaining = Number(num(f, 5)) - Number(num(f, 6)) - Number(num(f, 7));
+  return imageAck(body, { length: Math.min(65_536, remaining), ...overrides });
+}
 function textAck(body, id = '9007199254740901') {
   const f = fields(bytes(fields(body), 2));
   return Buffer.concat([ld(1, fv(1, 0)), fv(2, 1), ld(3, Buffer.concat([fv(4, num(f, 5)), fv(5, num(f, 4)), fv(6, 1700000000), fv(8, BigInt(id))]))]);
 }
-function fixture(t, respond = (cmd, body) => cmd === 110 ? imageAck(body) : textAck(body), withBase = true, qr) {
+function attachAck(body, overrides = {}) {
+  const f = fields(body), item = { ret: 0, clientId: bytes(f, 4).toString(), from: bytes(f, 5).toString(), total: Number(num(f, 6)), offset: Number(num(f, 7)) + Number(num(f, 8)), length: Number(num(f, 8)), mediaId: 'fixture-media-id', ...overrides };
+  return Buffer.concat([ld(1, fv(1, item.ret)), ...(item.mediaId ? [ld(3, item.mediaId)] : []), ld(4, item.clientId), ld(5, item.from), fv(6, item.total), fv(7, item.offset), fv(8, item.length), fv(9, 1700000000)]);
+}
+function appAck(body, overrides = {}) {
+  const f = fields(bytes(fields(body), 2)), item = { ret: 0, from: bytes(f, 1).toString(), to: bytes(f, 4).toString(), clientId: bytes(f, 8).toString(), type: 6, id: '9007199254740997', ...overrides };
+  return Buffer.concat([ld(1, fv(1, item.ret)), ld(3, item.from), ld(4, item.to), ld(6, item.clientId), fv(7, 1700000000), fv(8, item.type), ...(item.id ? [fv(9, BigInt(item.id))] : [])]);
+}
+// Synthetic server format observed in upload-only PC probes: the reply echoes
+// the request checksum. Fixtures contain no operator packets or credentials.
+function shortlinkAck(account, cmd, requestBody, responseBody, overrideChecksum) {
+  const key = account.body_key ? Buffer.from(account.body_key, 'hex') : undefined, s08 = account.s08 ? Buffer.from(account.s08, 'hex') : undefined;
+  const request = encodeCgiBody(cmd, requestBody, account.uin, account.token, key, s08), response = encodeCgiBody(cmd, responseBody, account.uin, account.token, key, s08);
+  const values = packet => { let offset = 26; const values = []; for (let index = 0; index < 6; index++) { let value; [value, offset] = readVi(packet, offset); values.push(value); } return { values, offset }; };
+  const original = values(request), reply = values(response), oldLength = response[1] >> 2;
+  reply.values[4] = 0n; reply.values[5] = overrideChecksum ?? original.values[5];
+  const header = Buffer.concat([response.subarray(0, 26), ...reply.values.map(vi), response.subarray(reply.offset, oldLength)]);
+  header[1] = header.length * 4 + (response[1] & 3);
+  return Buffer.concat([header, response.subarray(oldLength)]);
+}
+function fixture(t, respond = (cmd, body) => cmd === 110 ? imageAck(body) : cmd === 220 ? attachAck(body) : cmd === 222 ? appAck(body) : textAck(body), withBase = true, qr) {
   const tempRoot = path.resolve(os.tmpdir()), dir = fs.mkdtempSync(path.join(tempRoot, 'wechat-outbound-test-'));
   const sessionFile = path.join(dir, 'session.json'), cacheDir = path.join(dir, 'cache');
   fs.writeFileSync(sessionFile, JSON.stringify(qr?.credential ?? { uin: 123, token: 'aa'.repeat(15), wxid: 'wxid_fixture', nickname: '测试账号', sync_key: fv(1, 0).toString('hex'), ...(withBase ? { heartbeat_base_request: Buffer.concat([ld(1, 'fake-session'), fv(2, 123)]).toString('hex') } : {}) }));
@@ -44,10 +69,147 @@ function fixture(t, respond = (cmd, body) => cmd === 110 ? imageAck(body) : text
   const calls = [], events = [];
   backend.controller = new AbortController(); backend.online = true;
   backend.transport = { connected: true, tx: 0, rx: 0, request: async (cmd, body) => { calls.push({ cmd, body }); return respond(cmd, body, calls.length, backend); }, close() { this.connected = false; } };
+  backend.fileRequest = async (_account, cmd, body) => { calls.push({ cmd, body }); return respond(cmd, body, calls.length, backend); };
   backend.subscribe(event => { if (event.type === 'event.message') events.push(event.payload); });
   t.after(async () => { await backend.close(); assert.equal(path.dirname(dir), tempRoot); assert.match(path.basename(dir), /^wechat-outbound-test-/); fs.rmSync(dir, { recursive: true, force: true }); });
   return { backend, calls, events, cache: () => fs.readFileSync(path.join(cacheDir, `${backend.session.value.uin}.json`), 'utf8') };
 }
+
+test('multi-chunk arbitrary file is only delivered after SendAppMsg ACK, preserving bytes, name and metadata', async t => {
+  const f = fixture(t), content = Buffer.alloc(120013, 0xa7), name = 'DSH 成果 & 报告.docx';
+  const result = await f.backend.sendMessage(message({ type: 'file', data: { name, base64: content.toString('base64') } }));
+  assert.deepEqual(f.calls.map(call => call.cmd), [220, 220, 220, 222]);
+  const uploads = f.calls.filter(call => call.cmd === 220); assert.equal(new Set(uploads.map(call => bytes(fields(call.body), 4).toString())).size, 1);
+  assert.deepEqual(Buffer.concat(uploads.map(call => bytes(fields(bytes(fields(call.body), 9)), 2))), content);
+  assert.equal(num(fields(uploads[0].body), 10), 4n); assert.equal(FILE_CHUNK_BYTES, 50000);
+  const app = fields(bytes(fields(f.calls.at(-1).body), 2)); assert.equal(num(app, 5), 6n);
+  assert.match(bytes(app, 6).toString(), /DSH 成果 &amp; 报告.docx/); assert.match(bytes(app, 6).toString(), /<attachid>fixture-media-id<\/attachid>/);
+  assert.equal(result.messageType, 49); assert.equal(result.message[0].type, 'file'); assert.equal(result.message[0].data.name, name); assert.equal(result.message[0].data.bytes, content.length);
+  assert.equal(result.message[0].data.base64, undefined); assert.equal(result.delivery, 'server-ack'); assert.equal(f.events.length, 1);
+  assert.equal(result.deliveryParts[0].state, 'acknowledged'); assert.equal(result.deliveryParts[0].name, name); assert.equal(f.backend.queuedMediaBytes, 0); assert(!f.cache().includes('base64')); assert(!f.cache().includes('fixture-media-id'));
+});
+
+for (const [name, override] of [['client identity', { clientId: 'wrong' }], ['account', { from: 'foreign' }], ['total size', { total: 1 }], ['offset', { offset: 1 }], ['length', { length: 1 }], ['final attachment ID', { mediaId: '' }]]) test(`file upload with wrong ${name} never sends a file message`, async t => {
+  const f = fixture(t, (_cmd, body) => attachAck(body, override));
+  await assert.rejects(() => f.backend.sendMessage(message({ type: 'file', data: { name: 'result.pdf', base64: Buffer.from('PDF').toString('base64') } })), error => error.code === 'ERR_FILE_PROTOCOL' && error.details.deliveryParts[0].state === 'not-sent');
+  assert.deepEqual(f.calls.map(call => call.cmd), [220]); assert.equal(f.events.length, 0);
+});
+
+for (const [name, override] of [['sender', { from: 'foreign' }], ['recipient', { to: 'foreign@chatroom' }], ['client identity', { clientId: 'wrong' }], ['message type', { type: 1 }], ['message ID', { id: undefined }]]) test(`file message with wrong ${name} remains unknown and is not retried`, async t => {
+  const f = fixture(t, (cmd, body) => cmd === 220 ? attachAck(body) : appAck(body, override));
+  await assert.rejects(() => f.backend.sendMessage(message({ type: 'file', data: { name: 'result.zip', base64: Buffer.from('ZIP').toString('base64') } })), error => error.code === 'ERR_FILE_PROTOCOL' && error.details.deliveryParts[0].state === 'unknown');
+  assert.deepEqual(f.calls.map(call => call.cmd), [220, 222]); assert.equal(f.events.length, 0);
+});
+
+test('cancellation after uploading a file never submits its recipient message', async t => {
+  const cancel = new AbortController(), f = fixture(t, (cmd, body) => { assert.equal(cmd, 220); cancel.abort(); return attachAck(body); });
+  await assert.rejects(() => f.backend.sendMessage(message({ type: 'file', data: { name: 'result.txt', base64: Buffer.from('result').toString('base64') } }), cancel.signal));
+  assert.deepEqual(f.calls.map(call => call.cmd), [220]); assert.equal(f.events.length, 0);
+});
+
+test('cancellation during final file message preserves its real ACK', async t => {
+  const cancel = new AbortController(), f = fixture(t, (cmd, body) => { if (cmd === 220) return attachAck(body); cancel.abort(); return appAck(body); });
+  const result = await f.backend.sendMessage(message({ type: 'file', data: { name: 'result.txt', base64: Buffer.from('result').toString('base64') } }), cancel.signal);
+  assert.equal(result.delivery, 'server-ack'); assert.equal(result.deliveryParts[0].state, 'acknowledged'); assert.equal(f.events.length, 1);
+});
+
+test('confirmed text is retained if a later file message times out and following image is not sent', async t => {
+  const f = fixture(t, (cmd, body) => { if (cmd === 522) return textAck(body); if (cmd === 220) return attachAck(body); throw new BridgeError('ERR_ACK_TIMEOUT', 'file ACK missing', { delivery: 'unknown' }); });
+  await assert.rejects(() => f.backend.sendMessage(message(text('结果摘要'), { type: 'file', data: { name: 'report.xlsx', base64: Buffer.from('xlsx').toString('base64') } }, media())), error => {
+    assert.equal(error.details.delivery, 'partially-acknowledged'); assert.deepEqual(error.details.deliveryParts.map(part => part.state), ['acknowledged', 'unknown', 'not-sent']); return true;
+  });
+  assert.deepEqual(f.calls.map(call => call.cmd), [522, 220, 222]); assert.equal(f.events.length, 1);
+});
+
+test('file references and unsafe names fail before the first text, and files need authenticated base material', async t => {
+  const f = fixture(t);
+  for (const data of [{ name: 'result.pdf', file: 'C:/private/result.pdf' }, { name: '../secret.txt', base64: 'YQ==' }, { name: 'result.txt', base64: 'Zh==' }])
+    await assert.rejects(async () => f.backend.sendMessage(message(text('do not send'), { type: 'file', data })), { code: 'ERR_INVALID_PARAMS' });
+  assert.equal(f.calls.length, 0);
+  const missing = fixture(t, undefined, false); await assert.rejects(async () => missing.backend.sendMessage(message(text('do not send'), { type: 'file', data: { name: 'result.txt', base64: 'YQ==' } })), { code: 'ERR_FILE_CREDENTIAL' }); assert.equal(missing.calls.length, 0);
+});
+
+test('file shortlink uses encrypted fixed CGI routes and validates account and command without retry', async () => {
+  const account = { uin: 123, wxid: 'fixture', token: 'aa'.repeat(15) }, upload = { clientId: 'fixture-file', from: account.wxid, total: 3, md5: 'a'.repeat(32), baseRequest: fv(2, 123) };
+  const body = fileUploadRequest(upload, 0, Buffer.from('abc')); let calls = 0;
+  const fetched = await requestFileCgi(account, 220, body, new AbortController().signal, async (url, options) => {
+    calls++; assert.equal(url, 'http://short.weixin.qq.com/cgi-bin/micromsg-bin/uploadappattach'); assert.equal(options.method, 'POST'); assert.equal(options.redirect, 'error'); assert.deepEqual(decodeCgiBody(options.body).body, body);
+    return new Response(encodeCgiBody(220, attachAck(body), 123, account.token));
+  });
+  assert.equal(fileUploadResponse(fetched, upload, 0, 3).mediaId, 'fixture-media-id'); assert.equal(calls, 1);
+  await assert.rejects(() => requestFileCgi(account, 220, body, new AbortController().signal, async () => new Response(encodeCgiBody(220, attachAck(body), 999, account.token))), { code: 'ERR_FILE_PROTOCOL' });
+});
+
+test('PC shortlink binds echoed request checksums and consumed cursor acknowledgements for every file chunk', async () => {
+  const account = { uin: 123, wxid: 'fixture', token: 'aa'.repeat(15), body_key: '11'.repeat(16), s08: '22'.repeat(16) };
+  const content = Buffer.alloc(FILE_CHUNK_BYTES + 13, 0xa7), upload = { clientId: 'pc-file', from: account.wxid, total: content.length, md5: 'a'.repeat(32), baseRequest: fv(2, 123) };
+  let calls = 0;
+  for (let start = 0; start < content.length; start += FILE_CHUNK_BYTES) {
+    const chunk = content.subarray(start, start + FILE_CHUNK_BYTES), body = fileUploadRequest(upload, start, chunk);
+    const response = await requestFileCgi(account, 220, body, new AbortController().signal, async () => {
+      calls++; return new Response(shortlinkAck(account, 220, body, attachAck(body, { length: 0 })));
+    });
+    assert.equal(fileUploadResponse(response, upload, start, chunk.length).complete, start + chunk.length === content.length);
+  }
+  assert.equal(calls, 2);
+});
+
+for (const total of [50_469, 170_013]) test(`PC file upload windows retain exact identity and cursor for ${total} bytes`, async t => {
+  const content = Buffer.alloc(total, 0xa7), f = fixture(t, (cmd, body) => {
+    if (cmd !== 220) return appAck(body);
+    const fieldsIn = fields(body), start = Number(num(fieldsIn, 7)), length = Number(num(fieldsIn, 8)), remaining = total - start - length;
+    // The observed 50,469-byte Word reports 50,000/469 after both requests:
+    // next-window ACK first, echoed final chunk with an attachment ID last.
+    return attachAck(body, remaining ? { length: Math.min(65_536, remaining), mediaId: '' }
+      : { offset: start, length });
+  });
+  const result = await f.backend.sendMessage(message({ type: 'file', data: { name: 'result.docx', base64: content.toString('base64') } }));
+  assert.equal(result.deliveryParts[0].state, 'acknowledged');
+  assert.equal(result.serverMessageId, '9007199254740997');
+  assert.equal(f.calls.at(-1).cmd, 222);
+  assert.deepEqual(Buffer.concat(f.calls.filter(call => call.cmd === 220).map(call => bytes(fields(bytes(fields(call.body), 9)), 2))), content);
+});
+
+for (const override of [{ offset: 49_999, length: 469 }, { length: 470 }, { clientId: 'foreign', length: 469 }, { from: 'foreign', length: 469 }, { total: 50_470, length: 469 }])
+  test(`invalid PC file window ${JSON.stringify(override)} cannot send an attachment`, async t => {
+    const f = fixture(t, (_cmd, body) => attachAck(body, override));
+    await assert.rejects(() => f.backend.sendMessage(message({ type: 'file', data: { name: 'result.docx', base64: Buffer.alloc(50_469).toString('base64') } })), error =>
+      error.code === 'ERR_FILE_PROTOCOL' && error.details.deliveryParts[0].state === 'not-sent');
+    assert.deepEqual(f.calls.map(call => call.cmd), [220]); assert.equal(f.events.length, 0);
+  });
+
+test('files above 20 MiB, aggregate replies above 20 MiB and queues above 64 MiB preserve all bytes and final ACKs', async t => {
+  const f = fixture(t), content = Buffer.alloc(22 * 1024 * 1024 + 13, 0xa7);
+  const segment = name => ({ type: 'file', data: { name, base64: content.toString('base64') } });
+  const first = f.backend.sendMessage(message(segment('first.zip'), segment('second.zip')));
+  const second = f.backend.sendMessage(message(segment('third.zip')));
+  assert(f.backend.queuedMediaBytes > 64 * 1024 * 1024);
+  const results = await Promise.all([first, second]);
+  assert.equal(results[0].deliveryParts.length, 2); assert.equal(results[1].deliveryParts.length, 1);
+  assert(results.every(result => result.deliveryParts.every(part => part.state === 'acknowledged' && part.bytes === content.length)));
+  const uploads = f.calls.filter(call => call.cmd === 220), clientIds = new Set(uploads.map(call => bytes(fields(call.body), 4).toString()));
+  assert.equal(clientIds.size, 3);
+  for (const clientId of clientIds) assert.deepEqual(Buffer.concat(uploads.filter(call => bytes(fields(call.body), 4).toString() === clientId)
+    .map(call => bytes(fields(bytes(fields(call.body), 9)), 2))), content);
+  assert.equal(f.calls.filter(call => call.cmd === 222).length, 3); assert.equal(f.backend.queuedMediaBytes, 0);
+});
+
+test('an echoed checksum from another shortlink request cannot confirm a file and is never retried', async () => {
+  const account = { uin: 123, wxid: 'fixture', token: 'aa'.repeat(15) }, upload = { clientId: 'pc-file', from: account.wxid, total: 3, md5: 'a'.repeat(32), baseRequest: fv(2, 123) };
+  const body = fileUploadRequest(upload, 0, Buffer.from('abc')); let calls = 0;
+  await assert.rejects(() => requestFileCgi(account, 220, body, new AbortController().signal, async () => {
+    calls++; return new Response(shortlinkAck(account, 220, body, attachAck(body, { length: 0 }), 1n));
+  }), { code: 'ERR_FILE_PROTOCOL' });
+  assert.equal(calls, 1);
+});
+
+test('PC SendAppMsg response checksum remains bound to the actual message request and its final identity ACK', async () => {
+  const account = { uin: 123, wxid: 'fixture', token: 'aa'.repeat(15) };
+  const file = { clientId: 'pc-file-message', from: account.wxid, to: 'synthetic-peer', total: 3, md5: 'a'.repeat(32), baseRequest: fv(2, 123), mediaId: 'fixture-media-id', name: 'result.txt', time: 1700000000 };
+  const body = fileMessageRequest(file), response = await requestFileCgi(account, 222, body, new AbortController().signal,
+    async () => new Response(shortlinkAck(account, 222, body, appAck(body))));
+  assert.equal(fileMessageResponse(response, file).id, '9007199254740997');
+});
 
 test('long complete text is segmented without losing Unicode or the ending, with one ACK per segment', async t => {
   const f = fixture(t, (_cmd, body, number) => textAck(body, String(9000000 + number)));
@@ -98,24 +260,52 @@ test('multi-chunk image sends one confirmed message and never stores base64 in t
   assert.ok(!f.cache().includes('base64')); assert.ok(f.cache().length < 2500);
 });
 
+test('consumed image cursors with zero data length only confirm delivery after the final message ID', async t => {
+  const f = fixture(t, (_cmd, body, _number, backend) => {
+    assert.equal(backend.status().diagnostics.sent, 0); assert.equal(f.events.length, 0);
+    return imageAck(body, { length: 0 });
+  });
+  const sent = await f.backend.sendMessage(message(media(bigPng)));
+  assert.equal(f.calls.length, Math.ceil(bigPng.length / IMAGE_CHUNK_BYTES));
+  assert.deepEqual(Buffer.concat(f.calls.map(call => bytes(fields(bytes(fields(call.body), 8)), 2))), bigPng);
+  assert.equal(sent.delivery, 'server-ack'); assert.deepEqual(sent.serverMessageIds, ['9007199254740999']);
+  assert.equal(sent.deliveryParts[0].state, 'acknowledged'); assert.equal(f.events.length, 1);
+});
+
+test('PC image ACK advertises the next window clipped to remaining bytes, ending at zero with a final message ID', async t => {
+  const f = fixture(t, (_cmd, body, _number, backend) => {
+    assert.equal(backend.status().diagnostics.sent, 0); assert.equal(f.events.length, 0);
+    return imageWindowAck(body);
+  });
+  const sent = await f.backend.sendMessage(message(media(bigPng)));
+  assert.equal(f.calls.length, 3);
+  assert.deepEqual(f.calls.map(call => Number(num(fields(call.body), 7))), [50_000, 50_000, bigPng.length - 100_000]);
+  assert.deepEqual(Buffer.concat(f.calls.map(call => bytes(fields(bytes(fields(call.body), 8)), 2))), bigPng);
+  assert.equal(sent.delivery, 'server-ack'); assert.equal(sent.deliveryParts[0].state, 'acknowledged');
+  assert.deepEqual(sent.serverMessageIds, ['9007199254740999']); assert.equal(f.events.length, 1);
+});
+
 for (const [name, override] of [
   ['client image ID', { clientId: 'different' }], ['recipient', { to: 'wrong-group@chatroom' }], ['sender', { from: 'other-account' }],
   ['total length', { total: 1 }], ['chunk length', { length: 1 }], ['chunk offset', { start: 42 }],
+  ['unconsumed zero-length chunk', { start: 0, length: 0 }], ['wrong consumed cursor', { start: 42, length: 0 }],
+  ['unconsumed 64 KiB window', { start: 0, length: 65_536 }], ['wrong cursor with 64 KiB window', { start: 42, length: 65_536 }],
+  ['unrecognized upload window', { length: 65_535 }],
 ]) test(`mismatched ${name} stops uploading without reporting a delivered image`, async t => {
   const f = fixture(t, (_cmd, body) => imageAck(body, override));
   await assert.rejects(async () => f.backend.sendMessage(message(media(bigPng))), error => error.code === 'ERR_PROTOCOL' && error.details.delivery === 'unknown' && error.details.acknowledgedMessageIds.length === 0);
   assert.equal(f.calls.length, 1); assert.equal(f.events.length, 0);
 });
 
-test('missing final message ID is unknown and is never automatically retried', async t => {
-  const f = fixture(t, (_cmd, body) => imageAck(body, { id: undefined }));
+for (const [name, override] of [['chunk echo', {}], ['consumed zero-length cursor', { length: 0 }], ['next upload window', { nextWindow: true }]]) test(`missing final image ID after ${name} stays unknown and is never retried`, async t => {
+  const f = fixture(t, (_cmd, body) => override.nextWindow ? imageWindowAck(body, { id: undefined }) : imageAck(body, { ...override, id: undefined }));
   await assert.rejects(async () => f.backend.sendMessage(message(media(bigPng))), error => error.code === 'ERR_PROTOCOL' && error.details.delivery === 'unknown');
   assert.equal(f.calls.length, 3); assert.equal(f.events.length, 0); assert.equal(f.backend.status().diagnostics.sent, 0);
 });
 
 test('a nonzero image status remains rejected, with no false confirmation', async t => {
   const f = fixture(t, (_cmd, body) => imageAck(body, { ret: -3 }));
-  await assert.rejects(async () => f.backend.sendMessage(message(media())), error => error.code === 'ERR_SEND_REJECTED' && error.details.ret === -3 && error.details.delivery === 'rejected');
+  await assert.rejects(async () => f.backend.sendMessage(message(media())), error => error.code === 'ERR_SEND_REJECTED' && error.details.ret === -3 && error.details.delivery === 'rejected' && error.details.deliveryParts[0].state === 'not-sent');
   assert.equal(f.calls.length, 1); assert.equal(f.events.length, 0);
 });
 
@@ -148,7 +338,7 @@ test('cancellation after a confirmed image prevents later text but preserves the
 
 test('a confirmed text is preserved if a later valid image is rejected by WeChat', async t => {
   const f = fixture(t, (cmd, body) => cmd === 522 ? textAck(body) : imageAck(body, { ret: -5 }));
-  await assert.rejects(async () => f.backend.sendMessage(message(text('已确认的文字'), media())), error => error.details.delivery === 'partially-acknowledged' && error.details.acknowledgedMessageIds[0] === '9007199254740901');
+  await assert.rejects(async () => f.backend.sendMessage(message(text('已确认的文字'), media())), error => error.details.delivery === 'partially-acknowledged' && error.details.acknowledgedMessageIds[0] === '9007199254740901' && error.details.deliveryParts[1].state === 'not-sent');
   assert.deepEqual(f.calls.map(c => c.cmd), [522, 110]); assert.equal(f.events.length, 1); assert.equal(f.events[0].messageType, 1);
 });
 

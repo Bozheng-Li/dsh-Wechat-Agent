@@ -10,8 +10,8 @@ import { nativeQrSession } from './fixtures/native-qr-session.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const entry = ['backend.ts', 'wire.ts', 'image-download.ts', 'media.ts', 'media-loader.mjs'].map(name =>
-  `export * from ${JSON.stringify(path.join(root, 'src/wechat/protocol', name))};`).join('\n');
-const build = await rolldown({ input: 'virtual:inbound-images', platform: 'node', resolve: { alias: { '@napcat-wechat/protocol': path.join(root, 'src/wechat/types.ts') } },
+  `export * from ${JSON.stringify(path.join(root, 'backend/wechat/protocol', name))};`).join('\n');
+const build = await rolldown({ input: 'virtual:inbound-images', platform: 'node', resolve: { alias: { '@napcat-wechat/protocol': path.join(root, 'backend/wechat/types.ts') } },
   plugins: [{ name: 'inbound-images', resolveId: id => id === 'virtual:inbound-images' ? id : null, load: id => id === 'virtual:inbound-images' ? entry : null }] });
 let api;
 try { const { output } = await build.generate({ format: 'esm' }); assert.equal(output.length, 1); api = await import(`data:text/javascript;base64,${Buffer.from(output[0].code).toString('base64')}`); }

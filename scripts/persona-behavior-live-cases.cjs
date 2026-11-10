@@ -13,7 +13,9 @@ exports.runPersonaAudit = async ({ ctx, testing: T, sourceRoot, outputRoot, sign
   assert(selection?.provider && selection?.model, 'Pass the running Agent model selection, including its explicit reasoning effort');
   assert(productionModelConfig && Object.hasOwn(productionModelConfig, 'temperature') && Object.hasOwn(productionModelConfig, 'maxTokens'),
     'Pass productionModelConfig read from the running Agent; synthetic temperature or output defaults are not acceptance settings');
-  const { PERSONA_PRESETS, personaFromPreset } = await import(pathToFileURL(path.join(sourceRoot, 'src/shared/persona-presets.mjs')).href);
+  const { PERSONA_PRESETS, personaFromPreset } = await import(pathToFileURL(path.join(sourceRoot, 'prompts/personas/catalog.mjs')).href);
+  if (PERSONA_PRESETS.length === 1) return require('./language-live-cases.cjs').runPersonaAudit({ ctx, testing: T, sourceRoot, outputRoot,
+    signal, selection, productionModelConfig, onProgress, caseIds: exports.caseIds, auditName: 'persona' });
   const directory = path.join(outputRoot, 'persona');
   fs.mkdirSync(directory, { recursive: true });
   // A synthetic conversation does not edit this repository. Keeping its cwd

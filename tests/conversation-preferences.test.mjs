@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { explicitConversationPreference } from '../src/features/agent/reply-style.mjs';
-import { conversationPreference } from '../src/features/agent/conversation-preferences.mjs';
+import { explicitConversationPreference } from "../modules/agent/reply-style.mjs";
+import { conversationPreference } from "../modules/agent/conversation-preferences.mjs";
 
 test('direct conversation preferences cover participants, opt-outs and ordinary negation', () => {
   const cases = [

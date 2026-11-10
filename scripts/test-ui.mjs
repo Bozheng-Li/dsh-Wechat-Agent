@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { deflateSync } from 'node:zlib';
 import { rolldown } from 'rolldown';
 import { uiFixtureModels } from '../tests/fixtures/model-catalog.mjs';
-import { StateStore, WechatChannel, TaskScheduler, AgentIdentity, VERSION, identity, createPluginService, rpcHandler, ChannelError, describeWorkspace, migrateWorkspaceRoot, SearchService, REPLY_STYLE_REVIEW_NOTE } from '../lib/testing.js';
+import { StateStore, WechatChannel, TaskScheduler, AgentIdentity, VERSION, identity, createPluginService, rpcHandler, ChannelError, describeWorkspace, migrateWorkspaceRoot, SearchService, REPLY_STYLE_REVIEW_NOTE, readWorkArtifact, archiveWorkImages } from '../lib/testing.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const electron = process.argv[2] || process.env.ELECTRON_PATH;
@@ -68,7 +68,7 @@ for (const [chatType, peerId, count, label] of [['group', 'group_alpha@chatroom'
     store.update(record, { state: 'sent', reply: `${label} · 这是一条用于页面验证的合成回复。`, acknowledgedMessageIds: [`fixture-ack-${sequence}`] });
   }
 }
-let state = { account: { id: accountId, nickname: '小胖·界面测试' }, online: true, state: 'online', runtimeReady: true, login: { state: 'online', running: false } };
+let state = { account: { id: accountId, nickname: '小胖·界面测试' }, online: true, state: 'online', runtimeReady: true, momentsReadReady: true, momentsWriteReady: true, momentsAudienceReady: true, login: { state: 'online', running: false } };
 const memberRequests = [], migrations = [];
 const members = {
   'group_alpha@chatroom': [
@@ -95,6 +95,36 @@ const worker = {
   },
   async send() { throw new Error('The UI fixture must never send a WeChat message'); }
 };
+const fixtureMoments = [{ id: '9007199254740997', author: { userId: accountId }, createdAt: Math.floor(Date.now() / 1000), text: '合成朋友圈：性格随和，笑点不高。', imageCount: 0, deleted: false }];
+const fixtureComments = [{ id: '3', userId: 'wxid_alice', nickname: 'Alice', text: '这个笑话有点冷！', createdAt: Math.floor(Date.now() / 1000), deleted: false }];
+let momentSerial = 100;
+const momentWrites = [];
+const fixtureAudience = { accountId, source: 'wechat-contacts-live', fetchedAt: new Date().toISOString(), membershipComplete: true, unavailableCount: 0,
+  contacts: [{ id: 'wxid_alice', name: 'Alice', nickname: 'Alice', remark: '', labelIds: ['1'] }, { id: 'wxid_bob', name: 'Bob', nickname: 'Bob', remark: '', labelIds: ['1'] }],
+  labels: [{ id: '1', name: '产品同事', memberCount: 2, userIds: ['wxid_alice','wxid_bob'] }, { id: '2', name: '空标签', memberCount: 0, userIds: [] }] };
+worker.readMomentsAudience = async (args, signal) => {
+  signal.throwIfAborted(); if (args.accountId !== state.account.id) throw new ChannelError('ACCOUNT_CHANGED', '账号已变化');
+  return structuredClone({ ...fixtureAudience, accountId: state.account.id });
+};
+worker.readMoments = async (args, signal) => {
+  signal.throwIfAborted(); if (args.accountId !== state.account.id) throw new ChannelError('ACCOUNT_CHANGED', '账号已变化');
+  const items = args.query.action === 'comments' ? fixtureComments : args.query.action === 'detail' ? fixtureMoments.filter(post => post.id === args.query.postId) : fixtureMoments;
+  return { accountId, action: args.query.action, items: structuredClone(items), visibleCommentEntries: fixtureComments.length, nextCursor: null };
+};
+worker.writeMoments = async (args, signal) => {
+  signal.throwIfAborted(); if (args.accountId !== accountId) throw new ChannelError('ACCOUNT_CHANGED', '账号已变化');
+  const query = args.query, postId = query.postId ?? String(BigInt('9007199254740999') + BigInt(++momentSerial));
+  momentWrites.push(structuredClone(query));
+  const selection = { blockedLabelIds: query.blockedLabelIds ?? [], blockedUserIds: query.blockedUserIds ?? [] };
+  const blockedUserIds = [...new Set([...selection.blockedUserIds, ...fixtureAudience.labels.filter(row => selection.blockedLabelIds.includes(row.id)).flatMap(row => row.userIds)])];
+  if (query.action === 'publish') fixtureMoments.push({ id: postId, author: { userId: accountId }, createdAt: Math.floor(Date.now() / 1000), text: query.text, imageCount: query.images?.length ?? 0 });
+  if (query.action === 'delete') fixtureMoments.find(post => post.id === postId).deleted = true;
+  const commentId = String(++momentSerial);
+  if (query.replyToCommentId) fixtureComments.push({ id: commentId, userId: accountId, text: query.text, replyToCommentId: query.replyToCommentId, replyToUserId: 'wxid_alice', createdAt: Math.floor(Date.now() / 1000) });
+  return { accountId, action: query.action, postId, text: query.text, commentId, createdAt: Math.floor(Date.now() / 1000), imageCount: query.images?.length ?? 0, delivery: 'server-ack',
+    ...(query.action === 'publish' ? { blockedUserIds, blockedLabelIds: selection.blockedLabelIds, audienceConfirmed: true, audienceSelection: selection, audienceSource: fixtureAudience.source, audienceFetchedAt: fixtureAudience.fetchedAt } : {}),
+    ...(query.replyToCommentId ? { replyToCommentId: query.replyToCommentId, replyToUserId: 'wxid_alice' } : {}), ...(query.action === 'delete' ? { deleted: true } : {}) };
+};
 const assetAnalysisRequests = [];
 let memoryImageReadsReady = false;
 worker.media = async ({ resourceId }) => {
@@ -103,13 +133,18 @@ worker.media = async ({ resourceId }) => {
   return { data: fixturePng([200, 30, 30]).toString('base64'), mediaType: 'image/png', quality: 'original', fixtureMemoryImage: true };
 };
 const runner = { selection: () => store.modelChoice() || { provider: 'fixture', model: 'alpha' }, defaultSelection: () => ({ provider: 'fixture', model: 'alpha' }),
+  async summarize(_material, _target, signal) { signal.throwIfAborted(); return '产品讨论组：周五带咖啡讨论产品。'; },
   async describeImage(_image, signal) { signal.throwIfAborted(); return '合成测试图片的笔记。'; },
   async describeImages(images, signal) { signal.throwIfAborted(); if (!images.every(image => image.fixtureMemoryImage)) assetAnalysisRequests.push(images.length); return images.map(() => '合成方块，用于表达赞同或让讨论冷静下来。'); },
-  async run() { throw new Error('The UI fixture must never generate a model response'); } };
+  async run(input) { if (input.mode !== 'moments-publish') throw new Error('The UI fixture must never generate a model response');
+    input.signal.throwIfAborted(); const request = JSON.parse(input.text);
+    return { text: JSON.stringify({ theme: request.themes[0], text: '合成 AI 草稿：冰箱里大家很冷静，仅本地验证。', imagePrompt: request.image ? '合成配图要求' : '' }) }; } };
 let channel = new WechatChannel({ store, runner, transport: worker });
 // This fixture checks owner UI/RPC and durable files. Automatic extraction must not
 // drain its deliberately queued cancellation samples or call a real model.
-channel.maintainMemory = () => {};
+channel.maintainMemory = (selector, options) => {
+  if (options?.force) return WechatChannel.prototype.maintainMemory.call(channel, selector, options);
+};
 let scheduler = new TaskScheduler({ store, channel }); channel.scheduler = scheduler;
 let agentIdentity = new AgentIdentity(activeRoot);
 const preservedFiles = Object.fromEntries(Object.entries(describeWorkspace(activeRoot, store)).filter(([key]) => ['workspacePath', 'recordsPath', 'memoryPath', 'assetsPath', 'tasksPath', 'loginPath', 'cachePath'].includes(key)).map(([key, directory]) => {
@@ -118,7 +153,10 @@ const preservedFiles = Object.fromEntries(Object.entries(describeWorkspace(activ
 }));
 function openFixtureRuntime(nextRoot) {
   const nextStore = new StateStore(nextRoot); nextStore.ensureWorkspace();
-  const nextChannel = new WechatChannel({ store: nextStore, runner, transport: worker }); nextChannel.maintainMemory = () => {};
+  const nextChannel = new WechatChannel({ store: nextStore, runner, transport: worker });
+  nextChannel.maintainMemory = (selector, options) => {
+    if (options?.force) return WechatChannel.prototype.maintainMemory.call(nextChannel, selector, options);
+  };
   const nextScheduler = new TaskScheduler({ store: nextStore, channel: nextChannel }); nextChannel.scheduler = nextScheduler;
   return { root: nextRoot, store: nextStore, channel: nextChannel, scheduler: nextScheduler, identity: new AgentIdentity(nextRoot), worker, runner };
 }
@@ -174,6 +212,7 @@ const ctx = { llm: {
   describe: async ref => ({ configured: searchKeys.has(ref) }),
 } };
 runner.search = new SearchService(ctx, { fetchImpl: async () => { throw new Error('UI fixture must not call a real search endpoint'); } });
+runner.ctx = ctx; channel.work.imageGeneration.ctx = ctx;
 const service = createPluginService({ ctx, root: activeRoot, store, worker, runner, channel, scheduler, identity: agentIdentity, relocateWorkspace, dshSessionPath: path.join(fixture, 'host-sessions') });
 const rpc = rpcHandler(service), failures = new Set(), cancelRequests = [], assetUploadRequests = [], storageRequests = [], identityRequests = [];
 const heldRequests = new Map();
@@ -205,6 +244,7 @@ const server = http.createServer(async (req, res) => {
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     if (req.url === '/fixture') {
       if (body.command === 'state') { json(res, service.call('status')); return; }
+      if (body.command === 'momentWrites') { json(res, momentWrites); return; }
       if (body.command === 'modelCatalog') {
         if (!['full', 'without-low', 'empty', 'expanded'].includes(body.payload?.mode)) throw new Error('Invalid synthetic model catalog mode');
         modelCatalog = structuredClone(uiFixtureModels);
@@ -241,6 +281,31 @@ const server = http.createServer(async (req, res) => {
       }
       if (body.command === 'assetZip') { json(res, { name: '界面测试表情.zip', data: assetZip.toString('base64'), bytes: assetZip.length }); return; }
       if (body.command === 'assets') { json(res, channel.library.list(state.account.id)); return; }
+      if (body.command === 'seedWork') {
+        const timestamp = Date.now();
+        for (const [id, jobState] of [['aaaaaaaaaaaa', 'succeeded'], ['bbbbbbbbbbbb', 'queued']]) {
+          const folder = `work/${id}`, cwd = path.join(store.storageSettings().workspacePath, folder);
+          fs.mkdirSync(cwd, { recursive: true }); fs.writeFileSync(path.join(cwd, 'hello.py'), 'print(123)');
+          channel.work.store.add({ id, accountId, chatType: 'group', peerId: 'group_alpha@chatroom', senderId: 'wxid_alice', senderName: 'Alice',
+            request: '合成任务：写一个 Python 示例', folder, workspaceRoot: store.storageSettings().workspacePath, sessionId: 'ui-work-session', state: jobState,
+            delivery: { state: jobState === 'succeeded' ? 'unknown' : 'not-ready', reason: jobState === 'succeeded' ? '合成回传未获得服务端确认' : '', ...(jobState === 'succeeded' ? { artifacts: [{ path: 'report.pdf', name: 'report.pdf', kind: 'file', bytes: 100, mediaType: 'application/pdf', sha256: 'a'.repeat(64), state: 'sent', serverMessageId: '9007199254740997' }, { path: 'picture.png', name: 'picture.png', kind: 'image', bytes: 200, mediaType: 'image/png', sha256: 'b'.repeat(64), state: 'unknown' }, { path: 'data.xlsx', name: 'data.xlsx', kind: 'file', bytes: 300, mediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', sha256: 'c'.repeat(64), state: 'not-sent' }] } : {}) },
+            operations: jobState === 'succeeded' ? [{ tool: 'wechat_work_exec', command: 'python hello.py', result: { ok: true, exitCode: 0, stdout: '123', sandbox: { mode: 'workspace-write', enforcement: 'partial' } } },
+              { tool: 'wechat_work_ssh_exec', alias: 'scut2', command: 'cat results/metrics.json', result: { ok: true, stage: 'ssh-executed', exitCode: 0, stdout: '八卡实验 reward=1.25', stdoutTruncated: true } },
+              { tool: 'wechat_work_status', result: { ok: true, action: 'tasks', text: '实际 DSH 状态：合成任务正在执行' } },
+              { tool: 'wechat_work_vscode_connect', alias: 'scut2', result: { ok: true, stage: 'vscode-requested', exitCode: 0, connectedConfirmed: false, message: '合成结果：VS Code 已收到连接请求。',
+                steps: [{ name: 'SSH 认证与远端探测', ok: true, exitCode: 0 }, { name: '检查 Remote - SSH 扩展', ok: true, exitCode: 0 }, { name: '提交 VS Code 远程连接请求', ok: true, exitCode: 0 }] } }] : [],
+            ...(jobState === 'succeeded' ? { result: { text: '合成任务已生成 hello.py', files: [{ path: 'hello.py', bytes: 10 }], artifacts: [{ path: 'report.pdf', name: 'report.pdf', kind: 'file', bytes: 100, mediaType: 'application/pdf', sha256: 'a'.repeat(64) }, { path: 'picture.png', name: 'picture.png', kind: 'image', bytes: 200, mediaType: 'image/png', sha256: 'b'.repeat(64) }, { path: 'data.xlsx', name: 'data.xlsx', kind: 'file', bytes: 300, mediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', sha256: 'c'.repeat(64) }] } } : {}), createdAt: timestamp, updatedAt: timestamp });
+          if (jobState === 'succeeded') {
+            fs.writeFileSync(path.join(cwd, 'picture.png'), fixturePng([120, 80, 200]));
+            const image = readWorkArtifact(cwd, 'picture.png').metadata;
+            const archives = archiveWorkImages(channel.work.store.get(id), cwd, [image]);
+            channel.work.store.update(id, { imageArchives: [...archives, { ...image, sourcePath: 'unsaved.png',
+              path: `微信agent/generated-images/${id}/unsaved.png`, state: 'failed',
+              error: { code: 'WORK_IMAGE_ARCHIVE_FAILED', message: '测试图片保存失败，原任务文件保留' } }] });
+          }
+        }
+        json(res, channel.work.list({ accountId })); return;
+      }
       if (body.command === 'globalMemory') { json(res, channel.longMemory.view(state.account.id)); return; }
       if (body.command === 'imageMemory') { json(res, channel.imageMemory.list({ accountId: state.account.id, chatType: body.payload?.chatType || 'group', peerId: body.payload?.peerId || 'group_alpha@chatroom' })); return; }
       if (body.command === 'seedImageMemory') {
@@ -277,8 +342,13 @@ const server = http.createServer(async (req, res) => {
         json(res, channel.longMemory.view(accountId)); return;
       }
       if (body.command === 'localMemory') { json(res, await service.call('memory.get', { accountId, chatType: 'group', peerId: body.payload?.peerId || 'group_alpha@chatroom' })); return; }
+      if (body.command === 'manualCompressionSeed') {
+        const scope = { accountId, chatType: 'group', peerId: 'group_alpha@chatroom' };
+        for (let i = 0; i < 6; i++) channel.memory.append(scope, { key: `manual-compression-${i}`, text: '周五带咖啡讨论产品。' + '重复闲聊。'.repeat(30), direction: 'incoming', senderId: 'wxid_alice', time: Date.now() });
+        json(res, channel.memory.view(scope)); return;
+      }
       if (body.command === 'holdNext') {
-        if (!['memory.edit', 'model.info'].includes(body.payload?.endpoint) || heldRequests.has(body.payload.endpoint)) throw new Error('Only one isolated request per supported endpoint can be held');
+        if (!['memory.edit', 'memory.compress', 'model.info'].includes(body.payload?.endpoint) || heldRequests.has(body.payload.endpoint)) throw new Error('Only one isolated request per supported endpoint can be held');
         let release; const wait = new Promise(resolve => { release = resolve; });
         heldRequests.set(body.payload.endpoint, { wait, release, started: false, payload: null }); json(res, { ok: true }); return;
       }
@@ -370,7 +440,8 @@ const origin = `http://127.0.0.1:${server.address().port}`;
 try {
   const runId = randomBytes(16).toString('hex');
   const env = { ...process.env, WECHAT_UI_TEST_ORIGIN: origin, WECHAT_UI_TEST_RUN_ID: runId }; delete env.ELECTRON_RUN_AS_NODE;
-  const child = spawn(electron, [path.join(root, 'scripts/test-ui-driver.cjs'), 'ui-fixture', out], { cwd: root, windowsHide: true, stdio: 'inherit', env });
+  const driver = process.env.WECHAT_UI_TEST_VISUAL_SYSTEM === '1' ? 'test-visual-system.cjs' : 'test-ui-driver.cjs';
+  const child = spawn(electron, [path.join(root, 'scripts', driver), 'ui-fixture', out], { cwd: root, windowsHide: true, stdio: 'inherit', env });
   const exit = await new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', code => resolve(code)); });
   if (exit !== 0) throw new Error(`UI verification failed (${exit}); see ${path.join(out, 'report.json')}`);
   let report;

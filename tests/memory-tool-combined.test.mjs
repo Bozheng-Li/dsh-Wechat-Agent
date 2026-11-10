@@ -4,11 +4,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { conversationMemoryTool } from '../src/features/memory/tool.mjs';
-import { ConversationMemory, memoryText } from '../src/features/memory/conversation-memory.mjs';
-import { LongTermMemory } from '../src/features/memory/long-term-memory.mjs';
-import { StateStore } from '../src/storage/state-store.mjs';
-import { ChannelError } from '../src/shared/contracts.mjs';
+import { conversationMemoryTool } from "../modules/memory/query/tool.mjs";
+import { ConversationMemory, memoryText } from "../modules/memory/conversation/store.mjs";
+import { LongTermMemory } from "../modules/memory/long-term/store.mjs";
+import { StateStore } from "../backend/storage/state-store.mjs";
+import { ChannelError } from "../shared/contracts.mjs";
 
 const scope = { accountId: 'combined-owner', chatType: 'group', peerId: 'combined@chatroom', requestedAt: 1794050000000 };
 const notice = '此会话有新旧事实冲突待管理员确认；被争议的事实暂不作为确定信息使用。';

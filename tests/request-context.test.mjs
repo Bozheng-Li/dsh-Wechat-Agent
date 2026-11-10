@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { resetWechatSessionContext } from '../src/features/agent/request-context.mjs';
+import { resetWechatSessionContext } from "../modules/agent/request-context.mjs";
 
 test('resume shadows prior native dialogue while preserving the system head and audit events', () => {
   const nodes = Object.freeze([2, 5, 8, 12, 15]), writes = [];

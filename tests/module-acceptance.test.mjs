@@ -6,8 +6,8 @@ import http from 'node:http';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { deflateSync } from 'node:zlib';
-import { MediaLibrary } from '../src/features/media/library.mjs';
-import { SearchService, SEARCH_CREDENTIALS } from '../src/features/search/service.mjs';
+import { MediaLibrary } from "../modules/media/library.mjs";
+import { SearchService, SEARCH_CREDENTIALS } from "../modules/search/service.mjs";
 
 const temporary = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../storage/tmp');
 const owner = 'module-acceptance-owner';

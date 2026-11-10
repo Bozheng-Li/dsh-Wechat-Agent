@@ -320,6 +320,8 @@ function clonedStore(store, root) {
   const file = path.join(root, 'storage/state/channel.json');
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.copyFileSync(store.file, file);
+  fs.copyFileSync(store.config.file, path.join(root, 'config.yaml'));
+  if (fs.existsSync(path.join(store.root, 'prompts'))) fs.cpSync(path.join(store.root, 'prompts'), path.join(root, 'prompts'), { recursive: true });
   return new StateStore(root);
 }
 

@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BuiltinStickerCatalog } from '../src/features/media/builtin-stickers.mjs';
-import { MediaLibrary } from '../src/features/media/library.mjs';
-import { inspectAssetImage } from '../src/features/media/image-format.mjs';
+import { BuiltinStickerCatalog } from "../modules/media/builtin-stickers.mjs";
+import { MediaLibrary } from "../modules/media/library.mjs";
+import { inspectAssetImage } from "../modules/media/image-format.mjs";
 
 const temporary = fileURLToPath(new URL('../storage/tmp/', import.meta.url));
 const source = fileURLToPath(new URL('../assets/stickers/', import.meta.url));

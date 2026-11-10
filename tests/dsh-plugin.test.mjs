@@ -222,7 +222,7 @@ test('model choice upgrades existing state, persists independently of account an
   store.setModelChoice({ provider: 'mock', model: 'first' });
   const loaded = new StateStore(root), detached = loaded.modelChoice(); detached.model = 'changed';
   assert.deepEqual(loaded.modelChoice(), { provider: 'mock', model: 'first' });
-  const { modelChoice, ...rest } = loaded.data; assert.deepEqual(rest, original);
+  const { modelChoice, ...rest } = loaded.data, { modelChoice: originalChoice, ...before } = original; assert.deepEqual(rest, before); assert.equal(originalChoice, null);
   loaded.setModelChoice(null);
   assert.equal(new StateStore(root).modelChoice(), null);
 });
@@ -232,7 +232,7 @@ test('failed model save restores the last persisted choice without resetting acc
   store.configure(account.id, settings);
   store.save = () => { throw new ChannelError('STATE_WRITE_FAILED', '测试磁盘错误'); };
   assert.throws(() => store.setModelChoice({ provider: 'mock', model: 'first' }), /磁盘/);
-  assert.equal(store.modelChoice(), null); assert.equal(Object.hasOwn(store.data, 'modelChoice'), false);
+  assert.equal(store.modelChoice(), null); assert.equal(store.data.modelChoice, null);
   store.save = original; store.setModelChoice({ provider: 'mock', model: 'first' });
   store.save = () => { throw new ChannelError('STATE_WRITE_FAILED', '测试磁盘错误'); };
   assert.throws(() => store.setModelChoice(null), /磁盘/);

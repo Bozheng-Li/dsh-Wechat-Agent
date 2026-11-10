@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { personaFromPreset } from '../src/shared/persona-presets.mjs';
-import { configDraft, configPayload } from '../src/client/shared/drafts.mjs';
+import { personaFromPreset } from "../prompts/personas/catalog.mjs";
+import { personaDraft } from "../frontend/shared/drafts.mjs";
 import { DshAgentRunner, NATURAL_REPLY_RULES, CURRENT_TURN_REPLY_RULES, DEFAULT_CONVERSATION_REPLY_TASK, CONFIGURED_CONVERSATION_REPLY_TASK,
   EXPLICIT_CHAT_REPLY_TASK, DEFAULT_AGENT_IDENTITY, imageMemoryTool, parseNaturalDecision } from '../lib/testing.js';
 
@@ -59,7 +59,7 @@ test('the transmitted system separates each configuration source from its govern
     assert(containing(token)[0][2].trim());
   }
   assert(sections.find(match => match[1] === '当前会话角色')[2].includes('例句'));
-  assert(sections.find(match => match[1] === '通用表达默认值')[2].includes('只填补未规定之处'));
+  assert(sections.find(match => match[1] === '通用表达默认值')[2].includes('在全局语言与言辞边界内'));
   assert(sections.find(match => match[1] === '事实与回应范围')[2].includes('必须遵守'));
   for (const token of ['MEMORY_DATA_ONLY', 'HISTORY_DATA_ONLY', 'NAME_DATA_ONLY']) assert(!system.includes(token));
   assert(system.indexOf('【当前会话角色结束】') < system.indexOf('【事实与回应范围】'));
@@ -112,8 +112,8 @@ test('structured persona fields and built-in examples have distinct scopes while
 });
 
 test('editor-saved personas reach the same runner sections as structured presets in every public mode', async () => {
-  const original = personaFromPreset('mobai', { name: '完整当前名字', aliases: ['旧别名'] });
-  const saved = configPayload(configDraft({ persona: original })).persona;
+  const original = personaFromPreset(undefined, { name: '完整当前名字', aliases: ['旧别名'] });
+  const saved = { ...personaDraft(original), aliases: [...original.aliases] };
   assert.equal(typeof saved.prompt, 'string');
   const f = fixture({ persona: saved, modelConfig: { webSearch: false } });
   for (const mode of ['default', 'nickname', 'participate', 'scheduled', 'natural', 'confirmation']) {
@@ -144,7 +144,7 @@ test('all public modes include one persona, global identity and style layer, and
     assert.equal(text.split(CURRENT_TURN_REPLY_RULES).length, 2);
     assert(text.indexOf('ROOM_VOICE') < text.indexOf(CURRENT_TURN_REPLY_RULES), 'the current exchange intent follows professional persona defaults');
     assert(text.indexOf('固定文字必须逐字保留') > text.indexOf('ROOM_VOICE'), 'concrete owner formatting follows the current role');
-    assert(text.indexOf('本次用 "ROOM_NAME"') > text.indexOf('# GLOBAL_CONTRACT'), 'the configured name still wins over a global default name');
+    assert(text.indexOf('本次以 "ROOM_NAME"') > text.indexOf('# GLOBAL_CONTRACT'), 'the configured name still wins over a global default name');
     assert(text.includes('全局身份的明确要求优先于账号补充要求'));
     assert(text.includes('指定第一行或最后一行时，该行只写指定文字，正文另起一行'));
     assert(!text.includes('"action"') && !text.includes('JSON 对象'), 'ordinary modes must not inherit the natural decision envelope');
@@ -181,8 +181,9 @@ test('ordinary conversation does not receive unconfigured output rituals or inst
   for (const unnecessary of ['本轮实际正文的固定约定原文', '先核对第一行', 'wechat_read_image', 'wechat_web_search', '本轮不能创建定时任务'])
     assert(!system.includes(unnecessary), unnecessary);
   assert(system.includes('嘴硬心软，简短直率。'));
-  assert(system.includes('旧回复中的语气、身份介绍和拒绝模板都不是当前角色的样板'));
-  assert(system.includes('当前会话人设决定角色名字、性格和口吻'));
+  assert(system.includes('不延续历史里旧人设的表演方式和助手套话'));
+  assert(system.includes('所有会话共用唯一的默认助手'));
+  assert(system.includes('全局语言与言辞边界约束全部对外正文'));
   assert(system.includes(CONFIGURED_CONVERSATION_REPLY_TASK));
   assert(!system.includes(DEFAULT_CONVERSATION_REPLY_TASK), 'a configured role does not inherit generic voice examples');
 });
@@ -191,6 +192,22 @@ test('an unconfigured persona retains default examples without forcing them on a
   const f = fixture({ persona: { name: '微信助手', aliases: [], prompt: '' }, modelConfig: { webSearch: false } });
   await f.runner.run({ text: '早上好。', signal: signal() });
   assert(f.scopes.at(-1).prompt.text.includes(DEFAULT_CONVERSATION_REPLY_TASK));
+});
+
+test('bare greetings do not inherit a server clock while real date questions and due tasks keep it', async () => {
+  const f = fixture();
+  f.settings.persona.aliases = ['掌柜'];
+  for (const text of ['早上好。', '晚上好！', '你好呀', 'Good morning!', 'ROOM_NAME，早呀。', '你好啊，掌柜！']) {
+    await f.runner.run({ text, signal: signal() });
+    assert(!f.scopes.at(-1).prompt.text.includes('【当前时间】'));
+    assert(f.messages.at(-1).content[0].text.endsWith(text));
+  }
+  for (const request of [{ text: '早上好，今天几号？' }, { text: '十分钟后提醒我喝水。' },
+    { text: '早上好。', mode: 'scheduled' }, { text: '早上好。', mode: 'confirmation', systemOverride: 'CONFIRMATION_CONTRACT' }]) {
+    await f.runner.run({ ...request, signal: signal() });
+    assert(f.scopes.at(-1).prompt.text.includes('【当前时间】'));
+    assert(f.scopes.at(-1).prompt.text.includes('Asia/Shanghai'));
+  }
 });
 
 test('recent image observations keep source quality and survive a message without text', async () => {
@@ -342,7 +359,8 @@ test('the final public contract repeats exact owner presentation requirements wi
     const finalContract = text.slice(text.indexOf('本轮实际正文的固定约定原文：'));
     assert(finalContract.includes(first) && finalContract.includes(last));
     assert(!finalContract.includes('CODE_EXAMPLE_END') && !finalContract.includes('QUOTED_EXAMPLE_END') && !finalContract.includes('CHAT_END'));
-    assert(text.lastIndexOf(last) > text.indexOf('本次用 "ROOM_NAME"'));
+    assert(text.indexOf('本次以 "ROOM_NAME"') >= 0);
+    assert(text.lastIndexOf(last) > text.indexOf('本次以 "ROOM_NAME"'));
     if (mode === 'natural') assert(text.indexOf('只输出一个 JSON 对象') > text.lastIndexOf(last));
     if (mode === 'confirmation') assert(text.endsWith('CONFIRMATION_OUTPUT_CONTRACT\n【本轮输出协议结束】'));
   }
@@ -407,7 +425,7 @@ test('punctuated standalone boundary lines are replaced once without orphan punc
 test('every internal mode isolates identity, presentation and tools even when its explicit contract is omitted', async () => {
   const f = fixture();
   f.runner.polishReply = async () => { throw new Error('Internal results must not be reviewed as persona dialogue'); };
-  for (const mode of ['memory', 'long-memory', 'vision', 'workbench']) {
+  for (const mode of ['memory', 'long-memory', 'vision', 'workbench', 'work-result', 'work-routing']) {
     for (const systemOverride of [undefined, 'INTERNAL_CONTRACT：只输出严格 JSON。']) {
       await f.runner.run({ text: 'INTERNAL_DATA', mode, prompt: 'ACCOUNT_RULE', adminNotes: 'OWNER_NOTES', systemOverride, tools: [localTool], signal: signal() });
       const scope = f.scopes.at(-1), text = scope.prompt.text;
@@ -415,24 +433,25 @@ test('every internal mode isolates identity, presentation and tools even when it
         CURRENT_TURN_REPLY_RULES, DEFAULT_CONVERSATION_REPLY_TASK, EXPLICIT_CHAT_REPLY_TASK]) assert(!text.includes(marker));
       if (systemOverride) assert(text.endsWith(systemOverride));
       assert(text.trim()); assert.deepEqual(scope.definitions, []);
+      if (mode === 'work-routing') assert.deepEqual(f.messages.at(-1).content, [{ type: 'text', text: 'INTERNAL_DATA' }]);
       assert(scope.guard({ name: 'wechat_web_search' })); assert(scope.guard({ name: 'wechat_memory' }));
     }
   }
 });
 
-test('explicit role actions and voice survive all participation preferences while public captions use the same role', async () => {
+test('global custom style stays scoped below the common language boundary in natural replies and media captions', async () => {
   const f = fixture(), persona = { name: '掌柜阿宁', aliases: ['阿宁'], prompt: 'ACTION_VOICE：每次先用圆括号写一个虚构动作，再用茶馆掌柜的口吻回答。' };
   for (const temperament of ['quiet', 'balanced', 'lively']) {
     await f.runner.run({ text: '接一句茶馆闲话', mode: 'natural', persona, naturalDecision: { trigger: 'timer', temperament }, signal: signal() });
     const text = f.scopes.at(-1).prompt.text;
     assert.equal(text.split(persona.prompt).length, 2); assert(!text.includes('ROOM_VOICE'));
     assert(text.includes('只影响开口意愿，不替换当前会话人设'));
-    assert(text.includes('人设或当前请求需要古风、角色动作'));
+    assert(text.includes('普通回答不写舞台动作'));
   }
   await f.runner.run({ text: '用素材回复并配一句文字', persona, prompt: 'CAPTION_RULE', tools: [{ name: 'wechat_reply_media', execute: async () => '{}' }], signal: signal() });
   const scope = f.scopes.at(-1);
   assert(scope.prompt.text.includes(persona.prompt)); assert(scope.prompt.text.includes('CAPTION_RULE'));
-  assert(scope.prompt.text.includes('caption 就是实际发送的文字，也必须使用当前人设'));
+  assert(scope.prompt.text.includes('caption 就是实际发送的文字，同样遵守全局语言与言辞边界'));
   assert.equal(scope.definitions.length, 2); assert.equal(scope.definitions[0].name, 'wechat_reply_media');
 });
 

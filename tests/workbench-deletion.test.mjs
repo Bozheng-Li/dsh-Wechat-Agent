@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { StateStore, WechatChannel, TaskScheduler, createPluginService, rpcHandler } from '../lib/testing.js';
-import { scopeKey } from '../src/features/workbench/store.mjs';
+import { scopeKey } from "../modules/workbench/store.mjs";
 
 const base = path.resolve('storage/tmp'), accountId = 'deletion-fixture-owner';
 const group = { accountId, chatType: 'group', peerId: 'deletion-a@chatroom' }, other = { ...group, peerId: 'deletion-b@chatroom' };

@@ -126,6 +126,21 @@ test('failed requested reads preserve older descriptions and return failure inst
   assert.equal(result.ok, false); assert(result.error.includes('视觉请求失败')); assert(f.channel.memory.view(f.scope).text.includes('14:30'));
 });
 
+test('on-demand image source validation follows the configured memory retention instead of a fixed thirty days', async t => {
+  for (const [retentionDays, elapsedDays, expected] of [[1, 2, false], [60, 32, true]]) {
+    const f = fixture(t);
+    f.store.config.update('memory', { ...f.store.config.section('memory'), retentionDays }, f.store.data);
+    f.channel.imageMemory.configure(f.scope, { enabled: false, retentionDays: 30 });
+    f.receive('', [picture('retention-fixture')]); await f.channel.whenIdle();
+    const snapshot = f.channel.memory.load(f.scope), tool = f.tool(snapshot), imageId = catalog(tool)[0].imageId;
+    f.channel.memory.now = () => snapshot.entries[0].rememberedAt + elapsedDays * 86400000;
+    const result = JSON.parse(await tool.execute({ imageId, question: 'Read the time.' }, { signal: signal() }));
+    assert.equal(result.ok, expected);
+    assert.equal(f.models.length, expected ? 1 : 0);
+    if (!expected) assert.equal(result.code, 'IMAGE_CONTEXT_CHANGED');
+  }
+});
+
 test('saved-image search and direct reads exclude native stickers; generic runner paths reject them before provider access', async t => {
   const f = fixture(t); f.receive('', [picture('photo'), picture('sticker', 'face')]); await f.channel.whenIdle();
   const images = f.channel.imageMemory, tool = imageMemoryTool(images, { run: () => assert.fail('sticker must not reach a model') }, f.scope, () => {});

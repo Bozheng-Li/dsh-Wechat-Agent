@@ -1,0 +1,7 @@
+{
+  "conversation-tools-description-1": "message 定时发送给定文字；agent 到时根据会话记忆执行这段任务后回复。",
+  "conversation-tools-description-2": "带时区偏移的 ISO 时间，例如 2026-11-07T08:00:00+08:00",
+  "conversation-tools-description-3": "每天 HH:mm，北京时间",
+  "conversation-tools-description-4": "要真正 @ 的群成员姓名，可填写用户原话中的简称；只能使用本次消息明确指定的人。不填时“提醒我”默认发言者；普通群通知不 @ 所有人。",
+  "conversation-tools-description-5": "真正发送的完整配文，遵守全局语言与言辞边界，保留账号及全局身份的语言、固定开头与结尾；工具调用后的模型正文不会替它补内容。null 表示只发送图片。"
+}

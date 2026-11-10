@@ -4,13 +4,15 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { rolldown } from 'rolldown';
-import { BuiltinStickerCatalog } from '../src/features/media/builtin-stickers.mjs';
-import { inspectAssetImage } from '../src/features/media/image-format.mjs';
+import { BuiltinStickerCatalog } from "../modules/media/builtin-stickers.mjs";
+import { inspectAssetImage } from "../modules/media/image-format.mjs";
+import { packageResources } from './package-resources.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const pkg = root;
 const manifest = JSON.parse(fs.readFileSync(path.join(pkg, 'package.json'), 'utf8'));
-const alias = { '@napcat-wechat/protocol': path.join(root, 'src/wechat/types.ts') };
+const resources = packageResources(root, manifest);
+const alias = { '@napcat-wechat/protocol': path.join(root, 'backend/wechat/types.ts') };
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const bundledPackages = new Set();
 const builtinStickers = new BuiltinStickerCatalog();
@@ -40,10 +42,10 @@ async function bundle(input, output, format, extra = {}) {
   try { recordModules((await build.write({ file: output, format, sourcemap: false })).output); } finally { await build.close(); }
 }
 fs.mkdirSync(path.join(pkg, 'lib'), { recursive: true });
-await bundle(path.join(pkg, 'src/index.mjs'), path.join(pkg, 'lib/index.js'), 'esm');
-await bundle(path.join(pkg, 'src/worker.mjs'), path.join(pkg, 'lib/worker.cjs'), 'cjs');
-await bundle(path.join(pkg, 'src/testing.mjs'), path.join(pkg, 'lib/testing.js'), 'esm');
-const client = await rolldown({ input: path.join(pkg, 'src/client.jsx'), platform: 'browser', external: ['react', 'react/jsx-runtime'] });
+await bundle(path.join(pkg, 'backend/index.mjs'), path.join(pkg, 'lib/index.js'), 'esm');
+await bundle(path.join(pkg, 'backend/worker.mjs'), path.join(pkg, 'lib/worker.cjs'), 'cjs');
+await bundle(path.join(pkg, 'tests/exports.mjs'), path.join(pkg, 'lib/testing.js'), 'esm');
+const client = await rolldown({ input: path.join(pkg, 'frontend/index.jsx'), platform: 'browser', external: ['react', 'react/jsx-runtime'] });
 try {
   const { output } = await client.generate({ format: 'cjs' });
   recordModules(output);
@@ -104,6 +106,7 @@ if (process.argv.includes('--pack')) {
   fs.writeFileSync(path.join(stage, 'package.json'), JSON.stringify(distribution, null, 2) + '\n');
   for (const file of ['lib/index.js', 'lib/client.js', 'lib/worker.cjs', 'cordis.patch.yml', 'README.md']) copy(path.join(pkg, file), path.join(stage, file));
   for (const file of ['LICENSE', 'THIRD_PARTY_NOTICES.md', 'CHANGELOG.md']) copy(path.join(root, file), path.join(stage, file));
+  for (const file of resources) copy(path.join(root, file), path.join(stage, file));
   // Ship only catalogued artwork and its original license, never cached downloads.
   for (const file of ['manifest.json', builtinStickers.source.licenseFile, ...builtinStickers.packs.flatMap(pack => pack.items.map(item => item.file))])
     copy(builtinStickers.localFile(file), path.join(stage, 'assets/stickers', file));

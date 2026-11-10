@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { WorkbenchStore } from '../src/features/workbench/store.mjs';
+import { WorkbenchStore } from "../modules/workbench/store.mjs";
 
 function fixture(t) {
   const base = path.resolve('storage/tmp');

@@ -10,6 +10,10 @@ import * as testing from '../lib/testing.js';
 import personaAudit from '../scripts/persona-behavior-live-cases.cjs';
 import memoryAudit from '../scripts/memory-behavior-live-cases.cjs';
 import promptAudit from '../scripts/prompt-live-cases.cjs';
+import resumeAudit from '../scripts/persona-resume-live-cases.cjs';
+import sectionAudit from '../scripts/persona-section-live-cases.cjs';
+import ablationAudit from '../scripts/persona-input-ablation.cjs';
+import upgradeAudit from '../scripts/persona-upgrade-live-cases.cjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const syntheticSelection = { provider: 'audit-fixture', model: 'agent-model', reasoningEffort: 'high' };
@@ -23,9 +27,13 @@ function removeOwnedTemp(directory, prefix) {
 }
 
 for (const [name, audit, caseId, answer] of [
-  ['persona', personaAudit, 'memory-voice:mobai', '青藤画展。'],
+  ['persona', personaAudit, 'language:recall', '青藤画展。'],
   ['memory', memoryAudit, 'read:no-lookup-independent-question', '56。'],
-  ['prompt', promptAudit, 'persona:xiaopang', '【账号验收】\n会话小胖。我喜欢轻松接话。\n【全局验收】'],
+  ['prompt', promptAudit, 'language:name', '我是微信助手。'],
+  ['resume', resumeAudit, 'language:name', '我是微信助手。'],
+  ['section', sectionAudit, 'language:name', '我是微信助手。'],
+  ['ablation', ablationAudit, 'language:name', '我是微信助手。'],
+  ['upgrade', upgradeAudit, 'language:name', '我是微信助手。'],
 ]) {
   test(`${name} audit requires live generation settings before context access`, async () => {
     let contextReads = 0;

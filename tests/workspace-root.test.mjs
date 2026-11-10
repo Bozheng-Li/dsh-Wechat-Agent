@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { describeWorkspace, migrateWorkspaceRoot, readWorkspaceLocation } from '../src/storage/workspace.mjs';
+import { describeWorkspace, migrateWorkspaceRoot, readWorkspaceLocation } from "../backend/storage/workspace.mjs";
 
 const { StateStore, ConversationMemory, LongTermMemory, acquireLock, identity, conversationKey } =
   await import(process.env.DSH_STATE_TEST_MODULE || '../lib/testing.js');
@@ -69,7 +69,7 @@ test('workspace defaults do not create data and descriptions report actual legac
   assert.equal(readWorkspaceLocation(bootstrap), bootstrap);
   assert(!fs.existsSync(bootstrap));
   const store = new StateStore(bootstrap), description = describeWorkspace(bootstrap, store);
-  assert.deepEqual(description, { basePath: bootstrap, workspacePath: path.join(bootstrap, 'workspace'),
+  assert.deepEqual(description, { basePath: bootstrap, workspacePath: path.join(bootstrap, 'workspace'), agentWorkspacePath: path.join(bootstrap, 'workspace', '微信agent'),
     recordsPath: path.join(bootstrap, 'storage/conversations'), memoryPath: path.join(bootstrap, 'storage/memory'),
     assetsPath: path.join(bootstrap, 'storage/assets'), tasksPath: path.join(bootstrap, 'storage/tasks'),
     loginPath: path.join(bootstrap, 'storage/private'), cachePath: path.join(bootstrap, 'storage/cache'), legacyPaths: [] });

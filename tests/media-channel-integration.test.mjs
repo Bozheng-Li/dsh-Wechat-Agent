@@ -69,6 +69,7 @@ test('partial text confirmation never promotes its unconfirmed image into memory
   f.worker.send = async params => { f.sent.push(params); throw new ChannelError('ERR_SEND_REJECTED', 'fixture reject', { delivery: 'partially-acknowledged', acknowledgedMessageIds: ['9007199254740901'] }); };
   f.receive(); await f.channel.whenIdle();
   assert.equal(f.record().state, 'partial'); assert.deepEqual(f.record().acknowledgedMessageIds, ['9007199254740901']);
+  assert.match(f.record().reason, /fixture reject/);
   assert.equal(f.outgoing().length, 0); assert.equal(f.sent[0].message.length, 2);
 });
 

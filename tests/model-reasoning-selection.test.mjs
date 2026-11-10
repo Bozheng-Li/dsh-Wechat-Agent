@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ChannelError, publicError, validateModelChoice } from '../src/shared/contracts.mjs';
-import { availableModel, selectModel } from '../src/features/agent/models.mjs';
-import { StateStore } from '../src/storage/state-store.mjs';
+import { ChannelError, publicError, validateModelChoice } from "../shared/contracts.mjs";
+import { availableModel, selectModel } from "../modules/agent/models.mjs";
+import { StateStore } from "../backend/storage/state-store.mjs";
 
 const choice = Object.freeze({ provider: 'synthetic-provider', model: 'first' });
 const selectedEffort = Object.freeze({ ...choice, reasoningEffort: 'low' });

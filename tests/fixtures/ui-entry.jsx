@@ -1,6 +1,6 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-import { WechatPanel } from '../../src/client/panel.jsx';
+import { WechatPanel } from "../../frontend/panel.jsx";
 import { uiFixtureModels } from './model-catalog.mjs';
 
 const headers = { 'content-type': 'application/json', 'x-fixture-key': window.__UI_FIXTURE_KEY__ };

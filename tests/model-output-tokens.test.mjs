@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { parse } from 'yaml';
+import { CONFIG_FIELDS } from '../backend/config/repository.mjs';
 import { StateStore, validateModelConfig, DshAgentRunner, completedText } from '../lib/testing.js';
 
 function temporary(t) {
@@ -32,9 +34,12 @@ for (const legacyTokens of [4096, 2048, 8192]) test(`legacy ${legacyTokens} migr
   const root = temporary(t), store = new StateStore(root), account = 'fixture-owner';
   store.configure(account, { enabled: true, privatePeers: ['fixture-friend'], groups: ['fixture@chatroom'], prompt: '保留要求' });
   store.setModelConfig({ ...store.modelConfig(), maxTokens: legacyTokens, temperature: 0.4, vision: false, webSearch: true });
-  const saved = JSON.parse(fs.readFileSync(store.file, 'utf8'));
+  const saved = { ...JSON.parse(fs.readFileSync(store.file, 'utf8')),
+    ...Object.fromEntries(CONFIG_FIELDS.filter(key => Object.hasOwn(store.data, key)).map(key => [key, structuredClone(store.data[key])])) };
   delete saved.modelConfigVersion;
+  delete saved.configurationVersion;
   fs.writeFileSync(store.file, JSON.stringify(saved));
+  fs.unlinkSync(path.join(root, 'config.yaml'));
   const restored = new StateStore(root), expected = legacyTokens === 4096 ? null : legacyTokens;
   assert.equal(restored.modelConfig().maxTokens, expected);
   assert.equal(restored.modelConfig().temperature, 0.4);
@@ -42,7 +47,7 @@ for (const legacyTokens of [4096, 2048, 8192]) test(`legacy ${legacyTokens} migr
   assert.equal(restored.modelConfig().webSearch, true);
   assert.deepEqual(restored.settings(account), store.settings(account));
   assert.equal(new StateStore(root).modelConfig().maxTokens, expected);
-  assert.equal(JSON.parse(fs.readFileSync(store.file, 'utf8')).modelConfigVersion, 2);
+  assert.equal(parse(fs.readFileSync(path.join(root, 'config.yaml'), 'utf8')).modelConfigVersion, 2);
   restored.setModelConfig({ ...restored.modelConfig(), maxTokens: 4096 });
   assert.equal(new StateStore(root).modelConfig().maxTokens, 4096, 'a new explicit 4096 must survive reload');
 });

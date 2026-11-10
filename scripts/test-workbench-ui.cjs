@@ -17,6 +17,7 @@ async function input(selector, value) { await wait(selector => !!document.queryS
 const nav = async id => {
   if (id === 'recovery') { await click('[data-testid="nav-records"]'); await click('[data-testid="records-tab-recovery"]'); }
   else if (id === 'memory-review') { await click('[data-testid="nav-memory"]'); await click('[data-testid="memory-tab-review"]'); }
+  else if (id === 'diagnostics') { await click('[data-testid="nav-settings"]'); await click('[data-testid="open-diagnostics"]'); }
   else await click('[data-testid="nav-' + id + '"]');
 };
 const fixtureSummary = () => evaluate(async () => (await fetch('/fixture', { method: 'POST', headers: { 'content-type': 'application/json', 'x-fixture-key': window.__UI_FIXTURE_KEY__ }, body: JSON.stringify({ command: 'summary' }) })).json());
@@ -37,7 +38,7 @@ async function verifyContrast(page, theme) {
       for (const parent of lineage) { const style = getComputedStyle(parent); background = over(rgba(style.backgroundColor), background); opacity *= Number(style.opacity); }
       const ink = rgba(getComputedStyle(el).color); ink[3] *= opacity;
       const foreground = over(ink, background), a = luminance(foreground), b = luminance(background);
-      return { text: el.textContent.trim().slice(0, 36), ratio: (Math.max(a, b) + .05) / (Math.min(a, b) + .05) };
+      return { text: el.textContent.trim().slice(0, 36), ratio: (Math.max(a, b) + .05) / (Math.min(a, b) + .05), color: getComputedStyle(el).color, background, opacity };
     });
   });
   assert(samples.length > 0, page + ' must include readable controls');
@@ -55,7 +56,7 @@ app.whenReady().then(async () => {
   window.webContents.on('console-message', event => { if (event.level === 3 || event.level === 'error') report.errors.push(String(event.message).slice(0, 500)); });
   const watchdog = setTimeout(() => { report.error = 'UI verification timed out'; fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(report, null, 2)); app.exit(1); }, 300000);
   try {
-    await window.loadURL(origin); await wait(() => document.querySelectorAll('.wa-nav-group').length === 3); await click('[data-testid="visual-motion-toggle"]');
+    await window.loadURL(origin); await wait(() => document.querySelectorAll('.wa-nav-group').length === 3); assert.equal(await evaluate(() => !!document.querySelector('[data-testid="visual-motion-toggle"]')), false);
     assert.equal(await evaluate(() => !!document.querySelector('[data-testid="nav-recovery"],[data-testid="nav-memory-review"]')), false);
     report.checks.push('three menu groups retain the workbench pages with recovery nested under records and review nested under memory');
     assert.equal(await evaluate(() => !!document.querySelector('[data-testid="nav-knowledge"],[data-testid="knowledge-page"]')), false);
@@ -96,7 +97,9 @@ app.whenReady().then(async () => {
     assert.equal(await evaluate(() => document.querySelector('[data-testid="memory-clear-facts"]').disabled), true);
     report.checks.push('single and category fact deletion update the same global memory, including historical facts, without redundant stored copies');
     await nav('digests');
-    await nav('recovery'); await click('.wa-wb-list-item'); await click('button', '仅恢复文字'); await wait(() => document.querySelector('[aria-label="发送前预览"]')); assert.equal(await evaluate(() => Array.from(document.querySelectorAll('button')).find(el => el.textContent === '发送并核对回执').disabled), true); await capture('recovery-light'); await click('[aria-label="发送前预览"] input[type=checkbox]'); await click('button', '发送并核对回执'); await wait(() => document.querySelector('[role=status]')?.textContent.includes('微信服务端已确认')); report.checks.push('recovery preserves the original reply, requires confirmation and records a simulated server ACK');
+    await nav('recovery'); await click('.wa-wb-list-item');
+    await click('.wa-recovery-options > summary');
+    await click('button', '仅恢复文字'); await wait(() => document.querySelector('[aria-label="发送前预览"]')); assert.equal(await evaluate(() => Array.from(document.querySelectorAll('button')).find(el => el.textContent === '发送并核对回执').disabled), true); await capture('recovery-light'); await click('[aria-label="发送前预览"] input[type=checkbox]'); await click('button', '发送并核对回执'); await wait(() => document.querySelector('[role=status]')?.textContent.includes('微信服务端已确认')); report.checks.push('recovery alternatives expand before use, require confirmation and record a simulated server ACK');
     await nav('diagnostics'); await click('button', '检查现在能做什么'); await wait(() => document.querySelectorAll('.wa-wb-capability').length === 4 && !Array.from(document.querySelectorAll('button')).find(el => el.textContent.includes('检查现在能做什么'))?.disabled); await capture('diagnostics-light'); report.checks.push('diagnostics render four actual probe results with separate image-readiness status');
     await nav('recovery');
     assert.equal(await evaluate(() => document.querySelector('[data-testid="nav-records"]').getAttribute('aria-current')), 'page');
@@ -107,7 +110,8 @@ app.whenReady().then(async () => {
     let deletionSummary = await fixtureSummary();
     assert.equal(deletionSummary.records.draftCount, 0); assert.equal(deletionSummary.records.counts.all, 2);
     assert(deletionSummary.archives.some(record => record.state === 'sent' && record.acknowledgedMessageIds?.length));
-    await click('.wa-wb-list-item'); await click('button', '仅恢复文字'); await click('button', '仅恢复文字');
+    await click('.wa-wb-list-item'); await click('.wa-recovery-options > summary');
+    await click('button', '仅恢复文字'); await click('button', '仅恢复文字');
     assert.equal((await fixtureSummary()).records.draftCount, 2);
     await click('[data-testid="recovery-clear-history"]'); await click('[aria-label="确认删除恢复记录"] button', '确认删除');
     await wait(() => !document.querySelector('[aria-label="发送前预览"]') && !document.querySelector('.wa-wb-history-row'));

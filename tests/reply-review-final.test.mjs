@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { replyMemoryContext } from '../src/features/conversation/reply-context.mjs';
-import { reminderReaction, reminderReceipt } from '../src/features/conversation/task-confirmation.mjs';
+import { replyMemoryContext } from "../modules/conversation/reply-context.mjs";
+import { reminderReaction, reminderReceipt } from "../modules/conversation/task-confirmation.mjs";
 
 test('relevant recall retains the latest explicit correction when older repeated topics fill the budget', () => {
   const entry = (key, text) => ({ key, text, direction: 'incoming', senderId: 'alice', senderName: '阿禾', time: 1762500000000 });
@@ -24,5 +24,6 @@ test('a reminder reaction cannot add an unsupported person, activity and later d
   for (const candidate of ['next week call Alice', '喝完再叫别人', '过会儿去见阿禾', '好，顺便帮你改了', '好\n下周再说'])
     assert.equal(reminderReaction(JSON.stringify({ reaction: candidate })), '', candidate);
   assert.equal(reminderReaction(JSON.stringify({ reaction: '得嘞！' })), '得嘞');
-  assert.equal(reminderReaction(JSON.stringify({ reaction: '知晓了' })), '知晓了');
+  assert.equal(reminderReaction(JSON.stringify({ reaction: '记好了' })), '记好了');
+  assert.equal(reminderReaction(JSON.stringify({ reaction: '遵命' })), '');
 });

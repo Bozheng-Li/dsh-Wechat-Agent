@@ -4,9 +4,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateRawSync, deflateSync } from 'node:zlib';
-import { MediaLibrary } from '../src/features/media/library.mjs';
-import { MEDIA_LIBRARY_LIMITS } from '../src/features/media/limits.mjs';
-import { readAssetZip } from '../src/features/media/zip.mjs';
+import { MediaLibrary } from "../modules/media/library.mjs";
+import { MEDIA_LIBRARY_LIMITS } from "../modules/media/limits.mjs";
+import { readAssetZip } from "../modules/media/zip.mjs";
 
 const workspace = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../storage/tmp');
 const crc32 = data => { let value = 0xffffffff; for (const byte of data) { value ^= byte; for (let bit = 0; bit < 8; bit++) value = (value >>> 1) ^ (value & 1 ? 0xedb88320 : 0); } return (value ^ 0xffffffff) >>> 0; };

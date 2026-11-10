@@ -17,11 +17,19 @@ const mocks = {
     subscribe() {}
     async sendMessage(params) {
       this.sent++;
+      if (params.peerId === 'protocol@chatroom' || params.peerId === 'unsafe-protocol@chatroom') throw Object.assign(new Error(params.peerId === 'protocol@chatroom'
+        ? '图片上传回执的长度或分片位置不匹配，发送结果未知' : 'raw packet token=PRIVATE_TOKEN'), { code: 'ERR_PROTOCOL', details: {
+        ret: params.peerId === 'protocol@chatroom' ? -2 : 'PRIVATE_TOKEN', delivery: 'unknown', rawPacket: 'PRIVATE_PACKET'
+      } });
       if (params.peerId === 'partial@chatroom') throw Object.assign(new Error('internal transport detail'), { code: 'ERR_SEND_FAILED', details: {
         delivery: 'partially-acknowledged', acknowledgedMessageIds: ['9007199254740999'], privateData: 'do not forward',
         deliveryParts: [{ index: 0, type: 'text', state: 'acknowledged', serverMessageId: '9007199254740999', raw: 'not public' }, { index: 1, type: 'image', state: 'unknown', bytes: 'not public' }]
       } });
       return { delivery: 'server-ack', serverMessageIds: ['9007199254740999'], actualAccount: this.session.value.wxid, receivedParams: params };
+    }
+    async writeMoments(query, clientId) {
+      if (query.action === 'rejected') throw Object.assign(new Error('微信拒绝朋友圈操作（ret=-2）'), { code: 'ERR_MOMENTS_WRITE_REJECTED', details: { delivery: 'rejected', rawPacket: 'PRIVATE_PACKET' } });
+      return { accountId: this.session.value.wxid, action: query.action, clientId, postId: query.postId, delivery: 'server-ack' };
     }
     async close() {}
   }`,
@@ -29,7 +37,7 @@ const mocks = {
   './paths.ts': `export const protectStorage = () => {}; export const projectPaths = root => ({ private: root, cache: root });`,
   './protocol/media-loader.mjs': `export const loadObservedMedia = () => { throw new Error('Media is not available in this isolated worker'); };`,
 };
-const build = await rolldown({ input: path.join(root, 'src/worker.mjs'), platform: 'node', plugins: [{ name: 'offline-worker-boundary',
+const build = await rolldown({ input: path.join(root, 'backend/worker.mjs'), platform: 'node', plugins: [{ name: 'offline-worker-boundary',
   resolveId(source) { return Object.hasOwn(mocks, source) ? '\0offline:' + source : null; },
   load(id) { return id.startsWith('\0offline:') ? mocks[id.slice('\0offline:'.length)] : null; },
 }] });
@@ -95,4 +103,31 @@ test('worker preserves per-part ACK and uncertainty across IPC without serializi
   assert.equal(response.ok, false); assert.equal(response.error.details.delivery, 'partially-acknowledged');
   assert.deepEqual(response.error.details.deliveryParts, [{ index: 0, type: 'text', state: 'acknowledged', serverMessageId: '9007199254740999' }, { index: 1, type: 'image', state: 'unknown' }]);
   assert(!JSON.stringify(response).includes('not public')); assert(!JSON.stringify(response).includes('do not forward')); assert(!JSON.stringify(response).includes('internal transport detail'));
+});
+
+test('worker forwards a known image protocol explanation and numeric status without raw packets', async t => {
+  const f = await workerFixture(t);
+  const response = await f.call('send', { accountId: 'worker-current-account', ...message, peerId: 'protocol@chatroom' });
+  assert.equal(response.ok, false); assert.equal(response.error.code, 'ERR_PROTOCOL');
+  assert.match(response.error.message, /分片位置不匹配/); assert.match(response.error.message, /ret=-2/);
+  assert.equal(response.error.details.ret, -2); assert.equal(response.error.details.delivery, 'unknown');
+  assert(!JSON.stringify(response).includes('PRIVATE_PACKET'));
+});
+
+test('unexpected protocol text and nonnumeric status remain private at the worker boundary', async t => {
+  const f = await workerFixture(t);
+  const response = await f.call('send', { accountId: 'worker-current-account', ...message, peerId: 'unsafe-protocol@chatroom' });
+  assert.match(response.error.message, /协议校验未通过/); assert.equal(response.error.details.ret, undefined);
+  assert(!JSON.stringify(response).includes('PRIVATE_')); assert(!JSON.stringify(response).includes('raw packet'));
+});
+
+test('SNS write IPC refuses stale accounts and invalid request IDs, and preserves only safe rejection metadata', async t => {
+  const f = await workerFixture(t), clientId = 'sns_' + 'a'.repeat(64), query = { action: 'like', postId: '9007199254740999' };
+  assert.equal((await f.call('moments.write', { accountId: 'other', clientId, query })).error.code, 'ACCOUNT_CHANGED');
+  assert.equal((await f.call('moments.write', { accountId: 'worker-current-account', clientId: 'invalid', query })).error.code, 'ERR_INVALID_MOMENTS_WRITE');
+  const success = await f.call('moments.write', { accountId: 'worker-current-account', clientId, query });
+  assert.equal(success.ok, true); assert.equal(success.value.postId, query.postId); assert.equal(success.value.clientId, clientId);
+  const rejected = await f.call('moments.write', { accountId: 'worker-current-account', clientId, query: { action: 'rejected' } });
+  assert.equal(rejected.error.code, 'ERR_MOMENTS_WRITE_REJECTED'); assert.equal(rejected.error.details.snsDelivery, 'rejected');
+  assert(!JSON.stringify(rejected).includes('PRIVATE_PACKET')); assert.equal((await f.call('status')).value.sent, 0);
 });

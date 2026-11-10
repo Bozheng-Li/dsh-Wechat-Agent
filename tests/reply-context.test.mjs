@@ -99,17 +99,18 @@ test('a compaction provider failure leaves the current reply deliverable and old
   assert(f.channel.memoryRetries.size > 0);
 });
 
-test('conversation persona overrides default and returns to the current default after clearing override', async t => {
+test('the global custom entry changes every subsequent reply while the old conversation override is rejected', async t => {
   const f = fixture(t);
   await f.service.call('persona.save', { persona: { name: '默认阿宁', aliases: [], prompt: '轻快直接。' } });
-  await f.service.call('conversation.configure', { ...scope, config: { ...f.store.conversationSettings(scope.accountId, scope.chatType, scope.peerId), persona: { name: '独立掌柜', aliases: [], prompt: '温和古风。' } } });
+  const before = f.store.conversationSettings(scope.accountId, scope.chatType, scope.peerId);
+  await assert.rejects(f.service.call('conversation.configure', { ...scope, config: { ...before, persona: { name: '独立掌柜', aliases: [], prompt: '温和古风。' } } }),
+    error => error.code === 'PERSONA_GLOBAL_ONLY');
+  assert.deepEqual(f.store.conversationSettings(scope.accountId, scope.chatType, scope.peerId), before);
   f.receive('/agent 今天天气不错'); await f.channel.whenIdle();
-  assert.equal(f.calls.at(-1).persona.name, '独立掌柜');
+  assert.equal(f.calls.at(-1).persona.name, '默认阿宁');
   await f.service.call('persona.save', { persona: { name: '新默认阿宁', aliases: [], prompt: '爽快。' } });
   f.receive('/agent 再聊两句'); await f.channel.whenIdle();
-  assert.equal(f.calls.at(-1).persona.name, '独立掌柜');
-  await f.service.call('conversation.configure', { ...scope, config: { ...f.store.conversationSettings(scope.accountId, scope.chatType, scope.peerId), persona: null } });
-  f.receive('/agent 晚上好'); await f.channel.whenIdle();
   assert.equal(f.calls.at(-1).persona.name, '新默认阿宁');
-  assert.equal(f.sent.length, 3);
+  assert.equal(f.store.conversationSettings(scope.accountId, scope.chatType, scope.peerId).persona, null);
+  assert.equal(f.sent.length, 2);
 });

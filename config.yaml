@@ -1,0 +1,78 @@
+# Default business settings. Each installed workspace owns its config.yaml.
+version: 1
+ownerStoreId: null
+connectionWanted: false
+accounts: {}
+modelChoice: null
+modelConfig:
+  maxTokens: null
+  temperature: null
+  promptStrategy: legacy
+  vision: true
+  visionModel: null
+  webSearch: false
+  searchProvider: tavily
+  tavilyBaseURL: https://api.tavily.com
+persona:
+  name: 微信助手
+  aliases: []
+  background: ""
+  personality: ""
+  style: ""
+personaTemplatesVersion: 3
+storageSettings:
+  workspacePath: workspace
+  recordsPath: storage/conversations
+conversationConfigs: {}
+conversationDefaults:
+  mode: default
+  executionMode: chat
+  workSenderIds: []
+  remoteEnabled: false
+  adminIds: []
+  intervalMode: random
+  minMessages: 5
+  maxMessages: 20
+  fixedMessages: 10
+  recordsPath: ""
+  memoryMode: always
+  memoryWindowChars: null
+  natural:
+    temperament: balanced
+    intervalMode: random
+    minMinutes: 30
+    maxMinutes: 60
+    fixedMinutes: 30
+    smartSkip: true
+    followupSeconds: 120
+    maxUnanswered: 2
+    minGapMinutes: 3
+    activeHours: true
+    startTime: "09:00"
+    endTime: "23:00"
+memory:
+  windowChars: 100000
+  windowCustomized: false
+  windowDefaultVersion: 2
+  retentionDays: 30
+imageMemoryDefaults:
+  enabled: true
+  retentionDays: 30
+imageMemory: {}
+mediaDefaults:
+  enabled: true
+  probability: 20
+  minGapMessages: 3
+media: {}
+work:
+  maxConcurrent: 2
+  timeoutSeconds: 0
+  commandTimeoutSeconds: 60
+remote:
+  globalAdminIds: []
+imageGeneration:
+  enabled: false
+  defaultProviderId: ''
+  providers: []
+prompts:
+  identity: prompts/AGENT.md

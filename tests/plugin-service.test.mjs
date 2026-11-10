@@ -83,7 +83,7 @@ function blockRunner(f) {
 for (const conflict of ['invalid', 'stale']) test(`${conflict} identity drafts are rejected without cancelling active or queued replies`, async t => {
   const f = fixture(t), initial = await f.service.call('identity.get');
   const current = '# 当前全局身份\n保留正在执行的回复。';
-  if (conflict === 'stale') fs.writeFileSync(path.join(f.root, 'AGENT.md'), current, 'utf8');
+  if (conflict === 'stale') fs.writeFileSync(initial.path, current, 'utf8');
   const gate = blockRunner(f);
   f.receive(f.message('第一问')); await gate.started.promise;
   f.receive(f.message('排队的第二问'));

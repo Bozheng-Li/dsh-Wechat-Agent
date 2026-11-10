@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { StateStore, ConversationMemory, WechatChannel, ChannelError, memoryText, validateConversationSettings } from '../lib/testing.js';
+import { StateStore, ConversationMemory, WechatChannel, ChannelError, memoryText, validateConversationSettings, createPluginService } from '../lib/testing.js';
 
 function fixture(t, { prefill = false, offline = false } = {}) {
   const parent = fs.realpathSync(os.tmpdir()), root = fs.mkdtempSync(path.join(parent, 'wechat-auto-compact-'));
@@ -66,11 +66,50 @@ test('the exact window boundary triggers automatic compression and repeated empt
 test('new defaults and legacy defaults use 100000 characters while explicit million-character windows survive restart', t => {
   const f = fixture(t), other = new ConversationMemory(f.store); other.onPressure = null;
   assert.equal(new ConversationMemory(new StateStore(path.join(f.root, 'fresh'))).index.windowChars, 100000);
-  other.index.windowChars = 32000; delete other.index.windowDefaultVersion; delete other.index.windowCustomized; fs.writeFileSync(other.indexFile, JSON.stringify(other.index));
+  other.index.windowChars = 32000; delete other.index.windowDefaultVersion; delete other.index.windowCustomized; delete other.index.configurationVersion; fs.writeFileSync(other.indexFile, JSON.stringify(other.index));
   assert.equal(new ConversationMemory(f.store).index.windowChars, 100000);
   const custom = new ConversationMemory(f.store); custom.setWindowChars(1000000); assert.equal(new ConversationMemory(f.store).index.windowChars, 1000000);
   custom.setWindowChars(32000); assert.equal(new ConversationMemory(f.store).index.windowChars, 32000);
   const input = { mode: 'default', intervalMode: 'fixed', fixedMessages: 5, minMessages: 5, maxMessages: 20, recordsPath: '', memoryWindowChars: 1000000 };
   assert.equal(validateConversationSettings(input).memoryWindowChars, 1000000);
   for (const value of [999, Infinity, 1000.5, Number.MAX_SAFE_INTEGER + 1]) assert.throws(() => custom.setWindowChars(value), { code: 'INVALID_MEMORY_SETTINGS' });
+});
+
+test('manual compression below the window calls the model and archives the exact original while retaining recent entries', async t => {
+  const f = fixture(t, { offline: true }); f.memory.setWindowChars(100000);
+  for (let i = 0; i < 6; i++) f.memory.append(f.scope, { ...f.source(`manual-${i}`), text: '阿禾喜欢猫，周五带咖啡。' + '普通重复内容。'.repeat(30) });
+  const before = f.memory.load(f.scope), chars = f.memory.view(f.scope).chars;
+  assert(chars < 100000);
+  await f.memory.compact(f.scope, f.runner, new AbortController().signal);
+  assert.equal(f.calls(), 0, 'automatic compression waits for the configured boundary');
+  await f.memory.compact(f.scope, f.runner, new AbortController().signal, { force: true });
+  const after = f.memory.view(f.scope);
+  assert.equal(f.calls(), 1); assert.equal(after.compressions, 1); assert(after.chars < chars);
+  assert(after.entries.some(entry => entry.key === 'manual-5'));
+  const archive = fs.readdirSync(path.join(path.dirname(after.path), 'archive')).find(name => name.endsWith('before-compaction.json'));
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(path.dirname(after.path), 'archive', archive), 'utf8')), before);
+});
+
+test('manual compression handles a small summary and skips genuinely empty memory without calling the model', async t => {
+  const f = fixture(t, { offline: true }); f.memory.setWindowChars(100000);
+  await f.memory.compact(f.scope, f.runner, new AbortController().signal, { force: true });
+  assert.equal(f.calls(), 0); assert.equal(f.memory.view(f.scope).compressions, 0);
+  f.memory.edit(f.scope, '阿禾周五带咖啡。这是同一约定的重复说明。', f.memory.view(f.scope).revision);
+  let calls = 0;
+  f.runner.summarize = async (_material, target, _signal, retry) => { calls++; assert(target <= retry.maximum); return '阿禾周五带咖啡。'; };
+  await f.memory.compact(f.scope, f.runner, new AbortController().signal, { force: true });
+  assert.equal(calls, 1); assert.equal(f.memory.view(f.scope).summary, '阿禾周五带咖啡。');
+  assert.equal(f.memory.view(f.scope).compressions, 1);
+});
+
+test('the owner memory.compress operation requests compression even below the window', async t => {
+  const f = fixture(t, { offline: true }); f.memory.setWindowChars(100000);
+  f.memory.append(f.scope, f.source('manual-rpc'));
+  const worker = { status: () => f.status };
+  const service = createPluginService({ ctx: {}, root: f.root, store: f.store, worker, runner: f.runner, channel: f.channel });
+  t.after(() => service.drain());
+  await service.call('memory.compress', f.scope);
+  await f.idle();
+  assert.equal(f.calls(), 1); assert.equal(f.memory.view(f.scope).compressions, 1);
+  assert.equal(f.memory.view(f.scope).error, null);
 });

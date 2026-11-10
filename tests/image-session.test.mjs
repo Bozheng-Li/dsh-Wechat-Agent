@@ -8,8 +8,8 @@ import { rolldown } from 'rolldown';
 import { nativeQrSession, writeNativeQrRound } from './fixtures/native-qr-session.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const entry = ['session.ts', 'image-session.ts', 'wire.ts', 'login.ts'].map(file => `export * from ${JSON.stringify(path.join(root, 'src/wechat/protocol', file))};`).join('\n');
-const build = await rolldown({ input: 'virtual:image-session-test', platform: 'node', resolve: { alias: { '@napcat-wechat/protocol': path.join(root, 'src/wechat/types.ts') } }, plugins: [{ name: 'image-session-test', resolveId: id => id === 'virtual:image-session-test' ? id : null, load: id => id === 'virtual:image-session-test' ? entry : null }] });
+const entry = ['session.ts', 'image-session.ts', 'wire.ts', 'login.ts'].map(file => `export * from ${JSON.stringify(path.join(root, 'backend/wechat/protocol', file))};`).join('\n');
+const build = await rolldown({ input: 'virtual:image-session-test', platform: 'node', resolve: { alias: { '@napcat-wechat/protocol': path.join(root, 'backend/wechat/types.ts') } }, plugins: [{ name: 'image-session-test', resolveId: id => id === 'virtual:image-session-test' ? id : null, load: id => id === 'virtual:image-session-test' ? entry : null }] });
 let api;
 try { const { output } = await build.generate({ format: 'esm' }); api = await import(`data:text/javascript;base64,${Buffer.from(output[0].code).toString('base64')}`); }
 finally { await build.close(); }

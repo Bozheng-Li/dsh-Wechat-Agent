@@ -53,8 +53,13 @@ exports.makeInputVariants = function makeInputVariants(messages, { name, memberN
 };
 
 exports.runPersonaAudit = async ({ ctx, testing: T, sourceRoot, outputRoot, signal, selection, productionModelConfig, onProgress = () => {} }) => {
-  const { personaFromPreset } = await import(pathToFileURL(path.join(sourceRoot, 'src/shared/persona-presets.mjs')).href);
-  const { personaFields } = await import(pathToFileURL(path.join(sourceRoot, 'src/features/agent/persona-input.mjs')).href);
+  assert(selection?.provider && selection?.model);
+  assert(productionModelConfig && Object.hasOwn(productionModelConfig, 'temperature') && Object.hasOwn(productionModelConfig, 'maxTokens'),
+    'Pass productionModelConfig read from the running Agent');
+  const { PERSONA_PRESETS, personaFromPreset } = await import(pathToFileURL(path.join(sourceRoot, 'prompts/personas/catalog.mjs')).href);
+  if (PERSONA_PRESETS.length === 1) return require('./language-live-cases.cjs').runPersonaAudit({ ctx, testing: T, outputRoot,
+    signal, selection, productionModelConfig, onProgress, caseIds: exports.caseIds, auditName: 'ablation' });
+  const { personaFields } = await import(pathToFileURL(path.join(sourceRoot, 'modules/agent/persona-input.mjs')).href);
   const directory = path.join(outputRoot, 'persona'); fs.mkdirSync(directory, { recursive: true });
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-input-ablation-'));
   const report = { completed: false, automatedChecksPassed: false, reviewStatus: 'actual-output-review-pending',

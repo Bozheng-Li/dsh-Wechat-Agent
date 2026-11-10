@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { StateStore, ConversationMemory } from '../lib/testing.js';
-import { LongTermMemory } from '../src/features/memory/long-term-memory.mjs';
+import { LongTermMemory } from "../modules/memory/long-term/store.mjs";
 
 const temp = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../storage/tmp');
 const accountId = 'long_memory_owner', peerId = 'long-memory@chatroom';

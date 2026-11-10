@@ -1,0 +1,17 @@
+{
+  "channel-question-1": "管理员恢复：",
+  "channel-question-2": "定时任务：",
+  "incoming-text-1": "请根据当前群聊内容，自然接上正在讨论的话题，给出一次简短回应。",
+  "incoming-question-2": "自然陪聊：累计 {{0}} 条新消息，判断是否接话",
+  "incoming-question-3": "自然陪聊：到达时间，判断是否开话题",
+  "reply-text-1": "大家",
+  "reply-text-2": "你",
+  "reply-systemOverride-3": "后台已保存提醒，时间、对象和事项由程序直接确认。只从以下短应答中选一个最符合当前角色口吻的词，逐字使用，不另造句：{{0}}。只输出 JSON 对象 {\"reaction\":\"选中的短应答\"}；固定首末行由后台加在完整确认正文，不加在 JSON 内。",
+  "reply-text-4": "\n\n当前消息的图片资料（未查看的图片不能猜测）：\n{{0}}",
+  "reply-text-5": "定时提醒：",
+  "reply-text-6": "\n（本次智能内容未能生成，先提醒原定事项。）",
+  "conversation-store-description-1": "表情包（不调用图像理解）",
+  "conversation-store-description-2": "图片已接收，尚未按需查看；不能猜测画面",
+  "conversation-store-sourceNote-3": "仅有微信缩略图，小字和画面细节未核实。",
+  "conversation-store-sourceNote-4": "旧图像笔记的清晰度未核实，可重新获取清晰图片后理解。"
+}

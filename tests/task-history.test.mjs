@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { taskViews } from '../src/shared/task-history.mjs';
+import { taskViews } from "../shared/task-history.mjs";
 
 test('a completed task and its execution produce one history row at the actual completion time', () => {
   const task = { id: 'done', state: 'completed', nextRunAt: 1000, updatedAt: 7000, lastState: 'sent', runId: 'run' };

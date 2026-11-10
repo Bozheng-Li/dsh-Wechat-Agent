@@ -10,16 +10,19 @@ const hash = value => crypto.createHash('sha256').update(typeof value === 'strin
 
 exports.runPersonaAudit = async ({ ctx, testing: candidate, sourceRoot, outputRoot, signal, selection, productionModelConfig, onProgress = () => {} }) => {
   assert(selection?.provider && selection?.model);
-  assert(productionModelConfig && Object.hasOwn(productionModelConfig, 'temperature') && Object.hasOwn(productionModelConfig, 'maxTokens'));
+  assert(productionModelConfig && Object.hasOwn(productionModelConfig, 'temperature') && Object.hasOwn(productionModelConfig, 'maxTokens'),
+    'Pass productionModelConfig read from the running Agent');
+  const { PERSONA_PRESETS, personaFromPreset } = await import(pathToFileURL(path.join(sourceRoot, 'prompts/personas/catalog.mjs')).href);
+  if (PERSONA_PRESETS.length === 1) return require('./language-live-cases.cjs').runPersonaAudit({ ctx, testing: candidate, outputRoot,
+    signal, selection, productionModelConfig, onProgress, caseIds: exports.caseIds, auditName: 'section' });
   assert(typeof exports.baselineManifest === 'string', 'Provide the frozen installed baseline manifest');
   const baselineManifest = JSON.parse(fs.readFileSync(exports.baselineManifest, 'utf8'));
   const baselineFile = path.join(baselineManifest.snapshot, 'lib/testing.js');
   assert.equal(hash(fs.readFileSync(baselineFile)), baselineManifest.hashes['lib/testing.js']);
   const baseline = require(baselineFile);
-  const { personaFromPreset } = await import(pathToFileURL(path.join(sourceRoot, 'src/shared/persona-presets.mjs')).href);
-  const { personaFields, personaStyleParts } = await import(pathToFileURL(path.join(sourceRoot, 'src/features/agent/persona-input.mjs')).href);
-  const { configDraft, configPayload } = await import(pathToFileURL(path.join(sourceRoot, 'src/client/shared/drafts.mjs')).href);
-  const { validatePersona } = await import(pathToFileURL(path.join(sourceRoot, 'src/shared/contracts.mjs')).href);
+  const { personaFields, personaStyleParts } = await import(pathToFileURL(path.join(sourceRoot, 'modules/agent/persona-input.mjs')).href);
+  const { configDraft, configPayload } = await import(pathToFileURL(path.join(sourceRoot, 'frontend/shared/drafts.mjs')).href);
+  const { validatePersona } = await import(pathToFileURL(path.join(sourceRoot, 'shared/contracts.mjs')).href);
   const directory = path.join(outputRoot, 'persona'); fs.mkdirSync(directory, { recursive: true });
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-section-audit-'));
   const report = { completed: false, automatedChecksPassed: false, reviewStatus: 'actual-output-review-pending',

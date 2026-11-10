@@ -1,20 +1,34 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { fork } from 'node:child_process';
 import { rolldown } from 'rolldown';
 
-// Compile the source in memory. These fixtures never use the installed worker,
+// Compile an isolated source bundle. These fixtures never use the installed worker,
 // real account storage, or a network transport, and do not rebuild lib/.
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const entry = ['src/features/tasks/scheduler.mjs', 'src/features/tasks/conversation-tools.mjs', 'src/shared/contracts.mjs', 'src/wechat/protocol/backend.ts', 'src/wechat/protocol/wire.ts', 'src/wechat/types.ts']
+const entry = ['modules/tasks/scheduler.mjs', 'modules/tasks/conversation-tools.mjs', 'shared/contracts.mjs', 'backend/wechat/protocol/backend.ts', 'backend/wechat/protocol/wire.ts', 'backend/wechat/types.ts']
   .map(file => `export * from ${JSON.stringify(path.join(root, file))};`).join('\n');
-const bundle = await rolldown({ input: 'virtual:task-mentions', platform: 'node', resolve: { alias: { '@napcat-wechat/protocol': path.join(root, 'src/wechat/types.ts') } }, plugins: [{ name: 'task-mentions', resolveId: id => id === 'virtual:task-mentions' ? id : null, load: id => id === 'virtual:task-mentions' ? entry : null }] });
+const bundle = await rolldown({ input: 'virtual:task-mentions', platform: 'node', resolve: { alias: { '@napcat-wechat/protocol': path.join(root, 'backend/wechat/types.ts') } }, plugins: [{ name: 'task-mentions', resolveId: id => id === 'virtual:task-mentions' ? id : null, load: id => id === 'virtual:task-mentions' ? entry : null }] });
 let api;
-try { const { output } = await bundle.generate({ format: 'esm' }); assert.equal(output.length, 1); api = await import(`data:text/javascript;base64,${Buffer.from(output[0].code).toString('base64')}`); }
+const bundleParent = path.join(root, 'storage/tmp');
+fs.mkdirSync(bundleParent, { recursive: true });
+const bundleDirectory = fs.mkdtempSync(path.join(bundleParent, 'task-mentions-'));
+after(() => {
+  assert.equal(path.dirname(fs.realpathSync(bundleDirectory)), fs.realpathSync(bundleParent));
+  assert.match(path.basename(bundleDirectory), /^task-mentions-/);
+  fs.rmSync(bundleDirectory, { recursive: true, force: true });
+});
+try {
+  const { output } = await bundle.generate({ format: 'esm' });
+  assert.equal(output.length, 1);
+  const file = path.join(bundleDirectory, 'api.mjs');
+  fs.writeFileSync(file, output[0].code);
+  api = await import(pathToFileURL(file).href);
+}
 finally { await bundle.close(); }
 const { TaskScheduler, simpleReminder, conversationTaskTool, ChannelError, ProtocolBackend, sendRequest, fields, bytes, num, unstring, fv, ld, segments } = api;
 const owner = 'wxid_task_owner', room = 'task-members@chatroom', other = 'task-other@chatroom';
@@ -307,7 +321,7 @@ const workerMocks = {
   './paths.ts': `export const protectStorage = () => {}; export const projectPaths = root => ({ private: root, cache: root });`,
   './protocol/media-loader.mjs': `export const loadObservedMedia = () => { throw new Error('No media in member fixture'); };`,
 };
-const workerBundle = await rolldown({ input: path.join(root, 'src/worker.mjs'), platform: 'node', plugins: [{ name: 'offline-member-worker', resolveId: source => Object.hasOwn(workerMocks, source) ? '\0member-worker:' + source : null, load: id => id.startsWith('\0member-worker:') ? workerMocks[id.slice('\0member-worker:'.length)] : null }] });
+const workerBundle = await rolldown({ input: path.join(root, 'backend/worker.mjs'), platform: 'node', plugins: [{ name: 'offline-member-worker', resolveId: source => Object.hasOwn(workerMocks, source) ? '\0member-worker:' + source : null, load: id => id.startsWith('\0member-worker:') ? workerMocks[id.slice('\0member-worker:'.length)] : null }] });
 let workerCode;
 try { const { output } = await workerBundle.generate({ format: 'cjs' }); assert.equal(output.length, 1); workerCode = output[0].code; }
 finally { await workerBundle.close(); }

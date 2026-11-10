@@ -1,0 +1,4 @@
+{
+  "instructions-1": "请只输出 OK",
+  "instructions-2": "这是模型连通性测试，只输出 OK，不添加签名或其他内容。"
+}

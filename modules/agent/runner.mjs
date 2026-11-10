@@ -1,0 +1,362 @@
+import { promptText } from "../../prompts/loader.mjs";
+import { randomUUID } from 'node:crypto';
+import { ChannelError } from "../../shared/contracts.mjs";
+import { availableModel, visionSelection } from "./models.mjs";
+import { webSearchTool } from "../tasks/conversation-tools.mjs";
+import { REPLY_STYLE_REVIEW_NOTE, needsConversationalRewrite } from "./reply-style.mjs";
+import { SearchService } from "../search/service.mjs";
+import { memoryCompressionPrompt } from "../../shared/memory-policy.mjs";
+import {
+  INTERNAL_OUTPUT_MODES,
+  buildWechatPrompt,
+  messageWithHistory,
+  memoryContext,
+  identityData,
+  scheduledData,
+  imageQualityContext,
+  applyFixedReplyBoundaries,
+} from "../../prompts/reply/compose.mjs";
+import { completedText, retryableEmptyResponse } from "./output.mjs";
+import { emptyResponseRetryNote } from '../../prompts/reply/delivery.mjs';
+import { resetWechatSessionContext } from "./request-context.mjs";
+import { registerAgentWorkspace } from './workspace.mjs';
+import { publishWorkSessionHistory } from '../work/session-history.mjs';
+import { registerModelTools } from '../tools/registry.mjs';
+import { planProgressiveTools } from '../tools/progressive.mjs';
+import { observeModelRequests } from './request-metrics.mjs';
+import { polishWorkResult } from '../work/polish.mjs';
+
+export class DshAgentRunner {
+  constructor(ctx, getModelChoice = () => null, getRuntimeSettings = () => ({})) {
+    this.ctx = ctx;
+    this.getModelChoice = getModelChoice;
+    this.getRuntimeSettings = getRuntimeSettings;
+    this.lastSearch = null;
+    this.search = new SearchService(ctx);
+  }
+  searchStatus() {
+    return this.lastSearch ? { ...this.lastSearch } : null;
+  }
+  defaultSelection() {
+    const selection = this.ctx.agentDefaultModel.currentSelection();
+    if (!selection?.provider || !selection?.model)
+      throw new ChannelError('MODEL_MISSING', '请先在 DSH 中选择可用的模型');
+    return selection;
+  }
+  selection() {
+    return this.getModelChoice() ?? this.defaultSelection();
+  }
+  extractLongTermMemory(request) {
+    return this.run(request);
+  }
+  async polishReport(text,request,signal,presentation) {
+    return (await polishWorkResult(this,text,request,signal,presentation)).text;
+  }
+  async polishReply(reply, request, signal, persona, context = {}) {
+    signal.throwIfAborted();
+    const runtime = context.runtime ?? structuredClone(this.getRuntimeSettings() ?? {});
+    const style = { persona: persona ?? runtime.persona, prompt: context.prompt, identityMarkdown: runtime.identityMarkdown };
+    // Style review stays read-only. Complete the owner's exact fixed lines
+    // without rewriting the body or requesting another model response.
+    if (needsConversationalRewrite(reply, request, style)) context.onStyleWarning?.(REPLY_STYLE_REVIEW_NOTE);
+    return applyFixedReplyBoundaries(reply, { prompt: context.prompt, identityMarkdown: runtime.identityMarkdown });
+  }
+  async describeImage(image, signal, { question, executionSnapshot } = {}) {
+    if (image.type === 'face' || image.kind === 'sticker')
+      throw new ChannelError('STICKER_VISION_SKIPPED', '表情包不调用图像理解');
+    const result = await this.run({
+      text:
+        promptText("vision/requests.json", "runner-text-1") +
+        imageQualityContext([image]) +
+        (question ? promptText("vision/requests.json", "runner-text-2") + JSON.stringify({ question }) : ''),
+      images: [image],
+      signal,
+      mode: 'vision',
+      executionSnapshot,
+      systemOverride:
+        promptText("vision/requests.json", "runner-systemOverride-3"),
+    });
+    return result.text;
+  }
+  async describeImages(images, signal) {
+    if (images.some((image) => image.type === 'face' || image.kind === 'sticker'))
+      throw new ChannelError('STICKER_VISION_SKIPPED', '表情包不调用图像理解');
+    if (images.length === 1) return [await this.describeImage(images[0], signal)];
+    const result = await this.run({
+      text: promptText("vision/requests.json", "runner-text-4", [images.length, imageQualityContext(images)]),
+      images,
+      signal,
+      mode: 'vision',
+      systemOverride:
+        promptText("vision/requests.json", "runner-systemOverride-5"),
+    });
+    let values;
+    try {
+      values = JSON.parse(result.text.replace(/^```(?:json)?\s*|\s*```$/g, ''));
+    } catch {}
+    if (
+      !Array.isArray(values) ||
+      values.length !== images.length ||
+      values.some((value) => typeof value !== 'string' || !value.trim() || value.length > 1500)
+    )
+      throw new ChannelError(
+        'IMAGE_DESCRIPTION_FAILED',
+        '模型返回的图像说明与图片数量不匹配，未混用图片内容，可稍后重新理解'
+      );
+    return values;
+  }
+  async summarize(text, maxChars, signal, retry = {}) {
+    const result = await this.run({
+      ...memoryCompressionPrompt(text, maxChars, retry),
+      signal,
+      mode: 'memory',
+      executionSnapshot: retry.executionSnapshot,
+    });
+    return result.text;
+  }
+  async memoryExecutionSnapshot(signal) {
+    signal.throwIfAborted();
+    const runtime = structuredClone(this.getRuntimeSettings() ?? {});
+    const chosen = structuredClone(this.getModelChoice());
+    const selection = chosen ? await availableModel(this.ctx, chosen, signal) : structuredClone(this.defaultSelection());
+    return { runtime, selection };
+  }
+  async run({
+    text,
+    group,
+    prompt,
+    persona,
+    adminNotes,
+    sessionId,
+    signal,
+    onSession,
+    mode = 'default',
+    history = [],
+    memory,
+    images = [],
+    tools = [],
+    systemOverride,
+    speaker,
+    account,
+    allowEmptyReply = false,
+    executionSnapshot,
+    selectReplyText,
+    naturalDecision,
+    scheduledTask,
+    workContext,
+    onRequestMetrics,
+  }) {
+    signal.throwIfAborted();
+    if (images.some((image) => image.type === 'face' || image.kind === 'sticker'))
+      throw new ChannelError('STICKER_VISION_SKIPPED', '表情包不调用图像理解');
+    // Capture once: picker/default changes apply to the next queued task,
+    // without interrupting or silently rerouting the task already underway.
+    const runtime = structuredClone(executionSnapshot?.runtime ?? this.getRuntimeSettings() ?? {});
+    const promptStrategy = runtime.modelConfig?.promptStrategy ?? 'legacy';
+    const requestMetrics = [];
+    if (persona) runtime.persona = structuredClone(persona);
+    const chosen = executionSnapshot ? null : structuredClone(this.getModelChoice());
+    let selected = structuredClone(executionSnapshot?.selection ?? chosen ?? this.defaultSelection());
+    // Retrieval supplements recent dialogue. Supplying memory must never erase
+    // the immediately preceding question, correction or speaker context.
+    const memoryData = memoryContext(memory);
+    const workDialogue = mode === 'work-dialogue';
+    const workSnapshot = workDialogue ? structuredClone(workContext) : undefined;
+    const inputText = workDialogue || mode === 'work-routing' ? text : [identityData(speaker, account, runtime.persona), scheduledData(scheduledTask, mode), memoryData,
+      messageWithHistory(text, history, mode, sessionId)]
+      .filter(Boolean)
+      .join('\n\n');
+    if (chosen) selected = await availableModel(this.ctx, chosen, signal);
+    if (images.length) selected = await visionSelection(this.ctx, selected, runtime.modelConfig?.visionModel, signal);
+    // Omission delegates the output budget to the exact DSH model/adapter,
+    // including its reasoning tokens. Never replace it with a plugin cap.
+    const agentOptions = { ...selected };
+    if (runtime.modelConfig?.maxTokens != null) agentOptions.maxTokens = runtime.modelConfig.maxTokens;
+    const temperature = runtime.modelConfig?.temperature;
+    // These modes and their output contracts are supplied by backend helpers,
+    // never parsed from chat text. Internal isolation also applies without an override.
+    const internalOutput = INTERNAL_OUTPUT_MODES.has(mode);
+    const natural = mode === 'natural' && naturalDecision;
+    const definitions =
+      workDialogue ? [...tools] : internalOutput || systemOverride || natural
+        ? []
+        : [
+            ...tools,
+            ...(runtime.modelConfig?.webSearch
+              ? [
+                  webSearchTool(
+                    () => this.search.forConfig(runtime.modelConfig),
+                    (result) => {
+                      this.lastSearch = { ...result, provider: runtime.modelConfig.searchProvider ?? 'dsh' };
+                    }
+                  ),
+                ]
+              : []),
+          ];
+    const capabilities = definitions.map((definition) => ({
+      ...definition,
+      execute: (args, execution) =>
+        definition.execute(args, {
+          ...execution,
+          executionSnapshot: structuredClone({ runtime, selection: selected }),
+        }),
+    }));
+    const userMessageId = randomUUID();
+    let resumedContextPending = !!sessionId;
+    const setup = (ctx) => {
+      // Do not load the desktop/coding preset or grant host tools to WeChat.
+      const plan = promptStrategy === 'progressive-v1' ? planProgressiveTools(capabilities, text) : { initial: capabilities, deferredGroups: [] };
+      const visibleCapabilities = registerModelTools(ctx, plan.initial, { deferredGroups: plan.deferredGroups,
+        native: promptStrategy === 'progressive-v1' || workDialogue || ['work-result','work-progress','work-routing'].includes(mode), denied: '微信会话只能使用管理员开放的会话工具' });
+      observeModelRequests(ctx, { strategy: promptStrategy, mode, rows: requestMetrics, onUpdate: onRequestMetrics });
+      ctx.systemPrompt.suppressRuntimeContext();
+      // The host's working-directory fact is otherwise marked required and
+      // appended as a second user message even without filesystem tools.
+      // Override only this agent's prompt contribution; its real workspace,
+      // persistence header and working-directory service remain untouched.
+      ctx.systemPrompt.context?.({ name: 'working-directory:current', order: 0,
+        required: false, interpolate: false, text: '' });
+      // Apply this turn's controls after Host defaults, including on resume.
+      if (sessionId || (temperature !== null && temperature !== undefined)) ctx.on('agent/request', async (position, next) => {
+        // The native step is open here, so the surface replacement is a valid
+        // replayable event. Do this only before this run's first model call.
+        if (resumedContextPending) {
+          resetWechatSessionContext(handle.agent.session, position);
+          resumedContextPending = false;
+        }
+        const request = { ...(await next()) };
+        // A same-model resume otherwise retains the previous explicit effort.
+        // Reapply this turn's frozen selection; omission uses the model default.
+        if (selected.reasoningEffort !== undefined) request.reasoningEffort = selected.reasoningEffort;
+        else if (sessionId) delete request.reasoningEffort;
+        // AgentOptions omits temperature in rc.5; this scoped waterfall reaches
+        // the actual provider controls without changing the Host's settings.
+        if (temperature !== null && temperature !== undefined) request.temperature = temperature;
+        return request;
+      }, { prepend: true });
+      ctx.systemPrompt.section({
+        name: 'wechat-agent',
+        order: 0,
+        complete: true,
+        interpolate: false,
+        text: buildWechatPrompt({
+          group,
+          mode,
+          persona: runtime.persona,
+          prompt,
+          adminNotes,
+          identityMarkdown: runtime.identityMarkdown,
+          modelConfig: runtime.modelConfig,
+          promptStrategy,
+          capabilities: visibleCapabilities,
+          systemOverride,
+          naturalDecision,
+          requestText: text,
+          history,
+          speaker,
+          workContext: workSnapshot,
+        }),
+      });
+    };
+    signal.throwIfAborted();
+    const id = sessionId || randomUUID();
+    const workspace = runtime.workspacePath ? await registerAgentWorkspace(this.ctx, runtime.workspacePath) : null;
+    signal.throwIfAborted();
+    let handle;
+    try {
+      handle = sessionId
+        ? await this.ctx.agents.resume({ resumeSessionId: id, agentOptions, setup, signal })
+        : await this.ctx.agents.create({
+            sessionId: id,
+            agentOptions,
+            setup,
+            signal,
+            ...(runtime.workspacePath ? { meta: { cwd: runtime.workspacePath } } : {}),
+          });
+      signal.throwIfAborted();
+      if (!sessionId) await workspace?.attachSession(id);
+      if (!sessionId) {
+        let titles;
+        try { titles = handle.agent.ctx?.get?.('sessionTitle') ?? handle.agent.ctx?.sessionTitle; } catch {}
+        if (titles?.rename) await titles.rename(handle.agent.session, workDialogue ? '微信聊天 · 工作调度' : '微信聊天 · 内部会话');
+      }
+      signal.throwIfAborted();
+      await onSession?.(id);
+      const agent = handle.agent;
+      let content = [{ type: 'text', text: inputText }];
+      if (images.length) {
+        if (!this.ctx.attachments?.admitPromptContent)
+          throw new ChannelError('VISION_UNAVAILABLE', 'DSH 未提供图像输入组件，请检查宿主的图像功能');
+        try {
+          content = await this.ctx.attachments.admitPromptContent([
+            ...content,
+            ...images.map((image) => ({
+              type: 'image',
+              data: image.data,
+              mediaType: image.mediaType,
+              name: '微信图片',
+            })),
+          ]);
+        } catch {
+          throw new ChannelError('IMAGE_INVALID', '图片未通过 DSH 的解码或大小检查，未将其当作已理解内容');
+        }
+        signal.throwIfAborted();
+      }
+      const cancel = () => agent.cancel({ kind: 'user' });
+      signal.addEventListener('abort', cancel, { once: true });
+      try {
+        signal.throwIfAborted();
+        // Same wire contract as dsh-llm.createUserMessage; no private DSH SDK
+        // dependency is bundled, so the host owns every Cordis service.
+        let reply, emptyResponseRetries = 0;
+        for (;;) {
+          const from = agent.session.seq;
+          agent.followup(
+            Object.freeze({
+              id: emptyResponseRetries ? randomUUID() : userMessageId,
+              role: 'user',
+              content: emptyResponseRetries ? [...content, { type: 'text', text: emptyResponseRetryNote() }] : content,
+              source: { kind: workDialogue ? 'user' : 'wechat-agent' },
+            })
+          );
+          await agent.whenIdle();
+          signal.throwIfAborted();
+          const events = agent.session.snapshotEvents(from);
+          try {
+            reply = completedText(events,
+              typeof allowEmptyReply === 'function' ? allowEmptyReply() : allowEmptyReply, selectReplyText);
+            break;
+          } catch (error) {
+            if (error.code === 'MODEL_EMPTY' && emptyResponseRetries)
+              throw new ChannelError('MODEL_EMPTY', '同一模型重试一次后仍没有返回可用的最终正文；未发送回复，请检查所选模型服务');
+            if (error.code !== 'MODEL_EMPTY' || emptyResponseRetries || !retryableEmptyResponse(events)) throw error;
+            emptyResponseRetries++;
+          }
+        }
+        let replyStyleWarning;
+        if (!internalOutput && !workDialogue && (!systemOverride || mode === 'confirmation') && reply)
+          reply = await this.polishReply(reply, text, signal, runtime.persona, {
+            prompt,
+            runtime,
+            onStyleWarning: (note) => {
+              replyStyleWarning = note;
+            },
+          });
+        return { text: reply, sessionId: id, requestMetrics, ...(emptyResponseRetries ? { emptyResponseRetries } : {}),
+          ...(replyStyleWarning ? { replyStyleWarning } : {}) };
+      } finally {
+        signal.removeEventListener('abort', cancel);
+      }
+    } catch (error) {
+      if (signal.aborted || error instanceof ChannelError) throw error;
+      throw new ChannelError('DSH_AGENT_FAILED', 'DSH 会话未能完成，请检查模型配置或在 DSH 查看会话；未发送微信回复');
+    } finally {
+      if (handle) {
+        handle.agent.cancel({ kind: 'disposed' });
+        await handle.agent.whenIdle();
+        await handle.dispose();
+        if (workDialogue) await publishWorkSessionHistory(this.ctx, id);
+      }
+    }
+  }
+}

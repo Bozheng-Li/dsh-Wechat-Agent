@@ -11,8 +11,11 @@ const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).
 
 exports.runPersonaAudit = async ({ ctx, testing: T, sourceRoot, outputRoot, signal, selection, productionModelConfig, onProgress = () => {} }) => {
   assert(selection?.provider && selection?.model, 'Supply the running Agent selection');
-  assert(productionModelConfig && Object.hasOwn(productionModelConfig, 'temperature') && Object.hasOwn(productionModelConfig, 'maxTokens'));
-  const { personaFromPreset } = await import(pathToFileURL(path.join(sourceRoot, 'src/shared/persona-presets.mjs')).href);
+  assert(productionModelConfig && Object.hasOwn(productionModelConfig, 'temperature') && Object.hasOwn(productionModelConfig, 'maxTokens'),
+    'Pass productionModelConfig read from the running Agent');
+  const { PERSONA_PRESETS, personaFromPreset } = await import(pathToFileURL(path.join(sourceRoot, 'prompts/personas/catalog.mjs')).href);
+  if (PERSONA_PRESETS.length === 1) return require('./language-live-cases.cjs').runPersonaAudit({ ctx, testing: T, outputRoot,
+    signal, selection, productionModelConfig, onProgress, caseIds: exports.caseIds, auditName: 'resume' });
   const directory = path.join(outputRoot, 'persona'); fs.mkdirSync(directory, { recursive: true });
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-persona-resume-'));
   const report = { completed: false, automatedChecksPassed: false, reviewStatus: 'actual-output-review-pending',

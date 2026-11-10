@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { StateStore, ConversationMemory, LongTermMemory, WechatChannel, EMPTY_MEMORY_SUMMARY } from '../lib/testing.js';
-import { conversationMemoryTool, relevantMemoryReference } from '../src/features/memory/tool.mjs';
+import { conversationMemoryTool, relevantMemoryReference } from "../modules/memory/query/tool.mjs";
 
 const signal = () => new AbortController().signal;
 function fixture(t) {

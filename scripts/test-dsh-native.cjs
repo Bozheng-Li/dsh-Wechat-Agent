@@ -33,6 +33,7 @@ const ctx = new Context();
 const requests = [];
 const longCompleteReply = '收到你的问题。\n' + '双曲线：x²/a² − y²/b² = 1。抛物线：y² = 2px。\n'.repeat(500) + '完整结尾。';
 let mode = 'complete';
+let emptyResponses = 0;
 class FixtureAdapter extends LlmAdapter {
   async listModels(provider) {
     return ['fixture', 'alternate'].map(id => ({ provider, id, name: `测试模型 ${id}` }));
@@ -45,10 +46,11 @@ class FixtureAdapter extends LlmAdapter {
   async *stream(options) {
     requests.push(options);
     const incomingImages = options.messages.flatMap(message => message.content || []).filter(block => block.type === 'image');
-    const expectedTools = mode === 'image-request-tool' && !incomingImages.length ? ['wechat_read_image'] : mode === 'image-memory-tool' && !incomingImages.length ? ['wechat_image_memory'] : mode === 'task-tool' || mode === 'task-denied' ? ['wechat_task'] : mode === 'search-tool' ? ['wechat_web_search'] : ['memory-tool', 'memory-all-tool', 'channel'].includes(mode) ? ['wechat_memory'] : [];
+    const expectedTools = mode === 'image-request-tool' && !incomingImages.length ? ['wechat_read_image'] : mode === 'image-memory-tool' && !incomingImages.length ? ['wechat_image_memory'] : mode === 'task-tool' || mode === 'task-denied' ? ['wechat_task'] : mode === 'search-tool' ? ['wechat_web_search'] : ['memory-tool', 'memory-all-tool', 'channel', 'empty-after-tool'].includes(mode) ? ['wechat_memory'] : [];
     assert.deepEqual((options.tools || []).map(tool => tool.name), expectedTools, 'only current-conversation tools are available; host tools never leak');
     const systems = options.messages.filter(m => m.role === 'system').flatMap(m => m.content).map(b => b.text || '').join('\n');
-    assert(systems.includes('微信')); assert(!systems.includes('HOST_SECRET_PERSONA'));
+    assert(systems.includes('微信') || systems.includes('这是内部资料处理任务'));
+    assert(!systems.includes('HOST_SECRET_PERSONA'));
     if (mode === 'cancel') {
       await new Promise((resolve, reject) => { options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }); });
       return;
@@ -80,8 +82,8 @@ class FixtureAdapter extends LlmAdapter {
       }
       assert(results.some(result => result.ok && typeof result.observation === 'string' && result.observation.includes('黑白网格')));
     }
-    if (['task-tool', 'task-denied', 'search-tool', 'memory-tool', 'memory-all-tool'].includes(mode) && !options.messages.some(message => message.role === 'tool')) {
-      const name = mode === 'search-tool' ? 'wechat_web_search' : mode.startsWith('memory-') ? 'wechat_memory' : 'wechat_task';
+    if (['task-tool', 'task-denied', 'search-tool', 'memory-tool', 'memory-all-tool', 'empty-after-tool'].includes(mode) && !options.messages.some(message => message.role === 'tool')) {
+      const name = mode === 'search-tool' ? 'wechat_web_search' : mode.startsWith('memory-') || mode === 'empty-after-tool' ? 'wechat_memory' : 'wechat_task';
       const args = name === 'wechat_task' ? { action: 'create', kind: 'message', content: '该喝水啦。', delaySeconds: 300 } : name === 'wechat_memory' ? mode === 'memory-all-tool' ? { section: 'all', query: null, offset: 0, revision: '' } : { section: 'conversation', query: '隔离链路' } : { query: '上海天气' };
       const block = { type: 'tool-call', id: 'native-fixture-tool-call', name, arguments: JSON.stringify(args) };
       yield { type: 'block-start', index: 0, blockType: 'tool-call' };
@@ -123,6 +125,12 @@ class FixtureAdapter extends LlmAdapter {
       yield { type: 'block-start', index: 0, blockType: 'text' };
       yield { type: 'text-delta', index: 0, text };
       yield { type: 'block-end', index: 0, block: { type: 'text', text } };
+      yield { type: 'finish', reason: { kind: 'stop' } }; return;
+    }
+    if (mode === 'empty-always' || mode === 'empty-after-tool' || (mode === 'empty-once' && emptyResponses++ === 0)) {
+      yield { type: 'block-start', index: 0, blockType: 'text' };
+      yield { type: 'text-delta', index: 0, text: ' ' };
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: ' ' } };
       yield { type: 'finish', reason: { kind: 'stop' } }; return;
     }
     yield { type: 'block-start', index: 0, blockType: 'reasoning' };
@@ -242,17 +250,18 @@ async function verifyPluginLifecycle(hostContext) {
   const store = new StateStore(path.join(root, 'channel'));
   const workspace = path.join(root, 'workspace'), alternateWorkspace = path.join(root, 'workspace-next');
   fs.mkdirSync(workspace); fs.mkdirSync(alternateWorkspace);
-  const { personaFromPreset } = await import('../src/shared/persona-presets.mjs');
-  const { configDraft, configPayload } = await import('../src/client/shared/drafts.mjs');
-  const preset = personaFromPreset('xiaopang');
-  const savedPersona = configPayload(configDraft({ persona: { ...preset, name: '小胖', aliases: ['胖胖'],
-    background: '测试音乐助手背景', personality: '温和且有分寸', style: '短句接话\n\n' + preset.style } })).persona;
+  const { personaFromPreset } = await import("../prompts/personas/catalog.mjs");
+  const { personaDraft } = await import("../frontend/shared/drafts.mjs");
+  const preset = personaFromPreset();
+  const savedPersona = { ...personaDraft({ ...preset, name: '小胖', aliases: ['胖胖'],
+    background: '测试音乐助手背景', personality: '温和且有分寸', style: '短句接话\n\n' + preset.style }), aliases: ['胖胖'] };
   assert.equal(typeof savedPersona.prompt, 'string');
   const runtime = { persona: savedPersona,
     modelConfig: { maxTokens: 1536, temperature: 0.25 }, workspacePath: workspace };
+  store.setPersona(savedPersona);
   const identity = new AgentIdentity(path.join(root, 'identity'));
   identity.edit('# 微信全局身份\nNATIVE_GLOBAL_FIRST：自然接话。', identity.view().revision);
-  const runner = new DshAgentRunner(ctx, () => store.modelChoice(), () => ({ ...runtime, identityMarkdown: identity.view().markdown })), controller = new AbortController();
+  const runner = new DshAgentRunner(ctx, () => store.modelChoice(), () => ({ ...runtime, persona: store.persona(), identityMarkdown: identity.view().markdown })), controller = new AbortController();
   const first = await runner.run({ text: '第一问', group: true, mode: 'participate', prompt: '回答简洁', signal: controller.signal,
     onSession: id => {
       assert.equal(ctx.sessions.get(id).header.cwd, workspace);
@@ -264,6 +273,7 @@ async function verifyPluginLifecycle(hostContext) {
   const firstSystem = requests[0].messages.filter(m => m.role === 'system').flatMap(m => m.content).map(b => b.text || '').join('\n');
   assert(!requests[0].messages.some(message => JSON.stringify(message.content).includes('Current working directory:')), 'WeChat model input must omit the unrelated host working-directory notice');
   assert(firstSystem.includes('NATIVE_GLOBAL_FIRST'));
+  assert(firstSystem.includes(fs.readFileSync(path.join(repo, 'prompts/reply/language.md'), 'utf8')));
   for (const value of ['小胖', '胖胖', '测试音乐助手背景', '温和且有分寸', '短句接话', '回答简洁', '本轮主动接群内当前话题']) assert(firstSystem.includes(value), value);
   for (const name of ['角色背景', '性格与互动', '表达方式', '角色语气示例'])
     assert(firstSystem.includes(`【${name}】\n遵守原则：`), 'The native request must scope actual editor-saved fields: ' + name);
@@ -285,9 +295,10 @@ async function verifyPluginLifecycle(hostContext) {
   await selectModel(ctx, store, { provider: 'wechat-test-alternate', model: 'alternate' });
   assert.deepEqual(new StateStore(path.join(root, 'channel')).modelChoice(), { provider: 'wechat-test-alternate', model: 'alternate' });
   runtime.persona.name = '阿胖'; runtime.modelConfig = { maxTokens: 768, temperature: null }; runtime.workspacePath = alternateWorkspace;
+  store.setPersona(runtime.persona);
   identity.edit('# 微信全局身份\nNATIVE_GLOBAL_SECOND：结合当前会话。', identity.view().revision);
   const second = await runner.run({ text: '第二问', group: true, sessionId: first.sessionId, signal: controller.signal,
-    persona: { name: '会话阿圆', aliases: [], prompt: 'NATIVE_ROOM_PERSONA：语气温和。' },
+    persona: store.conversationPersona('fake-owner', 'group', 'native-room@chatroom'),
     history: [{ direction: 'incoming', senderId: 'member', text: 'SELECTED_RECENT_CORRECTION' }],
     memory: 'SELECTED_MEMORY_FACT',
     onSession: id => {
@@ -306,8 +317,9 @@ async function verifyPluginLifecycle(hostContext) {
   assert.equal(requests[1].maxTokens, 768);
   const secondSystem = requests[1].messages.filter(m => m.role === 'system').flatMap(m => m.content).map(b => b.text || '').join('\n');
   assert(secondSystem.includes('NATIVE_GLOBAL_SECOND')); assert(!secondSystem.includes('NATIVE_GLOBAL_FIRST'));
-  assert(secondSystem.includes('配置名字："会话阿圆"')); assert(secondSystem.includes('NATIVE_ROOM_PERSONA'));
-  assert(!secondSystem.includes('测试音乐助手背景'));
+  assert(secondSystem.includes('配置名字："阿胖"')); assert(!secondSystem.includes('NATIVE_ROOM_PERSONA'));
+  assert(secondSystem.includes('测试音乐助手背景'));
+  assert(secondSystem.includes(fs.readFileSync(path.join(repo, 'prompts/reply/language.md'), 'utf8')));
   registration.replace(['wechat-test-fixture']);
   assert.equal((await buildModelCatalog(ctx)).groups.length, 1);
   await assert.rejects(runner.run({ text: '所选服务已停用', group: false, signal: controller.signal }), error => error.code === 'MODEL_UNAVAILABLE');
@@ -473,11 +485,32 @@ async function verifyPluginLifecycle(hostContext) {
     error => error.code === 'MODEL_INCOMPLETE' && error.message.includes('请求参数') && error.message.includes('推理强度') && !error.message.includes('PRIVATE_PROVIDER_DETAIL'));
   assert.throws(() => completedText([{ type: 'turn/end', data: { reason: { kind: 'error', error: { code: 'QUOTA', message: 'PRIVATE_PROVIDER_DETAIL' } } } }]),
     error => error.code === 'MODEL_INCOMPLETE' && error.message.includes('请求额度或调用频率') && !error.message.includes('PRIVATE_PROVIDER_DETAIL'));
+  const beforeEmpty = requests.length;
+  mode = 'empty-once'; emptyResponses = 0;
+  const recoveredEmpty = await reasoningRunner.run({ text: '合成空白正文恢复', signal: controller.signal });
+  assert.equal(recoveredEmpty.text, 'DSH 原生回复完成'); assert.equal(recoveredEmpty.emptyResponseRetries, 1);
+  assert.equal(requests.length - beforeEmpty, 2);
+  assert.equal(requests.at(-1).model, requests.at(-2).model);
+  assert.equal(requests.at(-1).reasoningEffort, requests.at(-2).reasoningEffort);
+  mode = 'empty-always';
+  await assert.rejects(reasoningRunner.run({ text: '合成连续空白正文', signal: controller.signal }), { code: 'MODEL_EMPTY' });
+  assert.equal(requests.length - beforeEmpty, 4);
+  mode = 'empty-after-tool'; let executedTools = 0;
+  await assert.rejects(reasoningRunner.run({ text: '查询隔离链路', signal: controller.signal,
+    tools: [{ ...combinedTool, execute: async (...args) => { executedTools++; return combinedTool.execute(...args); } }] }), { code: 'MODEL_EMPTY' });
+  assert.equal(executedTools, 1); assert.equal(requests.length - beforeEmpty, 6);
+  mode = 'complete';
+  const { summarizeMemory, MAX_COMPRESSION_INPUT_CHARS } = require(path.join(repo, 'modules/memory/conversation/compaction.mjs'));
+  const beforeBatches = requests.length;
+  assert.equal(await summarizeMemory('合成会话素材。'.repeat(6000), 4000, reasoningRunner, controller.signal), 'DSH 原生回复完成');
+  assert(requests.length - beforeBatches >= 4);
+  assert(requests.slice(beforeBatches).every(request => request.messages.filter(message => message.role === 'user')
+    .flatMap(message => message.content).reduce((total, block) => total + (block.text?.length ?? 0), 0) < MAX_COMPRESSION_INPUT_CHARS + 4000));
   await verifyPluginLifecycle(ctx);
   const report = { ok: true, dsh: hostRequire('./package.json').version, node: process.versions.node,
     assertions: ['shared native model catalog', 'model choice persistence', 'real provider/model routing on resume', 'chosen model reasoning defaults', 'removed provider refuses fallback', 'return to DSH default', 'real temperature and maxTokens request controls', 'null temperature preserves Host default', 'persona and participation instructions in model prompt', 'workspace stored on create and retained on resume', 'configured Host session root observed through injection', 'Host session root stays independent of workspace', 'real agent create', 'persistent resume', 'complete prompt isolation', 'no inherited tools', 'final reasoning filtering', 'max-token refusal', 'cancellation', 'queued channel-to-agent-to-ACK', 'reload deduplication', 'real plugin apply and WorkerClient shutdown preserve participation progress', 'initial offline snapshots preserve progress but live disconnect resets it'], requests: requests.length, at: new Date().toISOString() };
   report.assertions.push('native scoped tool registration and actual task creation', 'quoted task requests denied inside the native tool boundary', 'native search tool calls only the bounded public query', 'actual DSH image admission and two ordered multimodal blocks');
-  report.assertions.push('durable global identity reloaded in the native prompt', 'conversation persona replaces only the default persona', 'native scoped memory tool preserves the receive-time boundary');
+  report.assertions.push('durable global identity reloaded in the native prompt', 'the single global assistant and common language policy survive native create and resume', 'native scoped memory tool preserves the receive-time boundary');
   report.assertions.push('actual editor-saved persona fields and examples receive their own principles on native create and persisted resume');
   report.assertions.push('native memory lookup accepts null keywords and empty first-page cursors, returns both complete partitions, retains the receive-time snapshot and keeps legitimate follow-up queries available');
   report.assertions.push('native DSH preserves a 2400x1600 original within its admission budget', 'per-image thumbnail limits reach the native vision prompt');
@@ -491,6 +524,9 @@ async function verifyPluginLifecycle(hostContext) {
     'resumed native context contains only the current persona, selected WeChat history and memory',
     'surface rebasing retains and reopens the complete native audit log across multiple turns',
     'resumed tool calls retain the complete current call and result without prior native dialogue');
+  report.assertions.push('native whitespace completion recovers once with the same model and reasoning effort',
+    'repeated native emptiness stops after two requests without exposing reasoning', 'native executed tools are never replayed after an empty final answer',
+    'native long-memory requests use bounded batches and a final ordered consolidation');
   fs.writeFileSync(path.join(repo, 'storage/logs/dsh-plugin-native-test.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
   for (const fork of forks.reverse()) await fork.dispose();

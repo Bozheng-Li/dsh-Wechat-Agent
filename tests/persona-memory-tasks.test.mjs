@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { PERSONA_CATEGORIES, PERSONA_PRESETS, personaFromPreset, searchPersonaPresets } from '../src/shared/persona-presets.mjs';
+import { PERSONA_PRESETS, DEFAULT_PERSONA_ID, personaFromPreset } from "../prompts/personas/catalog.mjs";
 import { StateStore, WechatChannel, TaskScheduler, ConversationMemory, DshAgentRunner, ChannelError, validatePersona, personaText,
   validateConversationSettings, conversationTaskTool, webSearchTool, memoryText, simpleReminder, nextDaily,
   loadObservedMedia, observedImage, NATURAL_REPLY_RULES, REPLY_STYLE_REVIEW_NOTE, needsConversationalRewrite } from '../lib/testing.js';
@@ -38,10 +38,10 @@ function fixture(t) {
   return { root, store, channel, scheduler, runner, transport, state, calls, sent, scope, receive, now: () => now, advance: ms => { now += ms; } };
 }
 
-test('18 authored personas round-trip through the single prompt editor without losing examples or identity', t => {
+test('the only default assistant round-trips through the global editor without losing examples or identity', t => {
   const f = fixture(t);
-  assert.equal(PERSONA_PRESETS.length, 18); assert.equal(PERSONA_CATEGORIES.length, 6);
-  assert.equal(new Set(PERSONA_PRESETS.map(value => value.id)).size, 18);
+  assert.equal(PERSONA_PRESETS.length, 1);
+  assert.equal(PERSONA_PRESETS[0].id, DEFAULT_PERSONA_ID);
   for (const preset of PERSONA_PRESETS) {
     const legacy = validatePersona(personaFromPreset(preset.id)), prompt = personaText(legacy);
     assert(prompt.includes(preset.background) && prompt.includes(preset.personality) && prompt.includes(preset.style));
@@ -49,12 +49,10 @@ test('18 authored personas round-trip through the single prompt editor without l
     const saved = { name: '自定义名字', aliases: ['老昵称'], prompt };
     f.store.setPersona(saved); assert.deepEqual(new StateStore(f.root).persona(), saved);
   }
-  const aliases = ['保留昵称'], loaded = personaFromPreset('aci', { name: '我的 Agent', aliases }); loaded.aliases.push('草稿昵称');
+  const aliases = ['保留昵称'], loaded = personaFromPreset(undefined, { name: '我的 Agent', aliases }); loaded.aliases.push('草稿昵称');
   assert.deepEqual(aliases, ['保留昵称']); assert.equal(loaded.name, '我的 Agent');
   assert.throws(() => personaFromPreset('unknown'));
-  assert.deepEqual(searchPersonaPresets('傲娇').map(value => value.id), ['xingli']);
-  assert(searchPersonaPresets('技术', 'work').some(value => value.id === 'beichen'));
-  assert.equal(searchPersonaPresets('不存在的人设').length, 0);
+  for (const id of ['aci', 'xiaopang', 'xingli', 'mobai', 'beichen']) assert.throws(() => personaFromPreset(id));
 });
 
 test('advanced participation retains mention, command and nickname triggers; fixed bounds include 1 and 100', async t => {

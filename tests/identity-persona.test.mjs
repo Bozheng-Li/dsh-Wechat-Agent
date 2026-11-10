@@ -32,20 +32,29 @@ test('global identity is a durable editable Markdown file and detects external e
   fs.writeFileSync(identity.file, ''); assert.throws(() => identity.view(), error => error.code === 'IDENTITY_INVALID');
 });
 
-test('each conversation uses its own persona for nickname triggers and model requests', async t => {
-  const f = fixture(t), first = { name: '阿圆', aliases: ['圆圆'], prompt: '语气温和，喜欢摄影。' }, second = { name: '北辰', aliases: ['老北'], prompt: '务实直接，讨论技术。' };
-  for (const [peer, persona] of [[roomA, first], [roomB, second]]) f.store.setConversationSettings(owner, 'group', peer, { ...f.store.conversationSettings(owner, 'group', peer), mode: 'nickname', persona });
+test('all conversations share global identity and nickname triggers, and reject separate personas', async t => {
+  const f = fixture(t), first = { name: '阿圆', aliases: ['圆圆'], prompt: '语气温和，喜欢摄影。' };
+  f.store.setPersona(first);
+  for (const peer of [roomA, roomB]) f.store.setConversationSettings(owner, 'group', peer, { ...f.store.conversationSettings(owner, 'group', peer), mode: 'nickname' });
   f.receive(roomA, '圆圆，来聊聊'); await f.channel.whenIdle();
-  f.receive(roomB, '老北，来聊聊'); await f.channel.whenIdle();
+  f.receive(roomB, '圆圆，来聊聊'); await f.channel.whenIdle();
   f.receive(roomA, '北辰，来聊聊'); await f.channel.whenIdle();
   f.receive('friend', '来聊聊', 'private'); await f.channel.whenIdle();
-  assert.deepEqual(f.calls.map(value => value.persona.name), ['阿圆', '北辰', '默认小胖']);
-  assert.deepEqual(f.calls[0].persona, first); assert.deepEqual(f.calls[1].persona, second);
+  assert.deepEqual(f.calls.map(value => value.persona), [first, first, first]);
+  const before = f.store.conversationSettings(owner, 'group', roomA);
+  assert.throws(() => f.store.setConversationSettings(owner, 'group', roomA, { ...before, persona: { name: '另一位', aliases: [], prompt: '旧覆盖' } }),
+    error => error.code === 'PERSONA_GLOBAL_ONLY');
+  assert.deepEqual(f.store.conversationSettings(owner, 'group', roomA), before);
+  const second = { name: '新全局助手', aliases: ['小助'], prompt: '务实直接，讨论技术。' };
+  f.store.setPersona(second);
+  for (const peer of [roomA, roomB]) { f.receive(peer, '小助，接着聊'); await f.channel.whenIdle(); }
   const restored = new StateStore(f.root);
-  assert.deepEqual(restored.conversationPersona(owner, 'group', roomA), first);
-  f.store.setConversationSettings(owner, 'group', roomA, { ...f.store.conversationSettings(owner, 'group', roomA), persona: null });
-  assert.equal(f.store.conversationPersona(owner, 'group', roomA).name, '默认小胖');
-  assert.deepEqual(f.store.conversationPersona(owner, 'group', roomB), second);
+  for (const peer of [roomA, roomB]) {
+    assert.deepEqual(restored.conversationPersona(owner, 'group', peer), second);
+    assert.equal(restored.conversationSettings(owner, 'group', peer).persona, null);
+  }
+  assert.deepEqual(f.calls.slice(-2).map(value => value.persona), [second, second]);
+  assert.equal(f.sent.length, 5);
 });
 
 test('on-demand memory keeps recent context and exposes only a scoped read tool', async t => {

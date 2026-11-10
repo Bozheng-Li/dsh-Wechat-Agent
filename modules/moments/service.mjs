@@ -1,0 +1,193 @@
+import { ChannelError } from '../../shared/contracts.mjs';
+import { identity } from '../../backend/storage/keys.mjs';
+import { assertRemoteAuthorized, remoteAuthorized } from '../remote/authorization/policy.mjs';
+import fs from 'node:fs';
+import path from 'node:path';
+import { createHash } from 'node:crypto';
+import { atomicBytes } from '../../backend/storage/atomic-text.mjs';
+import { publicError } from '../../shared/contracts.mjs';
+import { workPath } from '../work/policy.mjs';
+import { validateAudienceSelection, audienceUserId } from '../../shared/moments-audience.mjs';
+const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+
+export async function resolveMomentsQuery(transport, raw, scope, signal, check) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || raw.user === undefined) return raw;
+  const { user, ...query } = raw;
+  if (query.action !== 'user' || query.userId !== undefined || typeof user !== 'string' || !user.trim() || user.length > 150)
+    throw new ChannelError('MOMENTS_USER_INVALID', '用户主页请选择一个昵称、备注或微信 ID，不同时填写多个目标');
+  const normalized = value => String(value ?? '').normalize('NFKC').trim().toLocaleLowerCase(), target = normalized(user);
+  if (['我', '我的', '自己', 'self', '当前账号', '机器人', 'account'].includes(target)) return { ...query, userId: scope.accountId };
+  if (['发起人', 'sender'].includes(target)) return { ...query, userId: scope.senderId };
+  if (typeof transport.call !== 'function') throw new ChannelError('MOMENTS_USER_UNAVAILABLE', '当前组件不能解析朋友圈昵称，请提供完整微信 ID');
+  const contacts = await transport.call('contacts', {}, { signal }); check();
+  const matches = contacts.privatePeers.filter(peer => [peer.id, peer.name, peer.nickname, peer.remark].some(name => normalized(name) === target));
+  if (matches.length !== 1) throw new ChannelError('MOMENTS_USER_AMBIGUOUS', matches.length ? '这个昵称对应多位联系人，请提供完整微信 ID' : '已同步联系人中没有找到这个昵称，请提供完整微信 ID');
+  return { ...query, userId: matches[0].id };
+}
+
+/** Live social data follows the actual account, authorized chat and sender. */
+export class MomentsService {
+  constructor(channel) { this.channel = channel; this.writes = new Map(); }
+  available(scope) {
+    const transport = this.channel.transport;
+    return typeof transport.readMoments === 'function' && transport.status().momentsReadReady === true && remoteAuthorized(this.channel, scope);
+  }
+  writeAvailable(scope) {
+    return this.available(scope) && typeof this.channel.transport.writeMoments === 'function' && this.channel.transport.status().momentsWriteReady === true;
+  }
+  audienceAvailable(scope) {
+    return this.available(scope) && typeof this.channel.transport.readMomentsAudience === 'function' && this.channel.transport.status().momentsAudienceReady === true;
+  }
+  async audience(scope, signal, assertAllowed = () => {}) {
+    const check = () => { assertAllowed(); assertRemoteAuthorized(this.channel, scope, signal); };
+    return this.readAudience(scope.accountId, signal, check);
+  }
+  async audienceOwner(accountId, signal, assertOwner = () => {}) {
+    const check = () => {
+      assertOwner(); signal?.throwIfAborted(); const status = this.channel.transport.status();
+      if (this.channel.closed || this.channel.fault || !status.online || status.account?.id !== accountId)
+        throw new ChannelError('ACCOUNT_CHANGED', '微信账号或连接已变化，未返回标签和联系人');
+    };
+    return this.readAudience(accountId, signal, check);
+  }
+  async readAudience(accountId, signal, check) {
+    check(); const transport = this.channel.transport;
+    if (typeof transport.readMomentsAudience !== 'function' || transport.status().momentsAudienceReady !== true)
+      throw new ChannelError('MOMENTS_AUDIENCE_UNAVAILABLE', '当前微信组件尚未支持读取标签和联系人，请更新组件');
+    const result = await transport.readMomentsAudience({ accountId }, signal); check();
+    if (result?.accountId !== accountId || result.source !== 'wechat-contacts-live' || result.membershipComplete !== true || !Array.isArray(result.contacts) || !Array.isArray(result.labels))
+      throw new ChannelError('MOMENTS_AUDIENCE_INCOMPLETE', '微信标签或联系人结果不完整／账号不匹配，未使用名单');
+    return result;
+  }
+  async write(query, scope, requestId, signal, assertAllowed = () => {}, operationKey) {
+    return this.performWrite(query, scope, requestId, signal, assertAllowed, operationKey);
+  }
+  async writeOwner(query, accountId, requestId, signal, assertOwner = () => {}) {
+    return this.performWrite(query, { accountId, chatType: 'owner', peerId: accountId, senderId: accountId }, requestId, signal, assertOwner, undefined, true);
+  }
+  lookupOwnerReceipt(query, accountId, requestId) {
+    if (typeof accountId !== 'string' || typeof requestId !== 'string' || !requestId || requestId.length > 2000 || query?.action !== 'publish')
+      throw new ChannelError('MOMENTS_STATE_INVALID', '发布回执查询缺少实际操作归属');
+    validateAudienceSelection(query);
+    const scopeKey = identity([accountId, 'owner', accountId, accountId]), clientId = 'sns_' + digest([this.channel.store.data.storeId, scopeKey, requestId, 'publish']);
+    const file = workPath(this.channel.store.root, 'storage/moments/actions/' + clientId + '.json'); let record;
+    try { record = JSON.parse(fs.readFileSync(file, 'utf8')); }
+    catch (error) { if (error.code === 'ENOENT') return null; throw new ChannelError('MOMENTS_STATE_INVALID', '发布回执记录无法读取，未重新提交'); }
+    if (record.version !== 1 || record.clientId !== clientId || record.ownerStoreId !== this.channel.store.data.storeId || record.scopeKey !== scopeKey || record.inputHash !== digest(query) || record.action !== 'publish' ||
+        !['pending', 'succeeded', 'rejected', 'unknown'].includes(record.state)) throw new ChannelError('MOMENTS_STATE_INVALID', '发布回执与当前账号或内容不符，未重新提交');
+    if (record.state !== 'succeeded') return null;
+    validateReceipt(record.result, query, accountId); return { ...record.result, reusedReceipt: true };
+  }
+  async managePublishing(args, scope, requestId, signal, assertAllowed = () => {}, operationKey) {
+    const check = () => { assertAllowed(); assertRemoteAuthorized(this.channel, scope, signal); }; check();
+    const manager = this.channel.momentsAutomation?.publishing;
+    if (!manager) throw new ChannelError('MOMENTS_UNAVAILABLE', '自动发布组件尚未加载');
+    if (typeof requestId !== 'string' || !requestId || requestId.length > 1800 || operationKey !== undefined && (typeof operationKey !== 'string' || !operationKey || operationKey.length > 80))
+      throw new ChannelError('MOMENTS_PLAN_INVALID', '自动发布操作缺少实际消息或任务编号');
+    const id = 'moments-model:' + digest([scope.accountId, scope.chatType, scope.peerId, scope.senderId, requestId, operationKey ?? args.action]);
+    const accountId = scope.accountId;
+    switch (args.action) {
+      case 'list': return manager.list(accountId);
+      case 'configure': return manager.configure(accountId, args.settings);
+      case 'save': return manager.savePlan(accountId, args.settings, args.id, id, signal, check);
+      case 'enable': return manager.setEnabled(accountId, args.id, args.enabled);
+      case 'delete': return manager.removePlan(accountId, args.id);
+      case 'preview': return manager.preview(accountId, args.settings, id, signal, check);
+      case 'edit': return manager.editDraft(accountId, args.id, args.text);
+      case 'publish': return manager.publishDraft(accountId, args.id, signal, check);
+      case 'discard': return manager.discard(accountId, args.id);
+      case 'reconcile': return manager.reconcile(accountId, args.id);
+      case 'reply-list': { const { publishing, posts, ...value } = this.channel.momentsAutomation.list(accountId); return value; }
+      case 'reply-configure': return this.channel.momentsAutomation.configure(accountId, args.settings);
+      default: throw new ChannelError('MOMENTS_PLAN_INVALID', '不支持的朋友圈计划操作');
+    }
+  }
+  async performWrite(query, scope, requestId, signal, assertAllowed, operationKey, owner = false) {
+    validateAudienceSelection(query);
+    const channel = this.channel, check = () => { assertAllowed(); assertRemoteAuthorized(channel, scope, signal); };
+    const verify = owner ? () => { assertAllowed(); signal?.throwIfAborted(); const status = channel.transport.status();
+      if (channel.closed || channel.fault || !status.online || status.account?.id !== scope.accountId)
+        throw new ChannelError('ACCOUNT_CHANGED', '微信连接、账号或运行状态已变化，未继续朋友圈操作'); } : check;
+    verify();
+    if (owner ? typeof channel.transport.writeMoments !== 'function' || channel.transport.status().momentsWriteReady !== true : !this.writeAvailable(scope))
+      throw new ChannelError('MOMENTS_WRITE_UNAVAILABLE', '当前微信组件尚未支持朋友圈互动或发布');
+    if (typeof requestId !== 'string' || !requestId || requestId.length > 2000 || operationKey !== undefined && (typeof operationKey !== 'string' || !operationKey || operationKey.length > 80))
+      throw new ChannelError('MOMENTS_WRITE_INVALID', '朋友圈操作缺少实际消息或任务归属');
+    const scopeKey = identity([scope.accountId, scope.chatType, scope.peerId, scope.senderId]), inputHash = digest(query);
+    const defaultKey = query.action === 'publish' ? 'publish' : `${query.action}:${query.postId}:${query.replyToCommentId ?? ''}`;
+    const clientId = 'sns_' + digest([channel.store.data.storeId, scopeKey, requestId, operationKey ?? defaultKey]);
+    const directory = workPath(channel.store.root, 'storage/moments/actions'), file = path.join(directory, clientId + '.json');
+    const save = value => {
+      workPath(channel.store.root, 'storage/moments/actions/' + clientId + '.json');
+      try { atomicBytes(file, Buffer.from(JSON.stringify(value, null, 2) + '\n')); }
+      catch { throw new ChannelError('STATE_WRITE_FAILED', '朋友圈操作记录保存失败，请核对已提交的结果；未自动重试'); }
+    };
+    if (this.writes.has(clientId)) {
+      const active = this.writes.get(clientId);
+      if (active.inputHash !== inputHash) throw new ChannelError('MOMENTS_STATE_INVALID', '同一操作编号对应不同内容，未重新执行');
+      const result = await active.promise; verify(); return result;
+    }
+    let existing;
+    try { existing = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw new ChannelError('MOMENTS_STATE_INVALID', '朋友圈操作记录无法读取，未重新执行'); }
+    if (existing) {
+      if (existing.version !== 1 || existing.clientId !== clientId || existing.ownerStoreId !== channel.store.data.storeId || existing.scopeKey !== scopeKey || existing.inputHash !== inputHash ||
+          !['pending', 'succeeded', 'rejected', 'unknown'].includes(existing.state))
+        throw new ChannelError('MOMENTS_STATE_INVALID', '朋友圈操作记录或请求内容不匹配，未重新执行');
+      if (existing.state === 'succeeded') { validateReceipt(existing.result, query, scope.accountId); verify(); return { ...existing.result, reusedReceipt: true }; }
+      if (existing.state === 'rejected') throw new ChannelError(existing.error.code, existing.error.message);
+      throw new ChannelError('MOMENTS_RESULT_UNKNOWN', '这项朋友圈操作未取得最终确认，结果不明，未自动重试；请先在微信核对');
+    }
+    const record = { version: 1, ownerStoreId: channel.store.data.storeId, scopeKey, inputHash, clientId, action: query.action, state: 'pending', createdAt: channel.now() };
+    save(record); verify();
+    const pending = (async () => {
+      let recordedSuccess = false;
+      try {
+        const result = await channel.transport.writeMoments({ accountId: scope.accountId, clientId, query }, signal);
+        validateReceipt(result, query, scope.accountId);
+        save({ ...record, state: 'succeeded', result, finishedAt: channel.now() }); recordedSuccess = true;
+        channel.momentsAutomation?.recordReceipt(result);
+        verify(); return result;
+      } catch (error) {
+        if (!recordedSuccess && error?.code !== 'STATE_WRITE_FAILED') {
+          const rejected = ['not-sent', 'rejected'].includes(error?.details?.snsDelivery);
+          save({ ...record, state: rejected ? 'rejected' : 'unknown', error: publicError(error, '朋友圈操作未取得最终确认'), finishedAt: channel.now() });
+        }
+        verify(); throw error;
+      }
+    })();
+    this.writes.set(clientId, { inputHash, promise: pending });
+    try { return await pending; } finally { this.writes.delete(clientId); }
+  }
+  async read(query, scope, signal, assertAllowed = () => {}) {
+    const channel = this.channel;
+    const check = () => { assertAllowed(); assertRemoteAuthorized(channel, scope, signal); };
+    check();
+    if (typeof channel.transport.readMoments !== 'function') throw new ChannelError('MOMENTS_UNAVAILABLE', '当前微信组件尚未支持朋友圈读取，请更新组件');
+    const resolved = await resolveMomentsQuery(channel.transport, query, scope, signal, check); check();
+    const result = await channel.transport.readMoments({ accountId: scope.accountId,
+      scopeKey: identity([scope.accountId, scope.chatType, scope.peerId, scope.senderId]), query: resolved }, signal);
+    check();
+    if (result?.accountId !== scope.accountId) throw new ChannelError('ACCOUNT_CHANGED', '朋友圈结果与当前微信账号不匹配，未返回');
+    this.channel.momentsAutomation?.remember(scope.accountId, result.items);
+    return result;
+  }
+}
+
+function validateReceipt(result, query, accountId) {
+  const id = value => typeof value === 'string' && /^[1-9][0-9]{0,19}$/.test(value) && BigInt(value) <= 0xffffffffffffffffn;
+  if (result?.accountId !== accountId || result.action !== query.action || !['server-ack', 'verified-existing'].includes(result.delivery) || !id(result.postId) ||
+      query.action !== 'publish' && result.postId !== query.postId || query.action === 'like' && result.liked !== true ||
+      query.action === 'comment' && (!id(result.commentId) || result.text !== query.text) ||
+      query.replyToCommentId && (result.replyToCommentId !== query.replyToCommentId || typeof result.replyToUserId !== 'string' || !result.replyToUserId) ||
+      query.action === 'delete' && result.deleted !== true ||
+      query.action === 'publish' && (result.text !== query.text || result.imageCount !== (query.images?.length ?? 0)))
+    throw new ChannelError('MOMENTS_RESULT_UNKNOWN', '朋友圈操作回执与当前账号、目标或内容不匹配，未报告成功');
+  if (query.action === 'publish' && (query.blockedUserIds?.length || query.blockedLabelIds?.length)) {
+    const selection = validateAudienceSelection(query), same = (a, b) => Array.isArray(a) && JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+    if (result.audienceConfirmed !== true || result.audienceSource !== 'wechat-contacts-live' || !Number.isFinite(Date.parse(result.audienceFetchedAt)) ||
+        !same(result.audienceSelection?.blockedUserIds, selection.blockedUserIds) || !same(result.audienceSelection?.blockedLabelIds, selection.blockedLabelIds) ||
+        !same(result.blockedLabelIds, selection.blockedLabelIds) || !Array.isArray(result.blockedUserIds) || result.blockedUserIds.some(id => !audienceUserId(id)) ||
+        result.blockedUserIds.length > 50000 || new Set(result.blockedUserIds).size !== result.blockedUserIds.length || selection.blockedUserIds.some(id => !result.blockedUserIds.includes(id)))
+      throw new ChannelError('MOMENTS_RESULT_UNKNOWN', '朋友圈屏蔽选择未取得完整确认，发布结果不明，请在微信核对；未自动重发');
+  }
+}

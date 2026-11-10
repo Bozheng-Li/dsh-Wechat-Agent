@@ -1,14 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { personaFields, personaStyleParts } from '../src/features/agent/persona-input.mjs';
-import { personaText, validatePersona } from '../src/shared/contracts.mjs';
-import { PERSONA_PRESETS, personaFromPreset } from '../src/shared/persona-presets.mjs';
-import { configDraft, configPayload } from '../src/client/shared/drafts.mjs';
+import { personaFields, personaStyleParts } from "../modules/agent/persona-input.mjs";
+import { personaText, validatePersona } from "../shared/contracts.mjs";
+import { PERSONA_PRESETS, personaFromPreset } from "../prompts/personas/catalog.mjs";
+import { personaDraft } from "../frontend/shared/drafts.mjs";
 
 test('all authored personas keep the same fields and examples after the actual editor payload conversion', () => {
   for (const preset of PERSONA_PRESETS) {
     const original = personaFromPreset(preset.id);
-    const saved = validatePersona(configPayload(configDraft({ persona: original })).persona);
+    const saved = validatePersona({ ...personaDraft(original), aliases: [...original.aliases] });
     assert.equal(saved.prompt, personaText(original));
     const fields = personaFields(saved);
     assert(fields, preset.id + ' must not fall back to freeform after editor save');
@@ -39,7 +39,7 @@ test('ambiguous, quoted or free prose is never silently classified or truncated'
 });
 
 test('example headings inside code, duplicated headings and arbitrary prose remain intact', () => {
-  const original = personaFromPreset('mobai').style;
+  const original = personaFromPreset().style;
   const { style, examples } = personaStyleParts(original);
   assert.equal(style + '\n\n' + examples, original);
   const crlf = original.replaceAll('\n', '\r\n');
