@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { StateStore, WechatChannel, LongTermMemory, createPluginService, rpcHandler, buildWechatPrompt, replyMemoryContext } from '../lib/testing.js';
 import { emptyRoleCard } from '../shared/role-card.mjs';
 import { reviewMemoryDraft, memoryReviewFlags } from '../modules/memory/roles/reflection.mjs';
@@ -218,9 +219,14 @@ test('reflection uses one tool-free request and removes rephrased unsupported ex
 
 test('reflection failure and timeout retain a usable draft without emitting failure templates', async () => {
   const input = { text: '我的忌口是什么', memory: '{"text":"我不吃香菜。"}' }, draft = '不放香菜，其他你没说过。';
-  for (const run of [async () => { throw new Error('provider down'); }, async () => new Promise(() => {})]) {
+  for (const [run, expectedCode] of [
+    [async () => { throw new Error('provider down'); }, 'REVIEW_FAILED'],
+    // Model an outstanding provider request, with a ref until cancellation.
+    [async ({ signal }) => delay(5000, { text: 'unexpected late result' }, { signal }), 'REVIEW_TIMEOUT'],
+  ]) {
     const result = await reviewMemoryDraft({ run }, input, draft, { signal: signal(), timeoutMs: 15 });
     assert.equal(result.text, '不放香菜。'); assert.equal(result.audit.outcome, 'fallback'); assert.equal(result.audit.calls, 1);
+    assert.equal(result.audit.code, expectedCode);
   }
 });
 

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { compressionBatches, summarizeMemory, MAX_COMPRESSION_INPUT_CHARS } from '../modules/memory/conversation/compaction.mjs';
 import { StateStore, ConversationMemory, WechatChannel, ChannelError, createPluginService } from '../lib/testing.js';
 
@@ -146,21 +147,24 @@ test('clearing memory cancels a pending manual retry instead of restoring the cl
 });
 
 test('slow durable-fact extraction cannot consume the timeout before window compression succeeds', async t => {
-  const f = fixture(t, { timeoutMs: 25 }); f.memory.setWindowChars(1000); let compressed = false;
+  const f = fixture(t, { timeoutMs: 25 }); f.memory.setWindowChars(1000); let compressed = false, extractionSignal;
   f.runner.summarize = async () => { compressed = true; return '阿禾周五带咖啡。'; };
   f.runner.extractLongTermMemory = async ({ signal }) => {
-    assert(compressed);
-    await new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+    assert(compressed); extractionSignal = signal;
+    // A real pending provider owns I/O. Keep this bounded fixture alive until
+    // the application's unreferenced timeout cancels that request.
+    await delay(5000, undefined, { signal }).catch(error => { throw signal.reason ?? error; });
   };
   f.append('extraction-timeout'); f.append('extraction-pressure'); await f.idle();
   const after = f.memory.view(f.scope); assert.equal(after.compressions, 1); assert.equal(after.error, null);
+  assert.equal(extractionSignal.aborted, true, 'the model request must be cancelled by its deadline');
   assert.equal(after.retryKind, 'extraction'); assert(f.channel.longMemory.view(f.scope.accountId).pendingCount > 0);
 });
 
 test('compression timeouts expose a useful cause and retain the unmodified source', async t => {
   const f = fixture(t, { timeoutMs: 25 }); f.memory.setWindowChars(1000);
-  f.runner.summarize = async (_material, _target, signal) => new Promise((resolve, reject) =>
-    signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+  f.runner.summarize = async (_material, _target, signal) => delay(5000, 'unexpected late result', { signal })
+    .catch(error => { throw signal.reason ?? error; });
   f.append('compression-timeout'); f.append('compression-pressure'); const before = f.memory.load(f.scope);
   await f.idle();
   const after = f.memory.view(f.scope); assert.match(after.error, /等待模型超时/);
