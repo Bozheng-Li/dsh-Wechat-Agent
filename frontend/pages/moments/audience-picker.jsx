@@ -18,7 +18,7 @@ export function AudiencePicker({ data, labelIds, userIds, onChange, onRead, busy
   const preview = audiencePreview(data, labelIds, userIds), selected = labelIds.length + userIds.length;
   const toggle = (key, values, id, checked) => onChange({ [key]: checked ? [...values, id] : values.filter(value => value !== id) });
   return <section className="wa-audience-picker wa-form-section" data-testid="moments-audience">
-    <h3>可见范围</h3>
+    <div className="wa-audience-heading"><h3>可见范围</h3><span className="wa-audience-count">{selected ? `已选 ${selected} 项` : '默认可见'}</span></div>
     <p className="wa-wb-note">选择不能看这条朋友圈的标签或联系人；发布时按最新标签成员合并去重。</p>
     <div className="wa-wb-actions"><Button quiet disabled={busy || !online} onClick={onRead}>{data ? '刷新微信标签与联系人' : '读取微信标签与联系人'}</Button>
       {selected > 0 && <Button quiet disabled={busy} onClick={() => onChange({ blockedLabelIds: [], blockedUserIds: [] })}>清空屏蔽选择</Button>}</div>
@@ -28,20 +28,20 @@ export function AudiencePicker({ data, labelIds, userIds, onChange, onRead, busy
       <p className="wa-wb-note">微信实际读取：{data.labels.length} 个标签、{data.contacts.length} 位联系人 · {formatTime(Date.parse(data.fetchedAt))}
         {data.unavailableCount > 0 ? `。另有 ${data.unavailableCount} 个不可用条目，未列入可选联系人。` : ''}</p>
       <div className="wa-audience-grid">
-        <div>
+        <div className="wa-audience-column">
           <label>屏蔽标签<input type="search" aria-label="搜索屏蔽标签" value={labelSearch} placeholder="搜索微信标签名称" onChange={e => setLabelSearch(e.target.value)} /></label>
           <div className="wa-audience-list" role="group" aria-label="可屏蔽的微信标签">
-            {labels.map(row => <label className="wa-wb-check" key={row.id}>
+            {labels.map(row => <label className={'wa-wb-check wa-audience-row' + (labelIds.includes(row.id) ? ' is-selected' : '')} key={row.id}>
               <input type="checkbox" aria-label={`屏蔽标签 ${row.name}`} disabled={busy} checked={labelIds.includes(row.id)}
-                onChange={e => toggle('blockedLabelIds', labelIds, row.id, e.target.checked)} />{row.name}（{row.memberCount} 人）
+                onChange={e => toggle('blockedLabelIds', labelIds, row.id, e.target.checked)} /><span>{row.name}</span><small>{row.memberCount} 人</small>
             </label>)}
             {!labels.length && <p className="wa-wb-note">{data.labels.length ? '没有匹配的微信标签。' : '微信当前未返回标签。'}</p>}
           </div>
         </div>
-        <div>
+        <div className="wa-audience-column">
           <label>屏蔽联系人<input type="search" aria-label="搜索屏蔽联系人" value={userSearch} placeholder="搜索昵称、备注或微信 ID" onChange={e => { setUserSearch(e.target.value); setLimit(100); }} /></label>
           <div className="wa-audience-list" role="group" aria-label="可屏蔽的微信联系人">
-            {contacts.slice(0, limit).map(row => <label className="wa-wb-check" key={row.id}>
+            {contacts.slice(0, limit).map(row => <label className={'wa-wb-check wa-audience-row' + (userIds.includes(row.id) ? ' is-selected' : '')} key={row.id}>
               <input type="checkbox" aria-label={`屏蔽联系人 ${row.name} ${row.id}`} disabled={busy} checked={userIds.includes(row.id)}
                 onChange={e => toggle('blockedUserIds', userIds, row.id, e.target.checked)} /><span>{row.name}<small className="wa-audience-identity">{row.nickname !== row.name ? `${row.nickname} · ` : ''}{row.id}</small></span>
             </label>)}

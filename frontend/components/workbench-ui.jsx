@@ -1,5 +1,5 @@
 import { Button as SharedButton } from './button.jsx';
-import { PageHead } from './page-ui.jsx';
+import { PageHead, Empty as SharedEmpty } from './page-ui.jsx';
 
 export const names = {
   queued: '排队中',
@@ -35,20 +35,15 @@ export const Button = ({ children, quiet, danger, className = '', ...props }) =>
 );
 
 export const Tag = ({ state, children }) => (
-  <span className={'wa-wb-tag is-' + state}>{children || names[state] || state}</span>
+  <span className={'wa-wb-tag is-' + state}><span className="wa-state-mark" aria-hidden="true" />{children || names[state] || state}</span>
 );
 
-export function Heading({ title, text, children }) {
-  return <PageHead className="wa-wb-heading" title={title} description={text}>{children}</PageHead>;
+export function Heading({ title, text, children, icon }) {
+  return <PageHead className="wa-wb-heading" title={title} description={text} icon={icon}>{children}</PageHead>;
 }
 
-export function Empty({ title, children }) {
-  return (
-    <div className="wa-wb-empty">
-      <h3>{title}</h3>
-      {children && <p>{children}</p>}
-    </div>
-  );
+export function Empty({ title, children, icon = 'folder' }) {
+  return <SharedEmpty className="wa-wb-empty" icon={icon} title={title} description={children} />;
 }
 
 export function Feedback({ state, cancellable = true }) {
@@ -66,12 +61,14 @@ export function Feedback({ state, cancellable = true }) {
       )}
       {state.loading && (
         <p className="wa-wb-loading" role="status">
+          <span className="wa-activity-indicator" aria-hidden="true" />
           正在读取…
         </p>
       )}
       {cancellable && state.busy && (
         <div className="wa-wb-between wa-wb-operation">
           <span className="wa-wb-note" role="status">
+            <span className="wa-activity-indicator" aria-hidden="true" />
             正在处理…
           </span>
           <Button quiet onClick={state.cancel}>

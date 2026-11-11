@@ -53,21 +53,21 @@ export function ConversationSettings({
   return (
     <>
       <Back label="返回会话授权" onClick={onBack} />
-      <PageHead title="会话设置" description="为这个会话配置参与方式、记忆和定时任务，助手设定全局共用。">
+      <PageHead icon="chat" title="会话设置" description="为这个会话配置参与方式、记忆和定时任务，助手设定全局共用。">
         <Button icon="history" onClick={() => onRecords(peer)}>
           查看处理记录
         </Button>
       </PageHead>
       <Notice notice={notice} area="conversation" />
-      <div className="wa-content-narrow">
+      <div className="wa-content-narrow wa-conversation-settings">
         <form
-          className="wa-card"
+          className="wa-settings-document"
           onSubmit={(event) => {
             event.preventDefault();
             onSave();
           }}
         >
-          <div className="wa-card-heading">
+          <div className="wa-conversation-identity">
             <div className="wa-detail-title">
               <div className={'wa-session-avatar ' + (group ? 'is-group' : '')}>{initials(peerName(peer))}</div>
               <div>
@@ -76,33 +76,6 @@ export function ConversationSettings({
               </div>
             </div>
             <span className="wa-badge">{peer.authorized ? '已授权' : '仅保留历史'}</span>
-          </div>
-          <div className="wa-subsection">
-            <h2>会话管理员与远程查询</h2>
-            <label className="wa-check-label"><input id="wa-remote-enabled" type="checkbox" checked={draft.remoteEnabled}
-              disabled={blocked || !peer.authorized} onChange={event => onChange({ ...draft, remoteEnabled: event.target.checked })} />允许此会话远程查询</label>
-            <p className="wa-help">开启后，全局管理员和本会话管理员可查询电脑及 DSH 任务。全局管理员：{status.remote?.globalAdminIds?.length || 0} 位。</p>
-            {!draft.remoteEnabled && (draft.adminIds.length || status.remote?.globalAdminIds?.length) > 0 &&
-              <p className="wa-help" role="status">已选管理员，但此会话的远程查询仍关闭；开启上方开关并保存后才能查询。</p>}
-            {group && <p className="wa-help">群聊查询结果会发送到这个群；请确认群成员可以查看这些信息。</p>}
-            <AdminPicker rpc={rpc} accountId={status.account?.id} peer={peer} value={draft.adminIds}
-              label="会话管理员" disabled={blocked || !!busy || !peer.authorized} onChange={ids => onChange({ ...draft, adminIds: ids })} />
-          </div>
-          <div className="wa-subsection">
-            <h2>执行方式</h2>
-            <Field label="聊天或工作" id="wa-execution-mode" help="工作模式允许已授权管理员发起任务，其他成员继续按会话回复模式聊天。">
-              <select id="wa-execution-mode" className="wa-select" value={draft.executionMode} disabled={blocked || !peer.authorized}
-                onChange={event => onChange({ ...draft, executionMode: event.target.value })}>
-                <option value="chat">聊天模式</option><option value="work">工作模式</option>
-              </select>
-            </Field>
-            <p className="wa-help">需要开启远程查询并保存设置。切回聊天模式会取消此会话正在进行的工作，文件保留。</p>
-            <details className="wa-mode-guide">
-              <summary>微信操作与任务文件</summary>
-              <p className="wa-help">管理员可直接说“切换到工作模式”“切回聊天模式”，也可使用 /mode work、/mode chat 或 /mode status。只切换当前会话。</p>
-              <p className="wa-help">普通工作追加到当前任务；/work new 主动新开。结果、文件和图片回传到发起会话，原文件保存在本机。</p>
-              <Button quiet onClick={() => onNavigate('work')}>查看工作任务</Button>
-            </details>
           </div>
           <div className="wa-subsection wa-conversation-persona-link" data-testid="conversation-global-persona">
             <div><h2>全局助手</h2>
@@ -245,6 +218,33 @@ export function ConversationSettings({
           ) : (
             <p className="wa-help">直接处理这个授权联系人的消息，使用此会话自己的记忆。</p>
           )}
+          <div className="wa-subsection">
+            <h2>执行方式</h2>
+            <Field label="聊天或工作" id="wa-execution-mode" help="工作模式允许已授权管理员发起任务，其他成员继续按会话回复模式聊天。">
+              <select id="wa-execution-mode" className="wa-select" value={draft.executionMode} disabled={blocked || !peer.authorized}
+                onChange={event => onChange({ ...draft, executionMode: event.target.value })}>
+                <option value="chat">聊天模式</option><option value="work">工作模式</option>
+              </select>
+            </Field>
+            <p className="wa-help">需要开启远程查询并保存设置。切回聊天模式会取消此会话正在进行的工作，文件保留。</p>
+            <details className="wa-mode-guide">
+              <summary>微信操作与任务文件</summary>
+              <p className="wa-help">管理员可直接说“切换到工作模式”“切回聊天模式”，也可使用 /mode work、/mode chat 或 /mode status。只切换当前会话。</p>
+              <p className="wa-help">普通工作追加到当前任务；/work new 主动新开。结果、文件和图片回传到发起会话，原文件保存在本机。</p>
+              <Button quiet onClick={() => onNavigate('work')}>查看工作任务</Button>
+            </details>
+          </div>
+          <div className="wa-subsection wa-conversation-permissions">
+            <h2>会话管理员与远程查询</h2>
+            <label className="wa-check-label"><input id="wa-remote-enabled" type="checkbox" checked={draft.remoteEnabled}
+              disabled={blocked || !peer.authorized} onChange={event => onChange({ ...draft, remoteEnabled: event.target.checked })} />允许此会话远程查询</label>
+            <p className="wa-help">开启后，全局管理员和本会话管理员可查询电脑及 DSH 任务。全局管理员：{status.remote?.globalAdminIds?.length || 0} 位。</p>
+            {!draft.remoteEnabled && (draft.adminIds.length || status.remote?.globalAdminIds?.length) > 0 &&
+              <p className="wa-help" role="status">已选管理员，但此会话的远程查询仍关闭；开启上方开关并保存后才能查询。</p>}
+            {group && <p className="wa-help">群聊查询结果会发送到这个群；请确认群成员可以查看这些信息。</p>}
+            <AdminPicker rpc={rpc} accountId={status.account?.id} peer={peer} value={draft.adminIds}
+              label="会话管理员" disabled={blocked || !!busy || !peer.authorized} onChange={ids => onChange({ ...draft, adminIds: ids })} />
+          </div>
           <div className="wa-subsection">
             <h2>会话记忆</h2>
             <Field

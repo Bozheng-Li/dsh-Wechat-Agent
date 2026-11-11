@@ -40,15 +40,19 @@ test('work command parsing admits explicit commands and leaves ordinary text to 
     assert.equal(workCommand(text, 'work'), null, text);
   assert.equal(workCommand(undefined, 'work'), null);
 });
-test('administrator group work bypasses chat gates, prompt and memory; result and request stay isolated after restart', async t => {
+test('administrator group work bypasses chat gates and eager memory injection; result and request stay isolated after restart', async t => {
   const f = fixture(t), group = { chatType: 'group', peerId: 'work@chatroom', sender: { id: 'admin' } };
   f.store.setConversationSettings(scope.accountId, group.chatType, group.peerId, { ...f.store.conversationSettings(scope.accountId, group.chatType, group.peerId), mode: 'natural', fixedMessages: 100, remoteEnabled: true, adminIds: ['admin'] });
   const fail = () => { throw Error('work entered chat context'); };
   f.channel.runner.run = input => input.mode === 'work-routing' ? fixtureWorkRoute(input) : fail();
-  f.channel.context = fail; f.channel.memory.snapshot = fail; f.channel.longMemory.capture = fail;
+  f.channel.context = fail; f.channel.longMemory.capture = fail;
+  const snapshot = f.channel.memory.snapshot.bind(f.channel.memory); let snapshots = 0;
+  f.channel.memory.snapshot = (...args) => { snapshots++; return snapshot(...args); };
   f.receive('帮我写一个 Python 脚本', group); await f.channel.whenIdle();
   assert.equal(f.calls.length, 1); assert.equal(f.calls[0].request, '帮我写一个 Python 脚本');
   for (const key of ['persona', 'prompt', 'history', 'memory', 'speaker', 'account']) assert.equal(f.calls[0][key], undefined);
+  assert(snapshots > 0, 'the on-demand memory tool captures the request-time boundary');
+  assert.deepEqual(f.calls[0].memoryTools.map(tool => tool.name), ['wechat_memory']);
   assert.equal(f.store.history(scope.accountId, group.chatType, group.peerId, 100).length, 0);
   assert.equal(f.channel.memory.load({ accountId: scope.accountId, ...group }).entries.length, 0);
   const restored = new StateStore(f.root); assert.equal(restored.history(scope.accountId, group.chatType, group.peerId, 100).length, 0);

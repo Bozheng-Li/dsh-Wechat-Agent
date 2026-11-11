@@ -15,7 +15,7 @@ export function conversationPreference(request, { history = [], speaker, now = n
     const rawTime = Number(entry.time);
     const time = rawTime < 1e12 ? rawTime * 1000 : rawTime;
     // An incomplete or undated message might contain a later change of mind.
-    if (entry.contextOmitted || !Number.isFinite(time) || time <= 0 || time > at || at - time > PREFERENCE_WINDOW_MS)
+    if ((entry.contextTextOmitted ?? entry.contextOmitted) || !Number.isFinite(time) || time <= 0 || time > at || at - time > PREFERENCE_WINDOW_MS)
       return undefined;
     const value = explicitConversationPreference(entry.text);
     if (value) return { value, source: 'recent' };

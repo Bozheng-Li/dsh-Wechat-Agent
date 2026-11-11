@@ -9,6 +9,10 @@ const evaluate = (fn, ...args) => window.webContents.executeJavaScript('(' + fn.
 async function wait(fn, ...args) { const until = Date.now() + 12000; while (!await evaluate(fn, ...args)) { assert(Date.now() < until, 'UI condition timed out: ' + fn.toString().slice(0, 160)); await sleep(80); } }
 function visible(element) { if (!element || !element.getClientRects().length) return false; for (let node = element; node; node = node.parentElement) { const style = getComputedStyle(node); if (node.hidden || style.display === 'none' || style.visibility === 'hidden' || node.tagName === 'DETAILS' && !node.open && node !== element && !node.querySelector('summary')?.contains(element)) return false; } return true; }
 async function click(selector, text) {
+  if (selector.includes('nav-')) await evaluate(selector => {
+    const target = document.querySelector(selector), toggle = document.querySelector('[data-testid=mobile-navigation]');
+    if (target && !target.getClientRects().length && toggle?.getClientRects().length) toggle.click();
+  }, selector);
   const usable = (selector, text, source) => Array.from(document.querySelectorAll(selector)).some(el => eval('(' + source + ')')(el) && !el.disabled && (!text || el.textContent.trim() === text));
   await wait(usable, selector, text, visible.toString());
   await evaluate((selector, text, source) => { const el = Array.from(document.querySelectorAll(selector)).find(el => eval('(' + source + ')')(el) && !el.disabled && (!text || el.textContent.trim() === text)); el.scrollIntoView({ block: 'center' }); el.click(); }, selector, text, visible.toString()); await sleep(70);
@@ -62,7 +66,7 @@ app.whenReady().then(async () => {
     assert.equal(await evaluate(() => !!document.querySelector('[data-testid="nav-knowledge"],[data-testid="knowledge-page"]')), false);
     assert.equal((await fixtureSummary()).simulated.modelRequests, 0);
     report.checks.push('removed document-library page and navigation are absent; opening the workspace makes no model request');
-    await nav('memory-review'); await wait(() => document.querySelector('.wa-wb-fact')?.textContent.includes('980')); await capture('memory-conflict-light'); await click('.wa-wb-tabs button', '有效记忆'); assert.equal(await evaluate(() => [...document.querySelectorAll('.wa-wb-fact')].some(el => el.textContent.includes('800') || el.textContent.includes('980'))), false); await click('.wa-wb-tabs button', '冲突待确认'); await click('button', '采用新事实'); await wait(() => !document.querySelector('.wa-wb-fact')); await click('.wa-wb-tabs button', '有效记忆'); await wait(() => document.querySelector('.wa-wb-fact')?.textContent.includes('980')); await click('button', '调整有效期'); const later = new Date(Date.now() + 86400000); const local = new Date(later - later.getTimezoneOffset() * 60000).toISOString().slice(0, 16); await input('[aria-label="记忆到期时间"]', local); await click('button', '保存有效期'); await wait(() => document.querySelector('.wa-wb-expiry')?.textContent.includes('有效至')); report.checks.push('conflict acceptance and expiry save update memory cards and effective facts');
+    await nav('memory-review'); await wait(() => document.querySelector('[data-testid=memory-review-page] article[data-fact-state]')?.textContent.includes('980')); await capture('memory-conflict-light'); await click('.wa-wb-tabs button', '有效记忆'); assert.equal(await evaluate(() => [...document.querySelectorAll('[data-testid=memory-review-page] article[data-fact-state]')].some(el => el.textContent.includes('800') || el.textContent.includes('980'))), false); await click('.wa-wb-tabs button', '冲突待确认'); await click('button', '采用新事实'); await wait(() => !document.querySelector('[data-testid=memory-review-page] article[data-fact-state]')); await click('.wa-wb-tabs button', '有效记忆'); await wait(() => document.querySelector('[data-testid=memory-review-page] article[data-fact-state]')?.textContent.includes('980')); await click('button', '调整有效期'); const later = new Date(Date.now() + 86400000); const local = new Date(later - later.getTimezoneOffset() * 60000).toISOString().slice(0, 16); await input('[aria-label="记忆到期时间"]', local); await click('button', '保存有效期'); await wait(() => document.querySelector('.wa-memory-expiry')?.textContent.includes('有效至')); report.checks.push('conflict acceptance and expiry save update visible memory rows and effective facts');
     await nav('digests'); await click('button', '生成简报草稿'); await wait(() => document.querySelector('.wa-wb-todo')); await capture('digest-light'); await click('button', '确认待办'); await wait(() => document.querySelector('.wa-wb-todo')?.textContent.includes('已确认')); await click('button', '设为定时提醒'); await click('button', '确认创建提醒'); await wait(() => document.querySelector('.wa-wb-todo')?.textContent.includes('已创建提醒')); report.checks.push('group digest cites source messages and only creates a reminder after explicit todo confirmation');
     const savedReminder = (await fixtureSummary()).workbench.summaries[0].todos[0].reminder;
     assert.equal(savedReminder.state, 'pending');
@@ -76,16 +80,44 @@ app.whenReady().then(async () => {
     const expiryDate = new Date(Date.now() + 2 * 86400000), expiryDraft = new Date(expiryDate - expiryDate.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
     await input('[aria-label="记忆到期时间"]', expiryDraft);
     const memoryBeforeDelete = (await fixtureSummary()).memory.markdown;
+    const pressMemoryKey = async (keyCode, modifiers = []) => {
+      window.webContents.focus();
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode, modifiers });
+      // Electron sends raw keyDown separately from the character event that
+      // Chromium uses for Enter's native button activation.
+      if (keyCode === 'Enter') window.webContents.sendInputEvent({ type: 'char', keyCode: '\r', modifiers });
+      window.webContents.sendInputEvent({ type: 'keyUp', keyCode, modifiers });
+      await sleep(60);
+    };
+    await evaluate(() => document.querySelector('[data-testid="memory-delete-fact"]').focus());
+    await pressMemoryKey('Enter');
+    await wait(() => document.querySelector('[aria-label="确认删除记忆"]')?.contains(document.activeElement) && document.activeElement.textContent.trim() === '取消');
+    await pressMemoryKey('Tab');
+    assert.equal(await evaluate(() => document.activeElement.textContent.trim()), '确认删除');
+    await pressMemoryKey('Tab', ['shift']);
+    assert.equal(await evaluate(() => document.activeElement.textContent.trim()), '取消');
+    await pressMemoryKey('Escape');
+    await wait(() => !document.querySelector('[aria-label="确认删除记忆"]') && document.activeElement === document.querySelector('[data-testid="memory-delete-fact"]'));
+    report.checks.push('fact deletion opens with Enter, focuses cancel, wraps real Tab/Shift+Tab, and restores trigger focus after Escape');
     await evaluate(() => window.__uiFixture('fail-next-delete', { endpoint: 'memory.fact.delete' }));
-    await click('[data-testid="memory-delete-fact"]'); await capture('memory-delete-confirmation-light', '[aria-label="确认删除记忆"]'); await verifyContrast('memory-review-with-delete', 'light');
+    await pressMemoryKey('Enter'); await capture('memory-delete-confirmation-light', '[aria-label="确认删除记忆"]'); await verifyContrast('memory-review-with-delete', 'light');
     await click('[aria-label="确认删除记忆"] button', '确认删除');
-    await wait(() => document.querySelector('[data-testid="memory-review-page"] .wa-alert.is-error')?.textContent.includes('删除保存失败'));
+    await wait(() => document.querySelector('[aria-label="确认删除记忆"] [role="alert"]')?.textContent.includes('删除保存失败'));
+    await capture('memory-delete-failed-light', '[aria-label="确认删除记忆"]');
     assert.equal((await fixtureSummary()).memory.markdown, memoryBeforeDelete);
     assert.equal(await evaluate(() => document.querySelector('[aria-label="记忆到期时间"]').value), expiryDraft);
     assert.equal(await evaluate(() => !!document.querySelector('[aria-label="确认删除记忆"]')), true);
-    report.checks.push('failed fact deletion preserves the authoritative Markdown, confirmation target and unsaved expiry draft');
-    await click('[aria-label="确认删除记忆"] button', '取消'); await click('.wa-wb-inline-form button', '取消');
-    await click('[data-testid="memory-delete-fact"]'); await click('[aria-label="确认删除记忆"] button', '确认删除');
+    report.checks.push('failed fact deletion shows its error inside the dialog and preserves the authoritative Markdown, confirmation target and unsaved expiry draft');
+    await click('[aria-label="确认删除记忆"] button', '取消');
+    await wait(() => !document.querySelector('[aria-label="确认删除记忆"]') && document.activeElement === document.querySelector('[data-testid="memory-delete-fact"]'));
+    await click('.wa-wb-inline-form button', '取消');
+    await evaluate(() => document.querySelector('[data-testid="memory-delete-fact"]').focus());
+    await pressMemoryKey('Enter');
+    assert.equal(await evaluate(() => !!document.querySelector('[aria-label="确认删除记忆"] [role="alert"]')), false, 'New confirmation must not inherit a previous deletion error');
+    await evaluate(() => window.__uiFixture('fail-next-delete', { endpoint: 'memory.fact.delete' }));
+    await click('[aria-label="确认删除记忆"] button', '确认删除');
+    await wait(() => document.querySelector('[aria-label="确认删除记忆"] [role="alert"]')?.textContent.includes('删除保存失败'));
+    await click('[aria-label="确认删除记忆"] button', '确认删除');
     await wait(() => document.querySelector('[data-testid="memory-review-page"] [role=status]')?.textContent.includes('已删除 1 条'));
     assert.equal((await fixtureSummary()).memory.markdown.includes('980'), false);
     await click('[data-testid="memory-tab-global"]');
@@ -100,7 +132,7 @@ app.whenReady().then(async () => {
     await nav('recovery'); await click('.wa-wb-list-item');
     await click('.wa-recovery-options > summary');
     await click('button', '仅恢复文字'); await wait(() => document.querySelector('[aria-label="发送前预览"]')); assert.equal(await evaluate(() => Array.from(document.querySelectorAll('button')).find(el => el.textContent === '发送并核对回执').disabled), true); await capture('recovery-light'); await click('[aria-label="发送前预览"] input[type=checkbox]'); await click('button', '发送并核对回执'); await wait(() => document.querySelector('[role=status]')?.textContent.includes('微信服务端已确认')); report.checks.push('recovery alternatives expand before use, require confirmation and record a simulated server ACK');
-    await nav('diagnostics'); await click('button', '检查现在能做什么'); await wait(() => document.querySelectorAll('.wa-wb-capability').length === 4 && !Array.from(document.querySelectorAll('button')).find(el => el.textContent.includes('检查现在能做什么'))?.disabled); await capture('diagnostics-light'); report.checks.push('diagnostics render four actual probe results with separate image-readiness status');
+    await nav('diagnostics'); await click('button', '检查现在能做什么'); await wait(() => document.querySelectorAll('[data-testid=diagnostics-page] article[data-state]').length === 4 && !Array.from(document.querySelectorAll('button')).find(el => el.textContent.includes('检查现在能做什么'))?.disabled); await capture('diagnostics-light'); report.checks.push('diagnostics render four actual probe results with separate image-readiness status');
     await nav('recovery');
     assert.equal(await evaluate(() => document.querySelector('[data-testid="nav-records"]').getAttribute('aria-current')), 'page');
     assert.equal(await evaluate(() => document.querySelectorAll('.wa-wb-recovery-row button button').length), 0);

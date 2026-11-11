@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { rolldown } from 'rolldown';
 import { nativeQrSession } from './fixtures/native-qr-session.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const entry = ['moments', 'moments-write', 'moments-audience', 'backend', 'wire', 'image-session'].map(name => `export * from ${JSON.stringify(path.join(root, 'backend/wechat/protocol/' + name + '.ts'))};`).join('\n');
+const entry = ['moments', 'moments-images', 'moments-write', 'moments-audience', 'backend', 'wire', 'image-session'].map(name => `export * from ${JSON.stringify(path.join(root, 'backend/wechat/protocol/' + name + '.ts'))};`).join('\n');
 const build = await rolldown({ input: 'virtual:moments-test', platform: 'node', resolve: { alias: { '@napcat-wechat/protocol': path.join(root, 'backend/wechat/types.ts') } },
   plugins: [{ name: 'moments-test', resolveId: id => id === 'virtual:moments-test' ? id : null, load: id => id === 'virtual:moments-test' ? entry : null }] });
 let api;
@@ -166,10 +167,21 @@ test('SNS image upload ACKs bind chunk position, client, length and media URLs',
   assert.deepEqual(bytes(fields(bytes(request, 5)), 2), data);
   assert.equal(api.snsUploadResponse(uploadAck('image-id', 20, 10), 'image-id', 20, 10), undefined);
   assert(api.snsUploadResponse(uploadAck('image-id', 20, 20), 'image-id', 20, 20).url.startsWith('https://mmsns.qpic.cn/'));
+  assert.equal(api.snsUploadResponse(uploadAck('image-id', 20, 20), 'image-id', 20, 20).id, '0');
+  assert.equal(api.snsUploadResponse(Buffer.concat([uploadAck('image-id', 20, 20), fv(8, 18446744073709551610n)]), 'image-id', 20, 20).id, '18446744073709551610');
+  for (const badId of [ld(8, '1'), Buffer.concat([fv(8, 0), fv(8, 1)]), Buffer.from([0x40, ...Array(9).fill(0x80), 0x02])])
+    assert.throws(() => api.snsUploadResponse(Buffer.concat([uploadAck('image-id', 20, 20), badId]), 'image-id', 20, 20));
   for (const body of [uploadAck('other', 20, 20), uploadAck('image-id', 21, 20), uploadAck('image-id', 20, 19), uploadAck('image-id', 20, 20, -2)])
     assert.throws(() => api.snsUploadResponse(body, 'image-id', 20, 20));
   const bad = Buffer.concat([ld(1, fv(1, 0)), fv(2, 20), fv(3, 20), ld(4, 'image-id'), ld(5, ld(1, 'http://localhost/private')), fv(6, 1), ld(7, ld(1, 'https://mmsns.qpic.cn/thumb')), fv(9, 2)]);
   assert.throws(() => api.snsUploadResponse(bad, 'image-id', 20, 20));
+});
+
+test('upload and final publication rejection messages identify the actual failing stage', () => {
+  assert.throws(() => api.snsUploadResponse(snsAck(undefined, -2), 'image', 1, 1), error =>
+    error.code === 'ERR_MOMENTS_WRITE_REJECTED' && error.details.stage === 'upload' && error.message.includes('图片上传') && error.details.delivery === 'rejected');
+  assert.throws(() => api.snsPostResponse(snsAck(undefined, -2), account.wxid, { action: 'publish', text: '测试' }), error =>
+    error.code === 'ERR_MOMENTS_WRITE_REJECTED' && error.details.stage === 'publish' && error.message.includes('朋友圈发布') && error.details.delivery === 'rejected');
 });
 
 test('publishing escapes user text, separates uploads from posts and requires matching server content', () => {
@@ -235,6 +247,37 @@ test('publish blacklist is encoded as SnsPost 13/14 and confirmed against SnsObj
   assert.throws(() => api.validateSnsWrite({ action: 'comment', postId: '1', text: '评论', blockedUserIds: [] }));
 });
 
+test('publication confirms every requested exclusion without mistaking additional blocked people for a failure', () => {
+  const query = { action: 'publish', text: '确认屏蔽范围', blockedUserIds: ['friend-a', 'friend-b'] };
+  const object = post({ xml: '<TimelineObject><contentDesc>确认屏蔽范围</contentDesc></TimelineObject>' });
+  const privacy = ids => Buffer.concat([object, fv(23, ids.length), ...ids.map(id => ld(24, wrap(Buffer.from(id))))]);
+  const result = api.snsPostResponse(snsAck(privacy(['friend-b', 'already-blocked', 'friend-a'])), account.wxid, query);
+  assert.equal(result.audienceConfirmed, true); assert.equal(result.additionalBlockedCount, 1);
+  assert.throws(() => api.snsPostResponse(snsAck(privacy(['friend-a', 'another-person'])), account.wxid, query), error => {
+    assert.equal(error.code, 'ERR_MOMENTS_WRITE_PROTOCOL'); assert.equal(error.details.delivery, 'unknown');
+    const evidence = error.details.publication;
+    assert.equal(evidence.postId, '18446744073709551610'); assert.equal(evidence.accountId, account.wxid);
+    assert.deepEqual(evidence.submittedBlockedUserIds, query.blockedUserIds);
+    assert.deepEqual(evidence.returnedBlockedUserIds, ['friend-a', 'another-person']);
+    assert.equal(evidence.textHash, createHash('sha256').update(query.text).digest('hex')); return true;
+  });
+});
+
+test('publication readback uses only the exact own-post detail endpoint and preserves audience uncertainty', async () => {
+  const id = '18446744073709551610', calls = [], object = post({ xml: '<TimelineObject><contentDesc>原正文</contentDesc></TimelineObject>' });
+  const writer = new api.MomentsWriter(async (_account, cmd, route) => {
+    calls.push([cmd, route]); return snsAck(Buffer.concat([object, fv(23, 1), ld(24, wrap(Buffer.from('friend-a')))]));
+  });
+  const result = await writer.readPublication(account, { postId: id }, new AbortController().signal, () => {});
+  assert.deepEqual(calls, [[210, 'mmsnsobjectdetail']]); assert.deepEqual(result.blockedUserIds, ['friend-a']);
+  assert.equal(result.audienceComplete, true); assert.equal(result.contentAvailable, true);
+  assert.equal(result.text, '原正文'); assert.equal(result.comments, undefined);
+  assert.equal(api.snsPublicationResponse(snsAck(object), account.wxid, id).audienceComplete, false);
+  assert.throws(() => api.snsPublicationResponse(snsAck(post({ userId: 'somebody-else' })), account.wxid, id));
+  await assert.rejects(writer.readPublication(account, { postId: id, action: 'publish' }, new AbortController().signal, () => {}));
+  assert.equal(calls.length, 1);
+});
+
 test('backend refreshes audience before uploading and never publishes unknown or unreadable selections', async () => {
   const directory = path.join(codeRoot, 'backend-audience'); fs.mkdirSync(directory);
   fs.writeFileSync(path.join(directory, 'session.json'), JSON.stringify(account));
@@ -277,11 +320,17 @@ test('writer checks all prior comments beyond the model preview before confirmin
 
 test('writer publishes only after every image chunk is acknowledged, and returns no CDN credentials', async () => {
   const data = Buffer.alloc(50010, 65), query = { action: 'publish', text: '图片测试', images: [{ data: data.toString('base64'), width: 20, height: 10 }] }, calls = [];
+  const md5 = createHash('md5').update(data).digest('hex');
   const writer = new api.MomentsWriter(async (_account, cmd, route, body) => {
     calls.push(cmd); const request = fields(body(Buffer.from(account.image_base_request, 'hex')));
     if (cmd === 207) { const position = Number(num(request, 3)), total = Number(num(request, 4)), content = bytes(fields(bytes(request, 5)), 2);
+      assert.equal(bytes(request, 15).toString(), md5);
       return uploadAck(bytes(request, 6).toString(), total, position + content.length); }
     assert.equal(route, 'mmsnspost');
+    const xml = bytes(fields(bytes(request, 2)), 2).toString();
+    assert(xml.includes('<media><id>0</id><type>2</type>'));
+    assert(xml.includes('<private>0</private><url type="1" md5="' + md5 + '">'));
+    assert(xml.includes('totalSize="50010"'));
     return snsAck(post({ xml: '<TimelineObject><contentDesc>图片测试</contentDesc><ContentObject><mediaList><media><type>2</type></media></mediaList></ContentObject></TimelineObject>' }));
   });
   const result = await writer.write(account, query, 'stable', new AbortController().signal, () => {});
@@ -340,6 +389,13 @@ test('missing content stays explicitly unavailable; empty server results require
   assert.throws(() => momentsResponse(response([], { count: 1 }), { action: 'timeline' }), error => error.code === 'ERR_MOMENTS_PROTOCOL');
   assert.throws(() => momentsResponse(Buffer.alloc(0), { action: 'timeline' }));
 });
+test('nonzero user-page response preserves ret 207 without interpreting it as a privacy setting or an empty page', () => {
+  assert.throws(() => momentsResponse(response([], { ret: 207 }), { action: 'user', userId: 'synthetic-friend' }), error => {
+    assert.equal(error.code, 'ERR_MOMENTS_REJECTED'); assert.equal(error.details.ret, 207);
+    assert.match(error.message, /ret=207/); assert.match(error.message, /原因未确认/);
+    return true;
+  });
+});
 for (const xml of ['<TimelineObject><username>other-account</username></TimelineObject>', '<TimelineObject><id>123</id></TimelineObject>',
   '<!DOCTYPE TimelineObject [<!ENTITY x SYSTEM "file:///private">]><TimelineObject><contentDesc>&x;</contentDesc></TimelineObject>', '<TimelineObject><broken></TimelineObject>'])
   test('reject malformed or unbound social content: ' + xml.slice(0, 45), () => assert.throws(() => parseSnsObject(post({ xml })), error => error.code === 'ERR_MOMENTS_PROTOCOL'));
@@ -380,4 +436,42 @@ test('an account change or cancellation during network work returns no old conte
   await assert.rejects(pending, error => error.code === 'ERR_MOMENTS_ACCOUNT_CHANGED'); assert.equal(reader.cursors.size, 0);
   const controller = new AbortController(); controller.abort(new Error('cancelled'));
   await assert.rejects(reader.read({}, 'alice', controller.signal), /cancelled/);
+});
+
+test('SNS photo URLs remain private and a read fetches only images from the freshly verified post', async () => {
+  const calls = [], reader = new MomentsReader(() => account, () => {}, async (_account, query) => {
+    assert.equal(query.action, 'detail'); return { items: [parseSnsObject(post())] };
+  });
+  const value = await reader.readImages({ postId: '18446744073709551610' }, 'actor-a', new AbortController().signal, async source => {
+    calls.push(source); return { index: source.index, mediaId: source.mediaId, bytes: 5, data: 'pixels' };
+  });
+  assert.equal(value.source, 'wechat-sns-images-live'); assert.equal(value.complete, true); assert.equal(value.items.length, 1);
+  assert.equal(calls[0].mediaId, 'image-1'); assert(calls[0].url.includes('SECRET_CDN_TOKEN'));
+  assert(!JSON.stringify(value).includes('SECRET_CDN_TOKEN')); assert(!JSON.stringify(value.post).includes('qpic.cn'));
+  await assert.rejects(reader.readImages({ postId: value.postId, url: calls[0].url }, 'actor-a', new AbortController().signal), { code: 'ERR_INVALID_MOMENTS_QUERY' });
+});
+
+test('SNS picture reading stops on account changes and never returns partial success', async () => {
+  let current = account, calls = 0;
+  const reader = new MomentsReader(() => current, () => {}, async () => ({ items: [parseSnsObject(post())] }));
+  await assert.rejects(reader.readImages({ postId: '18446744073709551610' }, 'actor', new AbortController().signal, async source => {
+    calls++; current = { ...account, token: 'changed' }; return { index: source.index, mediaId: source.mediaId, bytes: 1, data: 'x' };
+  }), { code: 'ERR_MOMENTS_ACCOUNT_CHANGED' });
+  assert.equal(calls, 1); current = account;
+  await assert.rejects(reader.readImages({ postId: '18446744073709551610' }, 'actor', new AbortController().signal, async () => { throw Error('download failed'); }));
+});
+
+test('SNS image download validates the host, refuses redirects and never exposes credential URLs in errors', async () => {
+  for (const url of ['http://127.0.0.1/x', 'https://mmsns.qpic.cn.evil.test/x', 'https://mmsns.qpic.cn@evil.test/x', 'file:///x', 'https://mmsns.qpic.cn:8443/x'])
+    assert.throws(() => api.snsImageUrl(url), { code: 'ERR_MOMENTS_IMAGE_READ' });
+  assert.equal(api.snsImageUrl('http://mmsns.qpic.cn/photo/0?token=private').protocol, 'https:');
+  const source = { index: 1, mediaId: 'photo', url: 'https://mmsns.qpic.cn/photo/0?token=PRIVATE_TOKEN' }, signal = new AbortController().signal;
+  await assert.rejects(api.downloadSnsImage(source, signal, async (_url, options) => {
+    assert.equal(options.redirect, 'error'); throw Error(source.url);
+  }), error => error.code === 'ERR_MOMENTS_IMAGE_READ' && !error.message.includes('PRIVATE_TOKEN'));
+  await assert.rejects(api.downloadSnsImage(source, signal, async () => new Response('encrypted bytes')), { code: 'ERR_MOMENTS_IMAGE_READ' });
+  const png = fs.readFileSync(path.join(root, 'assets/stickers', fs.readdirSync(path.join(root, 'assets/stickers'), { recursive: true }).find(file => file.endsWith('.png'))));
+  const value = await api.downloadSnsImage(source, signal, async () => new Response(png));
+  assert.equal(value.mediaType, 'image/png'); assert.equal(value.sha256, createHash('sha256').update(png).digest('hex'));
+  assert(!JSON.stringify(value).includes('PRIVATE_TOKEN'));
 });

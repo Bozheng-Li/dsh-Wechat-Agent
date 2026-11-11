@@ -1,49 +1,61 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="590" viewBox="0 0 1440 590" fill="none">
   <title>微信 Agent — 把人设、记忆与提醒带进微信</title>
-  <desc>深绿背景上的产品介绍。微信 Agent 支持 18 套内置人设、持久记忆与定时提醒，运行在 DeepSeek Harness。</desc>
+  <desc>青玉与石墨色的微信 Agent 工作台。聊天示例连接会话记忆、定时提醒与工作任务，支持全局助手设定和三十张内置表情，运行在 DeepSeek Harness。</desc>
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1440" y2="590" gradientUnits="userSpaceOnUse"><stop stop-color="#0C1917"/><stop offset="1" stop-color="#122925"/></linearGradient>
-    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(1170 235) rotate(145) scale(410 360)" gradientUnits="userSpaceOnUse"><stop stop-color="#2CA58B" stop-opacity=".16"/><stop offset="1" stop-color="#2CA58B" stop-opacity="0"/></radialGradient>
-    <linearGradient id="card" x1="820" y1="165" x2="1364" y2="422" gradientUnits="userSpaceOnUse"><stop stop-color="#24453D"/><stop offset="1" stop-color="#172F29"/></linearGradient>
-    <pattern id="grid" width="42" height="42" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="#87BBAA" fill-opacity=".12"/></pattern>
+    <clipPath id="hero-frame"><rect width="1440" height="590" rx="24"/></clipPath>
+    <filter id="card-shadow" x="-15%" y="-20%" width="130%" height="150%"><feDropShadow dx="0" dy="12" stdDeviation="12" flood-color="#071216" flood-opacity=".18"/></filter>
   </defs>
-  <rect width="1440" height="590" rx="24" fill="url(#bg)"/>
-  <rect width="1440" height="590" rx="24" fill="url(#glow)"/>
-  <rect x="750" y="36" width="654" height="426" fill="url(#grid)"/>
-  <path d="M1405 44H1338M1405 44V111M36 546H103M36 546V479" stroke="#3B6157"/>
-  <g font-family="Inter, Segoe UI, Microsoft YaHei, PingFang SC, sans-serif">
-    <rect x="68" y="59" width="43" height="43" rx="13" fill="#66DEB4"/>
-    <path d="M101 79c0 6-5 10-11 10-2 0-3.6-.3-5-1l-6 2 1.5-5.3a9 9 0 0 1-2-5.7c0-5.5 5-10 11-10s11.5 4.5 11.5 10Z" stroke="#153B2E" stroke-width="2"/>
-    <circle cx="84" cy="79" r="1.4" fill="#153B2E"/><circle cx="90" cy="79" r="1.4" fill="#153B2E"/><circle cx="96" cy="79" r="1.4" fill="#153B2E"/>
-    <text x="128" y="88" font-size="23" font-weight="650" letter-spacing="2" fill="#EDF6EE">WECHAT AGENT</text>
-    <text x="1370" y="84" font-size="12" letter-spacing="2.5" text-anchor="end" fill="#8EAAA1">DEEPSEEK HARNESS PLUGIN</text>
-    <text x="68" y="205" font-size="64" font-weight="700" letter-spacing="-2" fill="#F2F6ED">让微信，多一个</text>
-    <text x="68" y="288" font-size="64" font-weight="700" letter-spacing="-2" fill="#85E5BD">懂你的伙伴。</text>
-    <text x="71" y="342" font-size="21" fill="#B3C8BE">会聊天，有记忆，也记得你的约定。</text>
-    <rect x="71" y="383" width="257" height="36" rx="18" stroke="#466C5E"/>
-    <circle cx="92" cy="401" r="3.5" fill="#83D5AC"/>
-    <text x="108" y="407" font-size="13" letter-spacing="1.2" fill="#BFCEC1">Windows x64 · DSH 0.2.1-rc.5</text>
-    <g transform="translate(812 149)">
-      <rect width="525" height="264" rx="24" fill="url(#card)" stroke="#3B5D50"/>
-      <circle cx="28" cy="29" r="3" fill="#99B8A8"/><circle cx="41" cy="29" r="3" fill="#698C7B"/><circle cx="54" cy="29" r="3" fill="#446858"/>
-      <text x="497" y="33" font-size="11" text-anchor="end" letter-spacing="2" fill="#8DAD9C">A MOMENT IN YOUR CHAT</text>
-      <path d="M28 51H497" stroke="#3B5D50"/>
-      <rect x="27" y="74" width="370" height="54" rx="16" fill="#132B22"/>
-      <text x="47" y="107" font-size="19" fill="#DCECE0">小胖，一分钟后提醒我吃饭。</text>
-      <rect x="156" y="149" width="341" height="55" rx="16" fill="#A8E9C8"/>
-      <text x="178" y="183" font-size="20" font-weight="550" fill="#173E2B">好，一分钟后提醒你。</text>
-      <circle cx="32" cy="235" r="4" fill="#7CDBAC"/>
-      <text x="46" y="240" font-size="12" letter-spacing=".5" fill="#A0BCA9">人设 · 会话记忆 · 定时提醒</text>
-      <path d="m470 229 5 5 10-11" stroke="#A0BCA9" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <g clip-path="url(#hero-frame)">
+    <rect width="1440" height="590" fill="#F2F6F6"/>
+    <rect x=".5" y=".5" width="1439" height="589" rx="23.5" stroke="#D7E3E5"/>
+    <rect x="772" y="28" width="640" height="456" rx="20" fill="#15242B"/>
+    <path d="M70 474H723" stroke="#D7E3E5"/>
+    <g font-family="Segoe UI, Microsoft YaHei UI, Microsoft YaHei, PingFang SC, sans-serif">
+      <rect x="66" y="60" width="46" height="46" rx="14" fill="#087F79"/>
+      <path d="M101 82c0 6-5 10-11 10-2 0-3.6-.3-5-1l-6 2 1.5-5.3a9 9 0 0 1-2-5.7c0-5.5 5-10 11-10S101 76.5 101 82Z" stroke="#FFFFFF" stroke-width="2" stroke-linejoin="round"/>
+      <circle cx="84" cy="82" r="1.4" fill="#FFFFFF"/><circle cx="90" cy="82" r="1.4" fill="#FFFFFF"/><circle cx="96" cy="82" r="1.4" fill="#FFFFFF"/>
+      <text x="128" y="82" font-size="23" font-weight="650" fill="#20353B">微信 Agent</text>
+      <text x="129" y="102" font-size="11" letter-spacing="1.7" fill="#60767C">DEEPSEEK HARNESS PLUGIN</text>
+      <text x="66" y="202" font-size="60" font-weight="700" letter-spacing="-1.5" fill="#20353B">让微信，多一个</text>
+      <text x="66" y="282" font-size="60" font-weight="700" letter-spacing="-1.5" fill="#087F79">懂你的伙伴。</text>
+      <text x="70" y="336" font-size="21" fill="#516970">会聊天，有记忆，也记得你的约定。</text>
+      <rect x="68" y="384" width="298" height="38" rx="9" fill="#FFFFFF" stroke="#D7E3E5"/>
+      <g transform="translate(85 396)" stroke="#087F79" stroke-width="1.5" stroke-linejoin="round"><rect width="15" height="10" rx="2"/><path d="M7.5 10v4m-4 0h8"/></g>
+      <text x="112" y="408" font-size="14" fill="#516970">Windows x64 · DSH 0.2.1-rc.5</text>
+      <text x="805" y="66" font-size="12" letter-spacing="1" fill="#AFC2C8">从一句话，到一件事</text>
+      <circle cx="1293" cy="62" r="4" fill="#79D8C7"/>
+      <text x="1306" y="66" font-size="11" fill="#AFC2C8">微信连接</text>
+      <path d="M805 86H1379" stroke="#334B54"/>
+      <g filter="url(#card-shadow)"><rect x="808" y="110" width="568" height="207" rx="14" fill="#20353B" stroke="#3A5059"/></g>
+      <text x="829" y="139" font-size="12" fill="#AFC2C8">会话 · 小胖</text>
+      <path d="M829 154H1355" stroke="#3A5059"/>
+      <rect x="829" y="174" width="375" height="47" rx="12" fill="#15242B"/>
+      <path d="m835 210-8 12 19-5" fill="#15242B"/>
+      <text x="849" y="204" font-size="19" fill="#E5F0F2">小胖，一分钟后提醒我吃饭。</text>
+      <rect x="1006" y="240" width="348" height="47" rx="12" fill="#79D8C7"/>
+      <path d="m1344 275 12 13-21-7" fill="#79D8C7"/>
+      <text x="1027" y="270" font-size="19" font-weight="550" fill="#102D2B">好，一分钟后提醒你。</text>
+      <path d="m973 261 5 5 9-10" stroke="#79D8C7" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M1092 317v29m-189 16v-16h378v16" stroke="#55877F" stroke-width="1.5"/>
+      <circle cx="1092" cy="345" r="4" fill="#79D8C7"/>
+      <g stroke="#3A5059" fill="#1A2C33"><rect x="812" y="362" width="181" height="82" rx="10"/><rect x="1003" y="362" width="181" height="82" rx="10"/><rect x="1194" y="362" width="181" height="82" rx="10"/></g>
+      <g stroke="#79D8C7" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M830 382h12v16h-12zm4 5h4m-4 5h4m4-10 4 3v16h-12"/><circle cx="1028" cy="390" r="8"/><path d="M1028 385v5l4 2"/><rect x="1211" y="385" width="17" height="13" rx="2"/><path d="M1216 385v-4h7v4m-12 6h17m-8-1v3"/></g>
+      <text x="858" y="395" font-size="15" font-weight="600" fill="#E5F0F2">会话记忆</text>
+      <text x="1049" y="395" font-size="15" font-weight="600" fill="#E5F0F2">定时提醒</text>
+      <text x="1240" y="395" font-size="15" font-weight="600" fill="#E5F0F2">工作任务</text>
+      <text x="831" y="425" font-size="12" fill="#AFC2C8">记住各自的上下文</text>
+      <text x="1022" y="425" font-size="12" fill="#AFC2C8">在约定的时间提醒</text>
+      <text x="1213" y="425" font-size="12" fill="#AFC2C8">查看进度与成果</text>
+      <text x="70" y="516" font-size="17" font-weight="600" fill="#20353B">一位全局助手</text>
+      <text x="70" y="542" font-size="13" fill="#60767C">名字、唤醒词与表达偏好</text>
+      <path d="M333 503v43M658 503v43M1040 503v43" stroke="#D7E3E5"/>
+      <text x="367" y="517" font-size="23" font-weight="650" fill="#087F79">30</text>
+      <text x="405" y="516" font-size="16" font-weight="600" fill="#20353B">张精选表情</text>
+      <text x="367" y="542" font-size="13" fill="#60767C">让回复多一点表情</text>
+      <text x="693" y="516" font-size="17" font-weight="600" fill="#20353B">记忆与约定</text>
+      <text x="693" y="542" font-size="13" fill="#60767C">在自己的工作目录里</text>
+      <text x="1073" y="516" font-size="17" font-weight="600" fill="#20353B">消息与结果，都能核对</text>
+      <text x="1073" y="542" font-size="13" fill="#60767C">连接 · 执行 · 微信回执</text>
     </g>
-    <path d="M69 468H1371" stroke="#315044"/>
-    <text x="71" y="515" font-size="25" font-weight="600" fill="#E2F0E1">18</text>
-    <text x="116" y="514" font-size="15" fill="#ABC3AF">套完整人设</text>
-    <path d="M336 491V530M657 491V530" stroke="#315044"/>
-    <text x="369" y="515" font-size="25" font-weight="600" fill="#E2F0E1">30</text>
-    <text x="414" y="514" font-size="15" fill="#ABC3AF">张精选表情</text>
-    <text x="690" y="514" font-size="17" font-weight="600" fill="#E2F0E1">记忆与约定</text>
-    <text x="801" y="514" font-size="15" fill="#ABC3AF">在自己的工作目录里</text>
-    <text x="1368" y="514" font-size="11" letter-spacing="2.5" text-anchor="end" fill="#779F86">PERSONAL. PERSISTENT. PRESENT.</text>
   </g>
 </svg>

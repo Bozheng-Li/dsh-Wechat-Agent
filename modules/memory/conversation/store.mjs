@@ -10,6 +10,7 @@ import { conversationFolder, conversationKey, identity } from "../../../backend/
 import { ImageMemory } from "../images/store.mjs";
 import { defaultMemoryExpiry } from "../../../shared/memory-policy.mjs";
 import { summarizeMemory } from './compaction.mjs';
+import { withMessageReferences, describeReferencedImage } from '../../../shared/message-references.mjs';
 
 const clone = (value) => structuredClone(value);
 const indexSnapshot = (index) => {
@@ -195,6 +196,18 @@ export class ConversationMemory {
       this.onAppend?.(input, entry);
     }
     if (memoryText(doc).length >= this.windowChars(input)) this.onPressure?.(input);
+  }
+  updateMessageReferences(input, key, references) {
+    const doc = this.load(input), entry = doc.entries.find(value => value.key === key);
+    if (!entry || JSON.stringify(entry.references) === JSON.stringify(references)) return;
+    Object.assign(entry, withMessageReferences(entry, clone(references))); this.save(doc);
+  }
+  describeImageReferences(input, image) {
+    const doc = this.load(input); let changed = false;
+    doc.entries = doc.entries.map(entry => {
+      const next = describeReferencedImage(entry, input, image); changed ||= next !== entry; return next;
+    });
+    if (changed) this.save(doc);
   }
   windowChars(input) {
     return (
@@ -462,6 +475,7 @@ export class ConversationMemory {
       signal.throwIfAborted();
       const current = this.load(input);
       if (current.generation !== generation) throw new ChannelError('MEMORY_CHANGED', '记忆已被清空，已取消旧图像理解');
+      const descriptionUpdates = new Map();
       for (let index = 0; index < batch.length; index++) {
         const { entry, attachment } = batch[index],
           result = acquired[index];
@@ -484,6 +498,8 @@ export class ConversationMemory {
         const target = current.entries
           .find((item) => item.key === entry.key)
           ?.attachments?.find((item) => item.resourceId === attachment.resourceId);
+        const imageMemoryId = archived[index].status === 'fulfilled' ? archived[index].value?.id : target?.imageMemoryId;
+        if (description && imageMemoryId) descriptionUpdates.set(imageMemoryId, description);
         if (!target) continue;
         if (archived[index].status === 'fulfilled' && archived[index].value) {
           target.imageMemoryAttempted = true;
@@ -509,11 +525,6 @@ export class ConversationMemory {
         if (description) {
           target.description = description;
           delete target.error;
-          try {
-            if (target.imageMemoryId) this.images.describe(input, target.imageMemoryId, description);
-          } catch (error) {
-            this.images.errors.set(initial.key, error instanceof ChannelError ? error.message : '图片记忆描述未能更新');
-          }
         } else if (unchanged.has(index)) target.error = '仍只取得微信缩略图，保留已有笔记；请发送原图后再理解细节';
         else if (failure || (requested(entry, attachment) && !target.description))
           target.error =
@@ -522,8 +533,10 @@ export class ConversationMemory {
           delete target.error;
       }
       this.save(current);
-      if (imageRequest && requestResult?.description && requestResult.imageMemoryId)
-        this.images.describe(input, requestResult.imageMemoryId, requestResult.description);
+      // Propagate only after saving attachment updates; otherwise this older
+      // document would overwrite the descriptions just added to quoted rows.
+      for (const [id, description] of descriptionUpdates) try { this.images.describe(input, id, description); }
+      catch (error) { this.images.errors.set(initial.key, error instanceof ChannelError ? error.message : '图片记忆描述未能更新'); }
     }
     return requestResult;
   }

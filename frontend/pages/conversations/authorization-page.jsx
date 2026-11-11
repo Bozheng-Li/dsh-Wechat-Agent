@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { conversationKey, initials, matchesSearch, peerId, peerName, peerType } from "../../shared/conversations.mjs";
 import { modeLabels } from "../../shared/labels.mjs";
 import { Button } from "../../components/button.jsx";
@@ -19,30 +19,123 @@ export function Authorization({
   notice,
   onAction,
   onGrant,
+  onGrantMany,
   onDetail,
   onToggle,
 }) {
   const [nameQuery, setNameQuery] = useState(''),
-    [nameType, setNameType] = useState('all');
+    [nameType, setNameType] = useState('all'),
+    [selectedKeys, setSelectedKeys] = useState(() => new Set()),
+    [pending, setPending] = useState('');
   const authorized = rows.filter((item) => item.authorized);
   const discoveredKeys = new Set([
     ...(contacts?.privatePeers || []).map((item) => conversationKey({ ...item, chatType: 'private' })),
     ...(contacts?.groups || []).map((item) => conversationKey({ ...item, chatType: 'group' })),
   ]);
-  const source = tab === 'authorized' ? authorized : rows.filter((item) => discoveredKeys.has(conversationKey(item)));
+  const discovered = rows.filter((item) => discoveredKeys.has(conversationKey(item))),
+    source = tab === 'authorized' ? authorized : discovered;
   const filtered = source.filter((item) => (type === 'all' || peerType(item) === type) && matchesSearch(item, query));
+  const selected = rows.filter((item) => selectedKeys.has(conversationKey(item))),
+    grantable = selected.filter((item) => !item.authorized),
+    revocable = selected.filter((item) => item.authorized),
+    disabled = blocked || !!pending;
+  useEffect(() => {
+    const allowed = new Set(rows.map(conversationKey));
+    setSelectedKeys((previous) => {
+      const next = new Set([...previous].filter((key) => allowed.has(key)));
+      return next.size === previous.size ? previous : next;
+    });
+  }, [rows]);
+  const select = (items, checked) => setSelectedKeys((previous) => {
+    const next = new Set(previous);
+    for (const item of items) {
+      const key = conversationKey(item);
+      if (checked) next.add(key);
+      else next.delete(key);
+    }
+    return next;
+  });
+  const applyBulk = async (enabled) => {
+    if (disabled || !(enabled ? grantable : revocable).length) return;
+    const items = selected;
+    setPending(enabled ? 'grant-selected' : 'revoke-selected');
+    try {
+      const result = await onGrantMany(items, enabled);
+      if (result?.account?.id === status.account?.id) select(items, false);
+    } finally {
+      setPending('');
+    }
+  };
+  const applyOne = async (item, enabled) => {
+    if (disabled) return;
+    const result = await onGrant(item, enabled);
+    if (result?.account?.id === status.account?.id) select([item], false);
+  };
   const suggestions = nameQuery.trim()
     ? rows.filter((item) => (nameType === 'all' || peerType(item) === nameType) && matchesSearch(item, nameQuery))
     : [];
+  const changeTabWithKeyboard = (event) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const next = event.key === 'Home' ? 'authorized' : event.key === 'End' ? 'discovered'
+      : tab === 'authorized' ? 'discovered' : 'authorized';
+    setTab(next);
+    document.getElementById('wa-authorization-tab-' + next)?.focus();
+  };
+  const selectionBar = (items, scope, label) => {
+    const visibleSelected = items.filter((item) => selectedKeys.has(conversationKey(item))).length,
+      allSelected = items.length > 0 && visibleSelected === items.length;
+    return (
+      <div className="wa-authorization-selection" data-selection-scope={scope}>
+        <label className="wa-authorization-select-all">
+          <input type="checkbox" aria-label={label}
+            checked={allSelected} disabled={disabled || !items.length}
+            ref={(element) => { if (element) element.indeterminate = visibleSelected > 0 && !allSelected; }}
+            onChange={(event) => select(items, event.target.checked)} />
+          {label}
+        </label>
+        <span className="wa-help" role="status" data-testid="authorization-selection-count">
+          已选 {selected.length} 个{selected.length > visibleSelected ? `（其中 ${selected.length - visibleSelected} 个不在当前列表）` : ''}
+        </span>
+        <div className="wa-row">
+          <Button quiet disabled={disabled || !selected.length} onClick={() => setSelectedKeys(new Set())}>
+            清空选择
+          </Button>
+          <Button primary icon="check" data-testid="authorization-grant-selected"
+            disabled={disabled || !grantable.length} loading={pending === 'grant-selected'}
+            aria-describedby="wa-authorization-selection-scope"
+            onClick={() => applyBulk(true)}>
+            授权所选
+          </Button>
+          <Button danger icon="close" data-testid="authorization-revoke-selected"
+            disabled={disabled || !revocable.length} loading={pending === 'revoke-selected'}
+            aria-describedby="wa-authorization-selection-scope"
+            onClick={() => applyBulk(false)}>
+            取消所选授权
+          </Button>
+        </div>
+      </div>
+    );
+  };
   const row = (item) => {
     const secondaryName = [item.remark, item.nickname].find(name => name && name !== peerName(item));
     return (
     <div
-      className="wa-session-row"
+      className="wa-session-row has-selection"
       data-peer-id={peerId(item)}
       data-chat-type={peerType(item)}
+      data-selected={selectedKeys.has(conversationKey(item)) ? 'true' : undefined}
       key={conversationKey(item)}
     >
+        <label className="wa-session-select" title="选择此会话以批量授权或取消授权">
+          <input
+            type="checkbox"
+            aria-label={'选择' + (peerType(item) === 'group' ? '群聊 ' : '私聊 ') + peerName(item) + '（' + peerId(item) + '）'}
+            checked={selectedKeys.has(conversationKey(item))}
+            disabled={disabled}
+            onChange={(event) => select([item], event.target.checked)}
+          />
+        </label>
       <div className={'wa-session-avatar ' + (peerType(item) === 'group' ? 'is-group' : '')}>
         {initials(peerName(item))}
       </div>
@@ -66,21 +159,21 @@ export function Authorization({
         )}
         {item.authorized ? (
           <>
-            <Button disabled={blocked} onClick={() => onDetail(item)}>
+            <Button disabled={disabled} onClick={() => onDetail(item)}>
               设置
             </Button>
             <Button
               quiet
               className="wa-icon-button"
               icon="close"
-              disabled={blocked}
+              disabled={disabled}
               title={'撤销 ' + peerName(item) + ' 的授权'}
               aria-label={'撤销 ' + peerName(item) + ' 的授权'}
-              onClick={() => onGrant(item, false)}
+              onClick={() => applyOne(item, false)}
             />
           </>
         ) : (
-          <Button icon="plus" disabled={blocked} onClick={() => onGrant(item, true)}>
+          <Button icon="plus" disabled={disabled} onClick={() => applyOne(item, true)}>
             授权
           </Button>
         )}
@@ -90,8 +183,8 @@ export function Authorization({
   };
   return (
     <>
-      <PageHead title="会话授权" description="管理 Agent 可以回复的群聊和联系人。">
-        <Button icon="refresh" disabled={blocked || !status.online} onClick={() => onAction('contacts')}>
+      <PageHead icon="people" title="会话授权" description="管理 Agent 可以回复的群聊和联系人。">
+        <Button icon="refresh" disabled={disabled || !status.online} onClick={() => onAction('contacts')}>
           {busy === 'contacts' ? '正在同步…' : '同步已发现会话'}
         </Button>
       </PageHead>
@@ -102,7 +195,7 @@ export function Authorization({
         </section>
       ) : (
         <>
-          <div className="wa-auth-toggle">
+          <div className="wa-auth-toggle" data-enabled={status.settings.enabled}>
             <div className="wa-toggle-copy">
               <h3>自动回复</h3>
               <p>
@@ -115,18 +208,21 @@ export function Authorization({
               <input
                 type="checkbox"
                 checked={status.settings.enabled}
-                disabled={blocked}
+                disabled={disabled}
                 onChange={(event) => onToggle(event.target.checked)}
                 aria-label="启用自动回复"
               />
               <span>{status.settings.enabled ? '已开启' : '已暂停'}</span>
             </label>
           </div>
-          <div className="wa-tabs" role="tablist" aria-label="会话来源">
+          <div className="wa-tabs" role="tablist" aria-label="会话来源" onKeyDown={changeTabWithKeyboard}>
             <button
               type="button"
               role="tab"
               className="wa-tab"
+              id="wa-authorization-tab-authorized"
+              aria-controls="wa-authorization-panel"
+              tabIndex={tab === 'authorized' ? 0 : -1}
               aria-selected={tab === 'authorized'}
               onClick={() => setTab('authorized')}
             >
@@ -136,17 +232,26 @@ export function Authorization({
               type="button"
               role="tab"
               className="wa-tab"
+              id="wa-authorization-tab-discovered"
+              aria-controls="wa-authorization-panel"
+              tabIndex={tab === 'discovered' ? 0 : -1}
               aria-selected={tab === 'discovered'}
               onClick={() => setTab('discovered')}
             >
               发现会话<span className="wa-tab-count">{discoveredKeys.size}</span>
             </button>
           </div>
+          <section className="wa-authorization-results" id="wa-authorization-panel" role="tabpanel" aria-labelledby={'wa-authorization-tab-' + tab}>
           <div className="wa-toolbar">
             <Search value={query} onChange={setQuery} />
             <TypeFilters value={type} onChange={setType} />
           </div>
+          {selectionBar(filtered, 'main', '全选当前列表')}
+          <p className="wa-help wa-authorization-scope" id="wa-authorization-selection-scope">
+            授权和取消授权都只处理勾选的会话。
+          </p>
           <div className="wa-session-list">
+            {!!filtered.length && <div className="wa-session-columns" aria-hidden="true"><span>会话</span><span>回复方式与权限</span></div>}
             {filtered.length ? (
               filtered.map(row)
             ) : (
@@ -156,11 +261,13 @@ export function Authorization({
           <p className="wa-help wa-section-space">
             显示 {filtered.length} / {source.length} 个会话
           </p>
+          </section>
           <section className="wa-manual-box wa-name-add" data-testid="name-add">
-            <h3>补充授权</h3>
+            <div className="wa-name-add-heading"><h3>补充授权</h3>
             <p className="wa-help">
               按名字查找其他会话。同名结果需分别选择。
-            </p>
+            </p></div>
+            <div className="wa-name-add-controls">
             <div className="wa-row wa-section-space">
               <select
                 className="wa-select"
@@ -187,12 +294,14 @@ export function Authorization({
                 <p className="wa-help" role="status">
                   找到 {suggestions.length} 个匹配会话
                 </p>
+                {selectionBar(suggestions, 'suggestions', '全选搜索结果')}
                 <div className="wa-name-suggestions">{suggestions.map(row)}</div>
                 {!suggestions.length && (
                   <p className="wa-help">暂未找到。可以换个字、试试备注或同步已发现会话；新会话需要先被微信同步到。</p>
                 )}
               </>
             )}
+            </div>
           </section>
         </>
       )}

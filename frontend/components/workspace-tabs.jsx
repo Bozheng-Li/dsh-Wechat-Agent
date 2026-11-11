@@ -25,7 +25,7 @@ export function WorkspaceTabs({ name, label, tabs, active, onChange, className =
     buttons.current[next]?.focus();
   };
   return (
-    <div className={'wa-memory-tabs ' + className} role="tablist" aria-label={label} onKeyDown={onKeyDown}>
+    <div className={'wa-memory-tabs wa-workspace-tabs ' + className} role="tablist" aria-label={label} aria-orientation="horizontal" onKeyDown={onKeyDown}>
       {tabs.map(([id, title]) => (
         <button
           type="button"
@@ -41,7 +41,7 @@ export function WorkspaceTabs({ name, label, tabs, active, onChange, className =
           }}
           onClick={() => onChange(id)}
         >
-          <strong>{title}</strong>
+          <span>{title}</span>
         </button>
       ))}
     </div>

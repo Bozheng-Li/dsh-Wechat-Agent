@@ -4,6 +4,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { imageMime } from "./media.ts";
 import { ChannelError } from "../../../shared/contracts.mjs";
 
+import { prepareWechatImageStream } from '../../../modules/media/wechat-image-stream.mjs';
+
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 function inside(root, file) {
   const relative = path.relative(fs.realpathSync(root), fs.realpathSync(file));
@@ -63,10 +65,15 @@ export async function loadObservedMedia({ directory, peerId, messageId, resource
     return fs.readFileSync(file);
   };
   const result = (content, quality) => {
+    const sourceBytes = content.length;
+    // Keep the complete downloaded cache intact; remove only validated JPEG
+    // trailer metadata from the pixels sent to storage and vision.
+    if (content[0] === 0xff && content[1] === 0xd8) content = prepareWechatImageStream(content).content;
     let mediaType;
     try { mediaType = imageMime(content); } catch { throw new ChannelError('IMAGE_INVALID', '图片内容无法解码为 PNG、JPEG、GIF 或 WebP'); }
     signal.throwIfAborted();
     return { data: content.toString('base64'), mediaType, quality, bytes: content.length,
+      ...(sourceBytes !== content.length ? { sourceBytes, trailerBytes: sourceBytes - content.length } : {}),
       ...(quality === 'thumbnail' ? { qualityNote: '目前只取得微信随消息提供的缩略图，细小文字和画面细节尚未核实。' } : {}) };
   };
   const save = (content, quality) => {

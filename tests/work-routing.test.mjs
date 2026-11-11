@@ -4,9 +4,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { StateStore, WechatChannel } from '../lib/testing.js';
+import { fixtureWorkRouteDecision } from './fixtures/work-dialogue.mjs';
 
 const scope = { accountId: 'router-bot', chatType: 'private', peerId: 'alice', senderId: 'alice' };
-function fixture(t, { route = () => ({ action: 'chat' }), execute, chat } = {}) {
+function fixture(t, { route = () => ({ action: 'chat' }), execute, chat, rawRoute = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-work-routing-')), store = new StateStore(root);
   const routes = [], chats = [], works = [], sent = [], gates = [];
   store.configure(scope.accountId, { enabled: true, privatePeers: ['alice', 'bob'], groups: [], prompt: 'CHAT_PROMPT_SENTINEL' });
@@ -16,8 +17,8 @@ function fixture(t, { route = () => ({ action: 'chat' }), execute, chat } = {}) 
     { ...store.conversationSettings(scope.accountId, 'private', peer), executionMode: 'work', remoteEnabled: true });
   const runner = { run: async input => {
     if (input.mode === 'work-routing') {
-      routes.push(input); const result = await route(JSON.parse(input.text), input);
-      return { text: typeof result === 'string' ? result : JSON.stringify(result) };
+      routes.push(input); const data = JSON.parse(input.text), result = await route(data, input);
+      return { text: typeof result === 'string' ? result : JSON.stringify(rawRoute ? result : fixtureWorkRouteDecision(data, result)) };
     }
     if (input.mode === 'work-result') return { text: JSON.parse(input.text).result };
     chats.push(input); return chat ? chat(input) : { text: '聊天回应' };
@@ -53,7 +54,7 @@ test('enabled work mode returns greetings to persona chat and persists only chat
   assert.equal(f.store.conversationSettings(scope.accountId, 'private', 'alice').executionMode, 'work');
 });
 
-test('routing and native execution read only owned work context without touching chat history or memory', async t => {
+test('routing and native execution preload only owned work context and expose chat memory solely through a scoped tool', async t => {
   const f = fixture(t, { route: () => ({ action: 'new' }) });
   f.store.remember('chat-sentinel', Date.now() - 2000, { ...scope, key: 'chat-sentinel', mode: 'default',
     state: 'sent', question: 'CHAT_HISTORY_SENTINEL', reply: 'CHAT_REPLY_SENTINEL', createdAt: Date.now() - 2000 });
@@ -62,13 +63,15 @@ test('routing and native execution read only owned work context without touching
   f.store.remember('foreign-work', Date.now() - 500, { ...scope, senderId: 'bob', key: 'foreign-work', mode: 'work',
     state: 'sent', question: 'FOREIGN_WORK_SENTINEL', reply: 'FOREIGN_RESULT', createdAt: Date.now() - 500 });
   const forbidden = () => assert.fail('work read chat context');
-  f.channel.context = forbidden; f.channel.memory.snapshot = forbidden; f.channel.longMemory.capture = forbidden;
+  f.channel.context = forbidden; f.channel.longMemory.capture = forbidden;
   f.receive('创建报告文件'); await f.channel.whenIdle();
   assert.equal(f.works.length, 1); const input = f.routes[0];
   assert.deepEqual(input.tools, []); assert.deepEqual(JSON.parse(input.text).history,
     [{ user: 'OWN_WORK_CONTEXT', assistant: 'OWN_WORK_RESULT' }]);
   assert(!JSON.stringify(input).includes('CHAT_')); assert(!JSON.stringify(input).includes('FOREIGN_'));
   for (const key of ['persona', 'prompt', 'history', 'memory', 'speaker', 'account']) assert.equal(f.works[0][key], undefined);
+  assert(f.works[0].memoryTools.some(tool => tool.name === 'wechat_memory'));
+  assert(!JSON.stringify({ request: f.works[0].request, tools: f.works[0].memoryTools.map(({ name, description, parameters }) => ({ name, description, parameters })) }).includes('CHAT_HISTORY_SENTINEL'));
   assert(!f.store.history(scope.accountId, 'private', 'alice').some(entry => entry.text === '创建报告文件'));
 });
 
@@ -100,7 +103,9 @@ for (const bad of ['not-json', { action: 'new', request: '替换用户原话' },
   { action: 'cancel' }, { action: 'new', taskId: 'ffffffffffff' }]) test(`invalid route does not create work: ${JSON.stringify(bad)}`, async t => {
   const f = fixture(t, { route: () => bad }); f.receive('帮我处理'); await f.channel.whenIdle();
   assert.equal(f.works.length, 0); assert.equal(f.channel.work.list(scope).jobs.length, 0);
-  assert(f.sent.some(payload => JSON.stringify(payload).includes('还没有启动或修改任务')));
+  assert.equal(f.chats.length, 1); assert.equal(f.routes.length, 1);
+  assert(f.sent.some(payload => JSON.stringify(payload).includes('聊天回应')));
+  assert(!JSON.stringify(f.sent).includes('还没有启动或修改任务'));
 });
 
 test('classifier failure falls back truthfully and never executes the original message', async t => {
@@ -108,6 +113,16 @@ test('classifier failure falls back truthfully and never executes the original m
   f.receive('做点事情'); await f.channel.whenIdle(); assert.equal(f.works.length, 0);
   assert(!JSON.stringify(f.sent).includes('provider-private-details'));
   assert.equal(f.store.data.records.at(-1).workRoute.action, 'chat');
+  assert.equal(f.chats.length, 1); assert.equal(f.routes.length, 1);
+  assert(f.sent.some(payload => JSON.stringify(payload).includes('聊天回应')));
+});
+
+test('a decision missing its internal review falls back to ordinary chat without a repair request', async t => {
+  const f = fixture(t, { route: () => ({ action: 'new', taskId: null }), rawRoute: true });
+  f.receive('创建一份报告'); await f.channel.whenIdle();
+  assert.equal(f.routes.length, 1); assert.equal(f.works.length, 0); assert.equal(f.chats.length, 1);
+  assert.equal(f.store.data.records.at(-1).workRoute.fallback, 'WORK_ROUTE_INVALID');
+  assert(!JSON.stringify(f.sent).includes('我暂时没能判断'));
 });
 
 for (const change of ['chat', 'revoke']) test(`changing ${change} during classification prevents execution and stale replies`, async t => {
@@ -136,6 +151,28 @@ test('model-selected status reads the existing result without creating or contin
   f.receive('写报告'); await f.channel.whenIdle(); f.receive('现在完成了吗'); await f.channel.whenIdle();
   assert.equal(f.works.length, 1); assert.equal(f.channel.work.list(scope).jobs.length, 1);
   assert(f.sent.some(payload => JSON.stringify(payload).includes('工作结果')));
+});
+
+test('an all-task status decision returns both owned tasks without creating new work', async t => {
+  const f = fixture(t, { route: () => ({ action: 'status', taskId: null }) });
+  f.receive('/work new 第一份财务报告'); await f.channel.whenIdle();
+  f.receive('/work new 第二份运营报告'); await f.channel.whenIdle();
+  const jobs = f.channel.work.list(scope).jobs, sentBefore = f.sent.length;
+  f.receive('看看我全部任务的状态'); await f.channel.whenIdle();
+  assert.equal(f.works.length, 2); assert.equal(f.channel.work.list(scope).jobs.length, 2);
+  const response = JSON.stringify(f.sent.slice(sentBefore));
+  for (const job of jobs) assert(response.includes(job.request));
+  assert.equal(jobs.filter(job => job.state === 'succeeded').length, 2);
+  assert.equal((response.match(/本轮执行已结束/g) ?? []).length, 2);
+  assert.equal(f.chats.length, 0);
+});
+
+test('an explicit empty all-task query returns the real empty list without chatting or executing', async t => {
+  const f = fixture(t, { route: () => ({ action: 'status', taskId: null }) });
+  f.receive('查看我的全部任务'); await f.channel.whenIdle();
+  assert.equal(f.works.length, 0); assert.equal(f.chats.length, 0);
+  assert.equal(f.channel.work.list(scope).jobs.length, 0);
+  assert(JSON.stringify(f.sent).includes('没有工作任务'));
 });
 
 test('a real task belonging to another sender is rejected even when the model returns its correct ID', async t => {
@@ -208,4 +245,84 @@ test('ordinary routed work queues on the same session while the previous request
   released.resolve(); await f.channel.whenIdle();
   const finished = f.channel.work.get(second.id, scope);
   assert.equal(f.works.length, 2); assert.equal(finished.sessionId, first.sessionId); assert.equal(finished.cwd, first.cwd);
+});
+
+test('routing context bounds work dialogue and includes only owned acknowledged results before this message', async t => {
+  const f = fixture(t, { execute: () => ({ text: '真实结果开头' + '完成内容'.repeat(300) + '需要确认的结果尾部' }) });
+  const request = '生成报告，' + '任务背景'.repeat(300) + '最后要求导出 PDF';
+  f.receive('/work ' + request); await f.channel.whenIdle();
+  const job = f.channel.work.list(scope).jobs[0], at = Date.now() - 1000;
+  f.channel.work.store.update(job.id, { result: { ...job.result, artifacts: Array.from({ length: 10 }, (_, index) => ({
+    name: '成果' + '🧩'.repeat(200) + index + '.pdf',
+  })) } });
+  for (let i = 0; i < 6; i++) f.store.remember('bounded-work-' + i, at + i, { ...scope, key: 'bounded-work-' + i,
+    mode: 'work', state: 'sent', question: '请求开头' + '🧩'.repeat(500) + '请求尾部' + i,
+    reply: '答复开头' + '🧩'.repeat(500) + '答复尾部' + i, createdAt: at + i });
+  for (const [key, patch] of [
+    ['foreign-result', { senderId: 'bob', reply: 'FOREIGN_RESULT_SENTINEL' }],
+    ['unacknowledged-result', { state: 'failed', reply: 'UNACKNOWLEDGED_RESULT_SENTINEL' }],
+    ['progress-result', { workProgress: true, reply: 'PROGRESS_SENTINEL' }],
+    ['future-result', { createdAt: Date.now() + 100000, reply: 'FUTURE_RESULT_SENTINEL' }],
+    ['late-sent-result', { sentAt: Date.now() + 100000, reply: 'LATE_SENT_RESULT_SENTINEL' }],
+  ]) f.store.remember(key, at, { ...scope, key, mode: 'scheduled', state: 'sent', workJobId: job.id, createdAt: at, ...patch });
+  f.store.remember('late-sent-work', at, { ...scope, key: 'late-sent-work', mode: 'work', state: 'sent',
+    question: 'LATE_SENT_WORK_SENTINEL', reply: '还没送到用户的工作确认', createdAt: at, sentAt: Date.now() + 100000 });
+  f.receive('结果里说的那个是什么'); await f.channel.whenIdle();
+  const input = JSON.parse(f.routes.at(-1).text);
+  assert.equal(input.history.length, 4);
+  for (const row of input.history) {
+    assert(row.truncated); assert(Array.from(row.user).length <= 400); assert(Array.from(row.assistant).length <= 400);
+    assert(row.user.includes('请求尾部')); assert(row.assistant.includes('答复尾部'));
+    assert(!/\uFFFD/u.test(row.user + row.assistant));
+  }
+  const current = input.tasks.find(task => task.id === job.id);
+  assert(current.requestTruncated); assert(Array.from(current.request).length <= 600);
+  assert(current.request.endsWith('最后要求导出 PDF'));
+  assert(current.filesTruncated); assert.equal(current.files.length, 3);
+  assert(current.files.every(file => Array.from(file.name).length <= 120 && file.name.endsWith('.pdf')));
+  assert.equal(input.workResults.length, 1); assert.equal(input.workResults[0].taskId, job.id);
+  assert(input.workResults[0].truncated); assert(Array.from(input.workResults[0].result).length <= 800);
+  assert(input.workResults[0].result.includes('需要确认的结果尾部'));
+  assert(!/FOREIGN_RESULT_SENTINEL|UNACKNOWLEDGED_RESULT_SENTINEL|PROGRESS_SENTINEL|FUTURE_RESULT_SENTINEL|LATE_SENT_/.test(JSON.stringify(input)));
+});
+
+test('only the immediately preceding ambiguous routed chat bridges a work clarification', async t => {
+  const f = fixture(t, {
+    route: data => data.message === '改一下那个' ? { action: 'chat', review: { intent: 'unclear', evidence: '改一下那个', target: 'ambiguous' } }
+      : { action: 'continue', taskId: data.currentTaskId },
+    chat: () => ({ text: '你是指报告里的颜色吗？' }),
+  });
+  f.receive('/work 创建带颜色的报告'); await f.channel.whenIdle();
+  f.receive('改一下那个'); await f.channel.whenIdle();
+  f.receive('对，改成蓝色'); await f.channel.whenIdle();
+  const input = JSON.parse(f.routes.at(-1).text);
+  assert.deepEqual(input.clarification, { user: '改一下那个', assistant: '你是指报告里的颜色吗？' });
+  assert.equal(f.works.length, 2); assert.equal(f.works[1].request, '对，改成蓝色');
+});
+
+test('clarification does not import ordinary chat or an old ambiguity without work context', async t => {
+  const f = fixture(t, { route: () => ({ action: 'chat', review: { intent: 'unclear', evidence: '', target: 'ambiguous' } }) });
+  f.receive('帮我弄一下'); await f.channel.whenIdle();
+  f.receive('就那个'); await f.channel.whenIdle();
+  assert.equal(JSON.parse(f.routes.at(-1).text).clarification, null);
+  f.receive('/work 创建文件'); await f.channel.whenIdle();
+  f.receive('改一下那个'); await f.channel.whenIdle();
+  const at = Date.now() - 1;
+  f.store.remember('ordinary-chat', at, { ...scope, key: 'ordinary-chat', mode: 'default', state: 'sent',
+    question: 'ORDINARY_CHAT_SENTINEL', reply: 'ORDINARY_REPLY_SENTINEL', createdAt: at });
+  f.receive('继续'); await f.channel.whenIdle();
+  const data = JSON.parse(f.routes.at(-1).text);
+  assert.equal(data.clarification, null); assert(!JSON.stringify(data).includes('ORDINARY_'));
+});
+
+test('a clarification acknowledged after the current message is not treated as user-visible context', async t => {
+  const f = fixture(t);
+  f.receive('/work 创建文件'); await f.channel.whenIdle();
+  const at = Date.now() - 1000;
+  f.store.remember('late-clarification', at, { ...scope, key: 'late-clarification', mode: 'default', state: 'sent',
+    question: '你能改一下吗', reply: 'LATE_CLARIFICATION_SENTINEL', createdAt: at, sentAt: Date.now() + 100000,
+    workRoute: { action: 'chat', review: { intent: 'unclear', evidence: '', target: 'ambiguous' } } });
+  f.receive('可以'); await f.channel.whenIdle();
+  const data = JSON.parse(f.routes.at(-1).text);
+  assert.equal(data.clarification, null); assert(!JSON.stringify(data).includes('LATE_CLARIFICATION_SENTINEL'));
 });

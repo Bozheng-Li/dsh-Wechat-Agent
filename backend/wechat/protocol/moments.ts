@@ -4,6 +4,8 @@ import { BridgeError } from '@napcat-wechat/protocol';
 import type { Credential } from './session.js';
 import { validateImageBaseRequest } from './image-session.js';
 import { bytes, fields, fv, ld, num, signed, encodeCgiBody, decodeCgiBody, type Field } from './wire.js';
+import { readUserMomentsPage, type UserMomentsState } from './moments-user-page.js';
+import { rememberSnsImages, snsImageSources, downloadSnsImage, type SnsImageSource } from './moments-images.js';
 
 // Field layouts independently implemented from the public Sns* protobufs.
 // PC 3.9 probes verified CGI 211/212 and the SNS zero-checksum envelope.
@@ -11,7 +13,7 @@ const routes = { timeline: { cmd: 211, route: 'mmsnstimeline' }, user: { cmd: 21
 const MAX_RESPONSE = 4 * 1024 * 1024, CURSOR_MS = 10 * 60 * 1000;
 export type MomentsAction = keyof typeof routes;
 export interface MomentsQuery { action?: MomentsAction; userId?: string; postId?: string; cursor?: string; limit?: number }
-interface PageRequest { action: MomentsAction; userId?: string; postId?: string; maxId?: string; firstPageMd5?: string; session?: Buffer }
+export interface PageRequest { action: MomentsAction; userId?: string; postId?: string; maxId?: string; firstPageMd5?: string; session?: Buffer }
 const fail = (message: string): never => { throw new BridgeError('ERR_MOMENTS_PROTOCOL', message); };
 const uint64 = (value: unknown): value is string => typeof value === 'string' && /^[1-9]\d{0,19}$/.test(value) && BigInt(value) <= 0xffffffffffffffffn;
 const wxid = (value: unknown): value is string => typeof value === 'string' && /^[\w.:-]{1,256}$/.test(value);
@@ -78,8 +80,10 @@ function parseContent(content: Buffer, id: string, userId: string) {
   // PC SNS serializes line breaks as numeric entity text inside contentDesc.
   // Decode only the observed whitespace forms, not arbitrary embedded markup.
   const rawText = normalizeSnsText(asText(root.contentDesc, 512 * 1024)), contentObject = root.ContentObject ?? {};
+  const imageSources: SnsImageSource[] = [];
   const media = array(contentObject.mediaList?.media).slice(0, 100).map(item => {
     const typeCode = asText(item.type, 20), size = item.size ?? {};
+    if (typeCode === '2') imageSources.push({ index: imageSources.length + 1, mediaId: asText(item.id, 128), url: asText(item.url, 8192) });
     const dimension = (value: unknown) => /^\d{1,6}$/.test(String(value)) ? Number(value) : undefined;
     return { id: asText(item.id, 128), type: typeCode === '2' ? 'image' : typeCode === '6' ? 'video' : 'other', typeCode,
       title: asText(item.title, 300), description: asText(item.description, 1000),
@@ -89,7 +93,7 @@ function parseContent(content: Buffer, id: string, userId: string) {
   // CDN URLs can carry download credentials. They remain outside model output.
   const link = asText(contentObject.contentUrl, 8192); let linkHost;
   try { const url = new URL(link); if (['https:', 'http:'].includes(url.protocol)) linkHost = url.hostname; } catch {}
-  return { text: rawText.slice(0, 10000), ...(rawText.length > 10000 ? { textTruncated: true } : {}), media,
+  return { imageSources, text: rawText.slice(0, 10000), ...(rawText.length > 10000 ? { textTruncated: true } : {}), media,
     imageCount: media.filter(item => item.type === 'image').length,
     ...(linkHost ? { link: { host: linkHost, title: asText(contentObject.title, 500), description: asText(contentObject.description, 1000) } } : {}) };
 }
@@ -108,18 +112,22 @@ export function parseSnsObject(value: Buffer, interactionLimit = 50) {
   if ([...likes, ...comments].some(field => field.wire !== 2) || likes.length > 500 || comments.length > 500 ||
       count(list, 8) !== undefined && count(list, 8) !== likes.length || count(list, 11) !== undefined && count(list, 11) !== comments.length)
     fail('朋友圈可见评论或点赞列表数量不匹配');
-  return { id, author: { userId, nickname: text(list, 3, 150) }, createdAt, contentAvailable: !!content?.length,
-    ...(content?.length ? parseContent(content, id, userId) : { text: '', media: [], imageCount: 0 }),
+  const { imageSources, ...parsedContent } = content?.length ? parseContent(content, id, userId) : { imageSources: [], text: '', media: [], imageCount: 0 };
+  const post = { id, author: { userId, nickname: text(list, 3, 150) }, createdAt, contentAvailable: !!content?.length,
+    ...parsedContent,
     deleted: !!count(list, 25), likedByCurrentAccount: !!count(list, 6), likeCount: count(list, 7), commentCount: count(list, 10),
     likes: likes.slice(0, 50).map(field => comment(field.value as Buffer)), comments: comments.slice(0, interactionLimit).map(field => comment(field.value as Buffer)),
     visibleLikeEntries: likes.length, visibleCommentEntries: comments.length,
     ...(likes.length > 50 || comments.length > interactionLimit ? { interactionsTruncated: true } : {}) };
+  rememberSnsImages(post, imageSources); return post;
 }
 export type Moment = ReturnType<typeof parseSnsObject>;
 export function momentsResponse(body: Buffer, request: PageRequest) {
   if (body.length > MAX_RESPONSE) fail('朋友圈解压响应超过解析范围');
   const list = fields(body), base = fields(one(list, 1, 2, true) as Buffer), ret = signed(integer(base, 1, true));
-  if (ret !== 0) throw new BridgeError('ERR_MOMENTS_REJECTED', `微信拒绝朋友圈读取（ret=${ret}），未视为朋友圈为空`, { ret });
+  if (ret !== 0) throw new BridgeError('ERR_MOMENTS_REJECTED', request.postId
+    ? `微信暂时无法读取这条朋友圈（ret=${ret}），可稍后重新读取`
+    : `微信朋友圈接口读取未成功（ret=${ret}）；具体原因未确认，不能据此判断对方屏蔽或没有动态`, { ret });
   const detail = request.action === 'detail' || request.action === 'comments', objectTag = detail ? 2 : 4, objects = list.filter(field => field.tag === objectTag);
   if (objects.some(field => field.wire !== 2) || objects.length > 100 ||
       detail && objects.length !== 1 || !detail && count(list, 3, true) !== objects.length)
@@ -158,12 +166,31 @@ export async function requestSnsCgi(account: Credential, cmd: number, route: str
 }
 const accountKey = (account: Credential) => createHash('sha256').update(JSON.stringify([account.uin, account.wxid, account.token, account.body_key, account.s08])).digest('hex');
 interface Cursor { accountKey: string; scopeKey: string; page: PageRequest; pending: Moment[]; expires: number; fetchedAt: number;
-  comments?: ReturnType<typeof comment>[]; commentsMeta?: { postId: string; commentCount?: number; visibleCommentEntries: number } }
+  comments?: ReturnType<typeof comment>[]; commentsMeta?: { postId: string; commentCount?: number; visibleCommentEntries: number }; userState?: UserMomentsState }
 export class MomentsReader {
   readonly cursors = new Map<string, Cursor>();
   constructor(readonly getAccount: () => Credential | undefined, readonly assertConnected: () => void,
     readonly request = requestMomentsCgi, readonly now = Date.now) {}
   clear() { this.cursors.clear(); }
+  async readImages(raw: unknown, scopeKey: string, signal: AbortSignal, download = downloadSnsImage) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some(key => key !== 'postId') || !uint64((raw as any).postId))
+      throw new BridgeError('ERR_INVALID_MOMENTS_QUERY', '读取图片需要真实的朋友圈动态编号');
+    const account = this.getAccount(), key = account && accountKey(account);
+    const check = () => { signal.throwIfAborted(); this.assertConnected(); const current = this.getAccount();
+      if (!current || accountKey(current) !== key) throw new BridgeError('ERR_MOMENTS_ACCOUNT_CHANGED', '读取图片期间账号或登录会话变化，未返回旧图片'); };
+    check(); const page = await this.read({ action: 'detail', postId: (raw as any).postId }, scopeKey, signal); check();
+    const post = page.items[0] as Moment;
+    if (!post?.contentAvailable || post.deleted) throw new BridgeError('ERR_MOMENTS_TARGET_UNAVAILABLE', '动态不可见或已删除，未读取图片');
+    const images = snsImageSources(post), items = []; let total = 0;
+    if (post.imageCount > 9 || images.length !== post.imageCount) throw new BridgeError('ERR_MOMENTS_IMAGE_READ', '朋友圈图片列表不完整或超过 9 张，未混用图片');
+    for (const source of images) {
+      check(); const image = await download(source, signal); check(); total += image.bytes;
+      if (total > 30 * 1024 * 1024) throw new BridgeError('ERR_MOMENTS_IMAGE_READ', '本条朋友圈图片总量超过 30 MiB，未只读取部分图片冒充完整画面');
+      items.push(image);
+    }
+    return { accountId: page.accountId, postId: post.id, post, source: 'wechat-sns-images-live', fetchedAt: page.fetchedAt,
+      imageCount: post.imageCount, complete: true, items };
+  }
   async read(raw: unknown, scopeKey: string, signal: AbortSignal) {
     const query = validateMomentsQuery(raw), account = this.getAccount(); this.assertConnected(); signal.throwIfAborted();
     if (!account) throw new BridgeError('ERR_MOMENTS_CREDENTIAL', '微信登录会话不可用');
@@ -177,6 +204,22 @@ export class MomentsReader {
     const assertCurrent = () => { signal.throwIfAborted(); this.assertConnected();
       const current = this.getAccount(); if (!current || accountKey(current) !== key) throw new BridgeError('ERR_MOMENTS_ACCOUNT_CHANGED', '读取期间微信账号或登录会话已变化，未返回旧账号朋友圈'); };
     assertCurrent();
+    if (query.action === 'user') {
+      const result = await readUserMomentsPage(userId!, query.limit, previous?.userState, async request => {
+        assertCurrent();
+        try { const response = await this.request(account, request, signal); assertCurrent(); return response; }
+        catch (error) { assertCurrent(); throw error; }
+      });
+      assertCurrent(); const fetchedAt = result.requests ? this.now() : previous!.fetchedAt; let nextCursor;
+      if (result.hasMore) {
+        while (this.cursors.size >= 128) this.cursors.delete(this.cursors.keys().next().value!);
+        nextCursor = randomUUID(); this.cursors.set(nextCursor, { accountKey: key, scopeKey, page, pending: [],
+          userState: result.state, expires: this.now() + CURSOR_MS, fetchedAt });
+      }
+      return { accountId: account.wxid, action: query.action, userId, source: 'wechat-sns-live', scope: 'current-account-visible',
+        fetchedAt: new Date(fetchedAt).toISOString(), items: result.items, nextCursor: nextCursor ?? null, selection: result.selection,
+        mediaContentIncluded: false, ...(nextCursor ? { pagination: result.selection.message } : {}) };
+    }
     if (query.action === 'comments') {
       let available = previous?.comments, meta = previous?.commentsMeta, fetchedAt = previous?.fetchedAt;
       if (!available) {

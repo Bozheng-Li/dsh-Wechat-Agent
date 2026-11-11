@@ -3,6 +3,7 @@ import { imageGenerationSettings, imageGenerationEndpoint, imageGenerationProvid
 import { Button } from '../../components/button.jsx';
 import { PageHead, Back } from '../../components/page-ui.jsx';
 import { Field, FormActions } from '../../components/form-ui.jsx';
+import { Glyph } from '../../components/glyph.jsx';
 
 const providerFields = ['id', 'name', 'endpoint', 'models', 'defaultModel', 'size', 'quality', 'responseFormat', 'timeoutSeconds'];
 const pick = (value, fields) => Object.fromEntries(fields.filter(key => value?.[key] !== undefined).map(key => [key, value[key]]));
@@ -55,21 +56,21 @@ export function ImageGenerationSettings({ status, blocked, onAction, onBack, bac
   };
   return <>
     <Back label={backLabel || '返回设置'} onClick={onBack} />
-    <PageHead title="图片生成" description="管理生图接口与模型，生成结果通过工作任务回传微信。" />
+    <PageHead icon="image" title="图片生成" description="管理生图接口与模型，生成结果通过工作任务回传微信。" />
     {notice && <div className="wa-alert is-success" role="status">{notice}</div>}
-    <div className="wa-stack wa-content-narrow">
-    <form className="wa-card wa-settings-form-sections" data-testid="image-generation-settings" onSubmit={event => { event.preventDefault(); void submit(); }}>
+    <div className="wa-settings-stack wa-image-generation-settings">
+    <form className="wa-settings-document wa-settings-form-sections" data-testid="image-generation-settings" onSubmit={event => { event.preventDefault(); void submit(); }}>
       <div className="wa-card-heading">
         <div><h2>接口与模型</h2><p className="wa-muted">每家接口独立保存模型和生成参数。</p></div>
         <label className="wa-check-row"><input type="checkbox" role="switch" aria-label="启用生图 API" checked={draft.enabled} disabled={blocked} onChange={event => setDraft({ ...draft, enabled: event.target.checked })} /><span>启用</span></label>
       </div>
-      <section className="wa-settings-form-section">
-      <div className="wa-form-grid">
+      <div className="wa-image-provider-layout">
+      <aside className="wa-image-switchboard" aria-label="生图接口选择">
         <Field label="正在编辑的接口" id="wa-image-provider"><select className="wa-select" id="wa-image-provider" value={provider?.id ?? ''} disabled={blocked || !provider} onChange={event => setSelectedId(event.target.value)}>{!provider && <option value="">暂无接口</option>}{draft.providers.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></Field>
         <Field label="默认生图接口" id="wa-image-default-provider" help="微信没有指定接口时使用这一家。"><select className="wa-select" id="wa-image-default-provider" value={draft.defaultProviderId} disabled={blocked || !provider} onChange={event => setDraft({ ...draft, defaultProviderId: event.target.value })}>{!provider && <option value="">暂无接口</option>}{draft.providers.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></Field>
-      </div>
-      <div className="wa-row"><Button icon="plus" data-testid="image-provider-add" disabled={blocked || draft.providers.length >= 20} onClick={addProvider}>添加接口</Button>{provider && <Button quiet danger data-testid="image-provider-remove" disabled={blocked} onClick={removeProvider}>移除当前接口</Button>}</div>
-      </section>
+      <div className="wa-row"><Button primary={!provider} icon="plus" data-testid="image-provider-add" disabled={blocked || draft.providers.length >= 20} onClick={addProvider}>添加接口</Button>{provider && <Button quiet danger data-testid="image-provider-remove" disabled={blocked} onClick={removeProvider}>移除当前接口</Button>}</div>
+      </aside>
+      <div className="wa-image-provider-editor">
       {provider ? <>
       <section className="wa-settings-form-section">
       <h3>接口信息</h3>
@@ -89,11 +90,13 @@ export function ImageGenerationSettings({ status, blocked, onAction, onBack, bac
       </div>
       <details className="wa-subsection"><summary>高级设置</summary><div className="wa-form-grid"><Field label="质量参数" id="wa-image-quality" help="按服务文档填写，留空不发送此参数。"><input className="wa-input" id="wa-image-quality" value={provider.quality} disabled={blocked} maxLength={80} onChange={event => updateProvider({ quality: event.target.value })} /></Field><Field label="调用超时（秒）" id="wa-image-timeout"><input className="wa-input" id="wa-image-timeout" type="number" min={10} max={600} value={provider.timeoutSeconds} disabled={blocked} onChange={event => updateProvider({ timeoutSeconds: Number(event.target.value) })} /></Field></div><p className="wa-help">支持兼容接口的 Base64 图片或下载地址，图片格式为 PNG/JPEG。调用失败不自动重试。</p></details>
       </section>
-      </> : <p className="wa-help">添加一个兼容的生图接口，再填写它支持的模型。</p>}
+      </> : <div className="wa-image-provider-empty"><Glyph name="image" /><h3>还没有生图接口</h3><p>添加接口后，在这里管理地址、模型与生成参数。</p></div>}
+      </div>
+      </div>
       {invalid && <div className="wa-alert is-error" role="alert">{invalid}</div>}
       <FormActions dirty={dirty} disabled={blocked} invalid={!!invalid} onReset={reset} label="保存生图设置" />
     </form>
-    <form className="wa-card" onSubmit={event => { event.preventDefault(); void saveKey(); }}>
+    <form className="wa-settings-block wa-image-credentials" onSubmit={event => { event.preventDefault(); void saveKey(); }}>
       <div className="wa-card-heading"><div><h2>接口凭据</h2><p className="wa-muted">当前接口的密钥单独保存到 DSH 凭据服务。</p></div><span className={'wa-badge' + (credentialConfigured ? ' is-success' : '')}>{!savedProvider?.endpoint ? '待保存接口' : credentialConfigured ? '已配置' : '未配置'}</span></div>
       <Field label={provider ? `${provider.name} · API Key` : '生图 API Key'} id="wa-image-key" help={!status.imageGeneration?.credentialStore ? '当前 DSH 未提供凭据服务，暂时无法保存密钥。' : dirty || !savedProvider?.endpoint ? '先保存接口设置，再为当前接口单独保存密钥。' : credentialConfigured ? '填写新密钥可替换当前密钥。' : '当前接口尚未保存密钥，不写入 config.yaml。'}><input className="wa-input" id="wa-image-key" type="password" autoComplete="new-password" value={key} disabled={keyDisabled} maxLength={2000} onChange={event => setKey(event.target.value)} /></Field>
       <div className="wa-form-actions"><span className="wa-help">切换接口时使用各自的密钥。</span><Button type="submit" primary disabled={keyDisabled || !key.trim()}>保存生图密钥</Button></div>

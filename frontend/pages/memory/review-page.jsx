@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { formatTime } from "../../shared/conversations.mjs";
 import { localDate } from "../../shared/local-date.mjs";
 import { Button, Tag, Heading, Empty, Feedback, Offline } from "../../components/workbench-ui.jsx";
@@ -10,13 +10,36 @@ export function MemoryReviewPage({ rpc, status }) {
     [editing, setEditing] = useState(null),
     [expiry, setExpiry] = useState('');
   const [deleteTarget, setDeleteTarget] = useState(null),
+    [deleteAttempted, setDeleteAttempted] = useState(false),
     locked = state.busy || !!deleteTarget;
+  const confirmation = useRef(null), confirmationTrigger = useRef(null);
+  const requestDelete = (target) => {
+    confirmationTrigger.current = document.activeElement;
+    setDeleteAttempted(false);
+    setDeleteTarget(target);
+  };
   const [, tick] = useState(0),
     now = Date.now();
   useEffect(() => {
     const timer = setInterval(() => tick((value) => value + 1), 30000);
     return () => clearInterval(timer);
   }, []);
+  useEffect(() => {
+    if (!deleteTarget) return;
+    const previous = confirmationTrigger.current;
+    confirmation.current?.querySelector('.is-quiet')?.focus();
+    return () => {
+      if (previous?.isConnected) previous.focus();
+      else document.querySelector('#wa-memory-tab-review')?.focus();
+    };
+  }, [deleteTarget]);
+  useEffect(() => {
+    const dialog = confirmation.current;
+    if (!deleteTarget || !dialog) return;
+    if (state.busy) dialog.focus();
+    else if (!dialog.contains(document.activeElement) || document.activeElement === dialog)
+      dialog.querySelector('.is-quiet')?.focus();
+  }, [deleteTarget, state.busy]);
   const all = (state.data?.sections || []).flatMap((section) => {
     const disputed = new Set(
       section.facts.filter((fact) => fact.state === 'pending').flatMap((fact) => fact.replaces || [])
@@ -47,14 +70,14 @@ export function MemoryReviewPage({ rpc, status }) {
   ];
   return (
     <section className="wa-wb-page" data-testid="memory-review-page">
-      <Heading title="记忆维护" text="确认冲突、调整有效期，整理过时事实。">
+      <Heading icon="memory" title="记忆维护" text="确认冲突、调整有效期，整理过时事实。">
         <Button quiet disabled={state.busy} onClick={state.refresh}>
           重新读取
         </Button>
       </Heading>
-      <Feedback state={state} />
+      {!deleteTarget && <Feedback state={state} />}
       <Offline status={status}>
-        <div className="wa-wb-strip">
+        <div className="wa-memory-review-metrics">
           <div>
             <span>有效事实</span>
             <strong>{all.filter(usable).length}</strong>
@@ -92,7 +115,7 @@ export function MemoryReviewPage({ rpc, status }) {
             data-testid="memory-clear-facts"
             disabled={locked || state.data?.invalid || !facts.length}
             onClick={() =>
-              setDeleteTarget({
+              requestDelete({
                 title:
                   '删除「' + filters.find(([value]) => value === filter)[1] + '」的全部 ' + facts.length + ' 条事实',
                 factIds: facts.map((fact) => fact.id),
@@ -108,10 +131,10 @@ export function MemoryReviewPage({ rpc, status }) {
             新事实从会话中提取。临时安排可设置有效期，冲突事实确认后才重新进入对话。
           </Empty>
         )}
-        <div className="wa-wb-grid wa-memory-fact-list">
+        <div className="wa-memory-fact-list">
           {facts.map((fact) => (
-            <article className="wa-wb-card wa-wb-fact" key={fact.id}>
-              <div className="wa-wb-between">
+            <article className="wa-memory-review-fact" key={fact.id} data-fact-state={fact.state}>
+              <header className="wa-memory-review-meta">
                 <span className="wa-wb-eyebrow">{fact.conversationName}</span>
                 <Tag state={fact.state === 'pending' || fact.disputed ? 'draft' : usable(fact) ? 'passed' : 'disabled'}>
                   {fact.state === 'pending'
@@ -124,11 +147,11 @@ export function MemoryReviewPage({ rpc, status }) {
                           ? '冲突待定 · 暂停使用'
                           : '有效'}
                 </Tag>
-              </div>
+              </header>
               <p className="wa-wb-fact-text">{fact.text}</p>
               {fact.state === 'pending' && (
                 <>
-                  <div className="wa-wb-comparison">
+                  <div className="wa-memory-conflict">
                     {fact.replaces?.length ? (
                       <>
                         <small>与以下旧事实冲突</small>
@@ -139,7 +162,8 @@ export function MemoryReviewPage({ rpc, status }) {
                           ))}
                       </>
                     ) : (
-                      <p>关联的旧事实已移除；这条候选仍需确认后才会使用。</p>
+                      <p>{fact.reviewReason === 'reported' ? '这条内容来自他人转述，需要确认适用后才会使用。' :
+                        fact.reviewReason === 'image' ? '这条内容来自图片识别，需要确认后才会使用。' : '关联的旧事实已移除；这条候选仍需确认后才会使用。'}</p>
                     )}
                   </div>
                   <div className="wa-wb-actions">
@@ -171,7 +195,7 @@ export function MemoryReviewPage({ rpc, status }) {
                   </div>
                 </>
               )}
-              <div className="wa-wb-expiry">
+              <footer className="wa-memory-expiry">
                 <small>{fact.expiresAt ? '有效至 ' + formatTime(fact.expiresAt) : '长期有效'}</small>
                 <div className="wa-wb-actions">
                   <Button
@@ -191,7 +215,7 @@ export function MemoryReviewPage({ rpc, status }) {
                     aria-label={'删除记忆：' + fact.text}
                     disabled={locked || state.data?.invalid}
                     onClick={() =>
-                      setDeleteTarget({
+                      requestDelete({
                         title: '删除「' + fact.text.slice(0, 60) + (fact.text.length > 60 ? '…' : '') + '」',
                         factIds: [fact.id],
                         revision: state.data.revision,
@@ -201,7 +225,7 @@ export function MemoryReviewPage({ rpc, status }) {
                     删除
                   </Button>
                 </div>
-              </div>
+              </footer>
               {editing === fact.id && (
                 <div className="wa-wb-inline-form">
                   <label>
@@ -237,7 +261,7 @@ export function MemoryReviewPage({ rpc, status }) {
                   </div>
                 </div>
               )}
-              <details>
+              <details className="wa-memory-sources">
                 <summary>查看原始依据 · {fact.sources.length} 条</summary>
                 {fact.sources.map((source, index) => (
                   <blockquote key={source.key + ':' + index}>
@@ -253,16 +277,31 @@ export function MemoryReviewPage({ rpc, status }) {
           ))}
         </div>
         {deleteTarget && (
-          <div className="wa-wb-review" role="region" aria-label="确认删除记忆">
+          <div className="wa-memory-confirmation-backdrop" onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !state.busy) setDeleteTarget(null);
+          }}>
+          <div className="wa-memory-delete-dialog" ref={confirmation} tabIndex={-1} role="dialog" aria-modal="true" aria-label="确认删除记忆"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape' && !state.busy) { event.preventDefault(); setDeleteTarget(null); }
+              if (event.key !== 'Tab') return;
+              const controls = [...event.currentTarget.querySelectorAll('button:not(:disabled)')];
+              if (!controls.length) { event.preventDefault(); event.currentTarget.focus(); }
+              else if (event.shiftKey && document.activeElement === controls[0]) { event.preventDefault(); controls.at(-1).focus(); }
+              else if (!event.shiftKey && document.activeElement === controls.at(-1)) { event.preventDefault(); controls[0].focus(); }
+            }}>
             <h3>{deleteTarget.title}？</h3>
             <p>
               选中的事实将从长期记忆移除并停止用于回复，旧来源不会自动补回。聊天记录、全局备注与修改前备份保留；其他事实继续使用。
             </p>
+            {deleteAttempted && state.error && !state.busy && (
+              <div className="wa-alert is-error" role="alert">{state.error}</div>
+            )}
             <div className="wa-wb-actions">
               <Button
                 danger
                 disabled={state.busy}
                 onClick={async () => {
+                  setDeleteAttempted(true);
                   const value = await state.execute(
                     'memory.fact.delete',
                     { factIds: deleteTarget.factIds, revision: deleteTarget.revision, confirmDelete: true },
@@ -282,6 +321,7 @@ export function MemoryReviewPage({ rpc, status }) {
                 取消
               </Button>
             </div>
+          </div>
           </div>
         )}
       </Offline>

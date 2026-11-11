@@ -2,8 +2,9 @@ import { createHash } from 'node:crypto';
 import { BridgeError } from '@napcat-wechat/protocol';
 import type { Credential } from './session.js';
 import { fields, fv, ld, num, bytes, signed, readVi } from './wire.js';
-import { parseSnsObject, requestSnsCgi, momentsRequest, momentsResponse, normalizeSnsText } from './moments.js';
+import { parseSnsObject, requestSnsCgi, momentsRequest, momentsResponse, normalizeSnsText, validateMomentsQuery } from './moments.js';
 import { validateAudienceSelection, audienceUserId } from '../../../shared/moments-audience.mjs';
+import { publicationTextHash } from '../../../shared/moments-publication.mjs';
 
 export const SNS_IMAGE_BYTES = 10 * 1024 * 1024, SNS_CHUNK_BYTES = 50_000;
 const wrap = (data: Buffer) => Buffer.concat([fv(1, data.length), ld(2, data)]);
@@ -27,13 +28,13 @@ export function validateSnsWrite(raw: unknown): SnsWrite {
       !Number.isInteger(image.width) || image.width < 1 || image.width > 8192 || !Number.isInteger(image.height) || image.height < 1 || image.height > 8192 || image.width * image.height > 40000000))) invalid();
   return query;
 }
-function accepted(body: Buffer) {
+function accepted(body: Buffer, stage?: 'upload' | 'publish') {
   const list = fields(body), base = list.filter(field => field.tag === 1);
   if (base.length !== 1 || base[0].wire !== 2) fail('朋友圈操作回执缺少唯一状态，结果不明，未自动重试');
   const status = fields(base[0].value as Buffer).filter(field => field.tag === 1);
   if (status.length !== 1 || status[0].wire !== 0) fail('朋友圈操作回执状态无效，结果不明，未自动重试');
   const ret = signed(status[0].value as bigint);
-  if (ret !== 0) throw new BridgeError('ERR_MOMENTS_WRITE_REJECTED', `微信拒绝朋友圈操作（ret=${ret}），未报告成功`, { ret, delivery: 'rejected' });
+  if (ret !== 0) throw new BridgeError('ERR_MOMENTS_WRITE_REJECTED', `微信拒绝朋友圈${stage === 'upload' ? '图片上传' : stage === 'publish' ? '发布' : '操作'}（ret=${ret}），未报告成功`, { ret, delivery: 'rejected', ...(stage ? { stage } : {}) });
   return list;
 }
 export function snsDeleteRequest(base: Buffer, postId: string) {
@@ -83,13 +84,13 @@ export function snsInteractionResponse(body: Buffer, accountId: string, query: S
   return { postId: object.id, commentId: (num(comment, 12) || num(comment, 7))!.toString(), text: query.text,
     ...(reply ? { replyToCommentId: reply.id, replyToUserId: reply.userId } : {}) };
 }
-interface SnsImage { url: string; thumb: string; width: number; height: number; size: number; id: string }
+interface SnsImage { url: string; thumb: string; width: number; height: number; size: number; id: string; md5: string }
 export function snsUploadRequest(base: Buffer, clientId: string, md5: string, total: number, position: number, data: Buffer) {
   if (!data.length || data.length > SNS_CHUNK_BYTES || position < 0 || position + data.length > total) throw new BridgeError('ERR_INVALID_MOMENTS_WRITE', '朋友圈图片上传分片无效', { delivery: 'not-sent' });
   return Buffer.concat([ld(1, base), fv(2, 2), fv(3, position), fv(4, total), ld(5, wrap(data)), ld(6, clientId), ld(15, md5)]);
 }
 export function snsUploadResponse(body: Buffer, clientId: string, total: number, end: number) {
-  const list = accepted(body);
+  const list = accepted(body, 'upload');
   for (const [tag, wire] of [[2, 0], [3, 0], [4, 2], [5, 2], [6, 0], [9, 0]]) {
     const values = list.filter(field => field.tag === tag);
     if (values.length !== 1 || values[0].wire !== wire) fail('朋友圈图片回执字段重复或类型不正确，未发布');
@@ -105,14 +106,18 @@ export function snsUploadResponse(body: Buffer, clientId: string, total: number,
     catch { fail('朋友圈图片回执包含无效媒体地址，未发布'); }
     return url;
   };
-  return { url: validateUrl(bytes(list, 5)), thumb: validateUrl(urls[0].value as Buffer) };
+  const ids = list.filter(field => field.tag === 8);
+  if (ids.length > 1 || ids.some(field => field.wire !== 0 || (field.value as bigint) > 0xffffffffffffffffn)) fail('朋友圈图片回执的媒体编号无效，未发布');
+  // The PC upload endpoint returns zero for a new image. Keep it instead of
+  // inventing a media ID from the image's position in the post.
+  return { url: validateUrl(bytes(list, 5)), thumb: validateUrl(urls[0].value as Buffer), id: (num(list, 8) ?? 0n).toString() };
 }
 export function snsPostRequest(base: Buffer, accountId: string, query: SnsWrite, clientId: string, time: number, images: SnsImage[]) {
   const description = '<TimelineObject><id>0</id><username>' + xml(accountId) + '</username><createTime>' + time + '</createTime><contentDesc>' + xml(query.text!) +
     '</contentDesc><contentDescShowType>0</contentDescShowType><contentDescScene>3</contentDescScene><contentattr>0</contentattr><private>0</private><sightFolded>0</sightFolded>' +
     '<appInfo><id/><version>0</version><appName/><installUrl/><fromUrl/><isForceUpdate>0</isForceUpdate></appInfo><sourceUserName/><sourceNickName/><statisticsData/><statExtStr/>' +
     '<ContentObject><contentStyle>' + (images.length ? 1 : 2) + '</contentStyle><title/><description/><contentUrl/><mediaList>' +
-    images.map(image => '<media><id>' + xml(image.id) + '</id><type>2</type><title/><description/><url type="1">' + xml(image.url) + '</url><thumb type="1">' + xml(image.thumb) + '</thumb><size width="' + image.width + '" height="' + image.height + '" totalSize="' + image.size + '"/></media>').join('') +
+    images.map(image => '<media><id>' + xml(image.id) + '</id><type>2</type><title/><description/><private>0</private><url type="1" md5="' + xml(image.md5) + '">' + xml(image.url) + '</url><thumb type="1">' + xml(image.thumb) + '</thumb><size width="' + image.width + '" height="' + image.height + '" totalSize="' + image.size + '"/></media>').join('') +
     '</mediaList></ContentObject><actionInfo><appMsg><messageAction/></appMsg></actionInfo><location poiClassifyId="" poiName="" poiAddress="" poiClassifyType="0" city=""/>' +
     '<publicUserName/><streamvideo><streamvideourl/><streamvideothumburl/><streamvideoweburl/></streamvideo></TimelineObject>';
   const protocolClientId = `sns_post_${accountId}_${time}_${BigInt('0x' + createHash('sha256').update(clientId).digest('hex').slice(0, 8)).toString()}`;
@@ -120,16 +125,10 @@ export function snsPostRequest(base: Buffer, accountId: string, query: SnsWrite,
   const blocked = query.blockedUserIds ?? [];
   return Buffer.concat([ld(1, base), ld(2, wrap(Buffer.from(description))), fv(3, 0), fv(5, 0), fv(6, 0), ld(7, protocolClientId), fv(13, blocked.length), ...blocked.map(id => ld(14, ld(1, id)))]);
 }
-export function snsPostResponse(body: Buffer, accountId: string, query: SnsWrite) {
-  const list = accepted(body), objects = list.filter(field => field.tag === 2);
-  if (objects.length !== 1 || objects[0].wire !== 2) fail('朋友圈发布回执缺少动态编号，结果不明，未自动重试');
-  const object = parseSnsObject(objects[0].value as Buffer);
-  if (object.author.userId !== accountId || !object.contentAvailable || object.text !== query.text || object.imageCount !== (query.images?.length ?? 0) || object.deleted)
-    fail('朋友圈发布回执的账号、正文或图片与提交内容不一致，结果不明');
-  const data = fields(objects[0].value as Buffer), count = data.filter(field => field.tag === 23), rows = data.filter(field => field.tag === 24);
-  const expected = query.blockedUserIds ?? [];
+function snsBlockedUsers(object: Buffer) {
+  const data = fields(object), count = data.filter(field => field.tag === 23), rows = data.filter(field => field.tag === 24);
   if (count.length > 1 || count.some(field => field.wire !== 0) || rows.some(field => field.wire !== 2) ||
-      (count[0]?.value ?? 0n) !== BigInt(rows.length) || expected.length && count.length !== 1)
+      (count[0]?.value ?? 0n) !== BigInt(rows.length))
     fail('朋友圈回执未确认完整屏蔽名单，发布结果不明，请在微信核对；未自动重发');
   const blockedUserIds = rows.map(row => {
     const wrapped = fields(row.value as Buffer), sizes = wrapped.filter(field => field.tag === 1), values = wrapped.filter(field => field.tag === 2);
@@ -139,13 +138,58 @@ export function snsPostResponse(body: Buffer, accountId: string, query: SnsWrite
     if (!audienceUserId(id)) fail('朋友圈回执的屏蔽联系人编号无效，发布结果不明');
     return id;
   });
-  if (new Set(blockedUserIds).size !== blockedUserIds.length || JSON.stringify([...blockedUserIds].sort()) !== JSON.stringify([...expected].sort()))
-    fail('朋友圈回执的屏蔽名单与提交名单不一致，发布结果不明，请在微信核对；未自动重发');
-  return { postId: object.id, createdAt: object.createdAt, text: object.text, imageCount: object.imageCount, blockedUserIds, audienceConfirmed: true };
+  if (new Set(blockedUserIds).size !== blockedUserIds.length) fail('朋友圈回执的屏蔽联系人重复，范围未确认');
+  return { blockedUserIds, supplied: count.length === 1 };
+}
+export function snsPostResponse(body: Buffer, accountId: string, query: SnsWrite) {
+  const list = accepted(body, 'publish'), objects = list.filter(field => field.tag === 2);
+  if (objects.length !== 1 || objects[0].wire !== 2) fail('朋友圈发布回执缺少动态编号，结果不明，未自动重试');
+  const object = parseSnsObject(objects[0].value as Buffer);
+  if (object.author.userId !== accountId || !object.contentAvailable || object.text !== query.text || object.imageCount !== (query.images?.length ?? 0) || object.deleted)
+    fail('朋友圈发布回执的账号、正文或图片与提交内容不一致，结果不明');
+  const expected = query.blockedUserIds ?? [];
+  let audience: ReturnType<typeof snsBlockedUsers> | undefined;
+  try {
+    audience = snsBlockedUsers(objects[0].value as Buffer);
+    if (expected.length && !audience.supplied) fail('微信已返回这条动态，但未确认完整屏蔽名单；未自动重发');
+    const returned = new Set(audience.blockedUserIds);
+    // The requested exclusion is satisfied when every selected user is blocked.
+    // Additional exclusions do not expose the post to any requested recipient.
+    if (expected.some(id => !returned.has(id))) fail('微信已返回这条动态，但回执未包含全部指定屏蔽对象；未自动重发');
+    return { postId: object.id, createdAt: object.createdAt, text: object.text, imageCount: object.imageCount,
+      blockedUserIds: audience.blockedUserIds, audienceConfirmed: true,
+      ...(returned.size > expected.length ? { additionalBlockedCount: returned.size - expected.length } : {}) };
+  } catch (error) {
+    throw new BridgeError('ERR_MOMENTS_WRITE_PROTOCOL', (error as Error).message, { delivery: 'unknown', publication: {
+      accountId, postId: object.id, createdAt: object.createdAt, textHash: publicationTextHash(query.text!), imageCount: object.imageCount,
+      submittedBlockedUserIds: [...expected], returnedBlockedUserIds: audience?.blockedUserIds ?? null,
+      audienceSelection: validateAudienceSelection(query), audienceSource: 'submitted-identifiers',
+    } });
+  }
+}
+
+/** A read-only own-post verification, intentionally separate from publishing. */
+export function snsPublicationResponse(body: Buffer, accountId: string, postId: string) {
+  const post = momentsResponse(body, { action: 'detail', postId }).items[0];
+  if (post.author.userId !== accountId) throw new BridgeError('ERR_MOMENTS_TARGET_UNAVAILABLE', '发布核对只能读取当前账号自己的动态');
+  let audience;
+  try { audience = snsBlockedUsers(bytes(fields(body), 2)); } catch { /* Publication and audience availability are independent. */ }
+  return { postId: post.id, createdAt: post.createdAt, text: post.text, imageCount: post.imageCount,
+    contentAvailable: post.contentAvailable, deleted: post.deleted,
+    audienceComplete: audience?.supplied === true, blockedUserIds: audience?.blockedUserIds ?? [] };
 }
 
 export class MomentsWriter {
   constructor(readonly request = requestSnsCgi, readonly now = Date.now) {}
+  async readPublication(account: Credential, raw: unknown, signal: AbortSignal, assertCurrent: () => void) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some(key => key !== 'postId'))
+      throw new BridgeError('ERR_INVALID_MOMENTS_QUERY', '发布核对需要唯一的真实动态编号');
+    const query = validateMomentsQuery({ action: 'detail', postId: (raw as any).postId });
+    assertCurrent(); signal.throwIfAborted();
+    const body = await this.request(account, 210, 'mmsnsobjectdetail', base => momentsRequest(base, query), signal);
+    assertCurrent(); signal.throwIfAborted();
+    return { accountId: account.wxid, ...snsPublicationResponse(body, account.wxid, query.postId!) };
+  }
   async write(account: Credential, raw: unknown, clientId: string, signal: AbortSignal, assertCurrent: () => void) {
     const query = validateSnsWrite(raw), time = Math.floor(this.now() / 1000);
     if (query.blockedLabelIds?.length) throw new BridgeError('ERR_MOMENTS_AUDIENCE', '屏蔽标签尚未展开为真实成员，未上传或发布', { delivery: 'not-sent' });
@@ -202,7 +246,7 @@ export class MomentsWriter {
         assertCurrent(); signal.throwIfAborted(); const chunk = data.subarray(position, position + SNS_CHUNK_BYTES);
         urls = snsUploadResponse(await this.request(account, 207, 'mmsnsupload', base => snsUploadRequest(base, uploadId, md5, data.length, position, chunk), signal), uploadId, data.length, position + chunk.length);
       }
-      images.push({ ...urls!, width: image.width, height: image.height, size: data.length, id: String(index + 1) });
+      images.push({ ...urls!, width: image.width, height: image.height, size: data.length, md5 });
     }
     assertCurrent(); signal.throwIfAborted();
     const response = await this.request(account, 209, 'mmsnspost', base => snsPostRequest(base, account.wxid, query, clientId, time, images), signal);

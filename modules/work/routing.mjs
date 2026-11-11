@@ -1,43 +1,60 @@
 import { ChannelError, publicError } from '../../shared/contracts.mjs';
 import { readPrompt } from '../../prompts/loader.mjs';
-import { workDialogueState } from './dialogue.mjs';
+import { workRoutingContext, guardWorkFollowup } from './routing-context.mjs';
 
-const same = (record, scope) => ['accountId', 'chatType', 'peerId', 'senderId'].every(key => record[key] === scope[key]);
+const actions = new Set(['chat', 'new', 'continue', 'status', 'cancel']);
+const intents = new Set(['execute', 'continue', 'status', 'cancel', 'chat', 'unclear']);
+const targets = new Set(['none', 'unique', 'ambiguous']);
+
+/** Validate short decision evidence, never a free-form reasoning transcript. */
+export function parseWorkRoute(raw, message, tasks) {
+  const invalid = () => { throw new ChannelError('WORK_ROUTE_INVALID', '模型未返回一致的工作判断与复核'); };
+  let value;
+  try { value = JSON.parse(String(raw).trim().replace(/^```(?:json)?\s*|\s*```$/g, '')); } catch { invalid(); }
+  if (!value || Array.isArray(value) || typeof value !== 'object' ||
+      Object.keys(value).some(key => !['action', 'taskId', 'review'].includes(key)) ||
+      !Object.hasOwn(value, 'taskId') || !actions.has(value.action)) invalid();
+  const review = value.review;
+  if (!review || Array.isArray(review) || typeof review !== 'object' ||
+      Object.keys(review).some(key => !['intent', 'evidence', 'target'].includes(key)) ||
+      !intents.has(review.intent) || !targets.has(review.target) ||
+      typeof review.evidence !== 'string' || Array.from(review.evidence).length > 240 ||
+      review.evidence && !String(message).includes(review.evidence)) invalid();
+  const id = value.taskId;
+  if (id !== null && (typeof id !== 'string' || !tasks.some(task => task.id === id))) invalid();
+  if (value.action === 'chat') {
+    if (id !== null || !['chat', 'unclear'].includes(review.intent) || review.target === 'unique') invalid();
+  } else {
+    if (!review.evidence.trim()) invalid();
+    const expectedIntent = value.action === 'new' ? 'execute' : value.action;
+    if (review.intent !== expectedIntent) invalid();
+    if (value.action === 'new') {
+      if (id !== null || review.target !== 'none') invalid();
+    } else if (value.action === 'status') {
+      if (review.target !== (id === null ? 'none' : 'unique')) invalid();
+    } else if (!id || review.target !== 'unique') invalid();
+  }
+  return { action: value.action, ...(id !== null ? { taskId: id } : {}),
+    review: { intent: review.intent, evidence: review.evidence, target: review.target } };
+}
 
 /** A tool-free decision grants no authority; execution checks the live scope again. */
 export async function routeWorkMessage(channel, item, signal) {
   channel.assertAllowed(item);
   channel.work.assertAllowed(item.record, signal);
-  const position = channel.store.data.records.indexOf(item.record);
-  const previous = position < 0 ? channel.store.data.records.filter(record => record.createdAt < item.record.createdAt)
-    : channel.store.data.records.slice(0, position);
-  const history = previous.filter(record => record.mode === 'work' && same(record, item.record) &&
-    !record.workJobId && !record.modeControl && !record.remoteQuery && record.state === 'sent' && record.reply)
-    .slice(-8).map(record => ({ user: record.question?.slice(0, 1200), assistant: record.reply.slice(0, 1200) }));
-  const state = workDialogueState(channel, item.record);
-  const current = channel.work.dialogueTask(item.record);
-  const tasks = current && !state.tasks.some(task => task.id === current.id)
-    ? [...state.tasks, { id: current.id, request: current.request.slice(0, 160), state: current.state }] : state.tasks;
+  const context = workRoutingContext(channel, item);
+  item.workRoutingContext = context;
   try {
     const result = await channel.runner.run({ mode: 'work-routing', tools: [],
       systemOverride: readPrompt('work/routing.md'),
-      text: JSON.stringify({ message: item.text, history, tasks, currentTaskId: current?.id ?? null }),
+      text: JSON.stringify(context),
       signal: AbortSignal.any([signal, AbortSignal.timeout(30000)]) });
     signal.throwIfAborted();
     channel.assertAllowed(item);
     channel.work.assertAllowed(item.record, signal);
-    const value = JSON.parse(result.text.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
-    if (!value || Array.isArray(value) || typeof value !== 'object' ||
-        Object.keys(value).some(key => !['action', 'taskId'].includes(key)) ||
-        !['chat', 'new', 'continue', 'status', 'cancel'].includes(value.action))
-      throw new ChannelError('WORK_ROUTE_INVALID', '模型未返回有效的工作判断');
-    const id = value.taskId;
-    if (id != null && (typeof id !== 'string' || !tasks.some(task => task.id === id)))
-      throw new ChannelError('WORK_ROUTE_INVALID', '模型选择的任务不在当前发起人的任务范围内');
-    if (['chat', 'new'].includes(value.action) && id != null || ['continue', 'cancel'].includes(value.action) && !id)
-      throw new ChannelError('WORK_ROUTE_INVALID', '工作判断缺少明确的任务目标');
-    if (id) channel.work.owned(id, item.record);
-    return { action: value.action, ...(id ? { taskId: id } : {}) };
+    const decision = guardWorkFollowup(parseWorkRoute(result.text, item.text, context.tasks), item.text, context);
+    if (decision.taskId) channel.work.owned(decision.taskId, item.record);
+    return decision;
   } catch (error) {
     signal.throwIfAborted();
     channel.assertAllowed(item);

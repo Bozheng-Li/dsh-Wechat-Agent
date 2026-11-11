@@ -8,6 +8,7 @@ import {
   peerType,
 } from "../../shared/conversations.mjs";
 import { Glyph } from "../../components/glyph.jsx";
+import { MessageReferences } from './references.jsx';
 import { Button } from "../../components/button.jsx";
 import { PageHead, Empty, Notice, Search, TypeFilters, StateBadge } from "../../components/page-ui.jsx";
 
@@ -38,7 +39,7 @@ export function Records({
   const pending = (current?.active ? 1 : 0) + (current?.queued || 0);
   return (
     <>
-      <PageHead title="处理记录" description="按会话查看问题、回复与微信回执，分别保留上下文。">
+      <PageHead icon="history" title="处理记录" description="按会话查看问题、回复与微信回执，分别保留上下文。">
         <Button quiet icon="pause" disabled={blocked || (!processing?.active && !processing?.queued)} onClick={onCancelAll}>
           取消全部回复任务
         </Button>
@@ -47,7 +48,7 @@ export function Records({
       <div className="wa-records-layout">
         <aside className="wa-records-sidebar" aria-label="记录会话列表">
           <Search value={query} onChange={setQuery} label="搜索记录会话" placeholder="搜索名称或会话 ID" />
-          <div style={{ margin: '0 4px 16px' }}>
+          <div className="wa-records-type-filter">
             <TypeFilters value={type} onChange={setType} />
           </div>
           <p className="wa-records-sidebar-label">{filtered.length} 个会话</p>
@@ -66,7 +67,7 @@ export function Records({
                   {initials(peerName(item))}
                 </span>
                 <span className="wa-session-info">
-                  <span className="wa-session-title" style={{ display: 'block' }}>
+                  <span className="wa-session-title">
                     {peerName(item)}
                   </span>
                   <span className="wa-session-meta">
@@ -92,8 +93,8 @@ export function Records({
           ) : (
             <>
               <header className="wa-records-head">
-                <div>
-                  <h2>{peerName(selected)}</h2>
+                <div className="wa-records-heading-copy">
+                  <div className="wa-records-title"><h2>{peerName(selected)}</h2><span>{data?.total ?? selected.recordCount ?? 0} 条记录</span></div>
                   <p className="wa-muted wa-mono">{peerId(selected)}</p>
                   <details className="wa-records-location" key={conversationKey(selected)}>
                     <summary>
@@ -153,6 +154,7 @@ export function Records({
                   records.map((record) => (
                     <details
                       className="wa-record"
+                      data-state={record.state}
                       key={record.key}
                       data-record-key={record.key}
                       onToggle={(event) => {
@@ -170,20 +172,23 @@ export function Records({
                           <span className="wa-record-question">
                             {record.question || record.reason || '这条消息没有可显示的正文'}
                           </span>
+                        </div>
+                        <span className="wa-record-state">
                           <StateBadge
                             state={record.state}
-                            label={record.mode === 'natural' && record.state === 'skipped' ? '本轮保持安静' : undefined}
+                            label={record.toolProgress && record.state === 'sent' ? '提示已送达' : record.mode === 'natural' && record.state === 'skipped' ? '本轮保持安静' : undefined}
                           />
-                        </div>
+                        </span>
                       </summary>
                       <div className="wa-record-content">
+                        <MessageReferences references={record.references} />
                         {record.replyMedia && (
                           <p className="wa-help">
                             已选择{record.replyMedia.kind === 'sticker' ? '表情包' : '图片'}：{record.replyMedia.name} ·
                             发送结果以本条回执状态为准
                           </p>
                         )}
-                        {record.reply && <p className="wa-record-reply">{record.reply}</p>}
+                        {record.reply && <section className="wa-record-answer"><h3>回复内容</h3><p className="wa-record-reply">{record.reply}</p></section>}
                         {record.memoryContext && (
                           <details className="wa-record-memory" data-testid="record-memory-context">
                             <summary className="wa-record-memory-label">本轮记忆准备</summary>
@@ -200,6 +205,17 @@ export function Records({
                             {!!record.memoryContext.matchedTerms?.length && <p>关联线索：{record.memoryContext.matchedTerms.join('、')}</p>}
                           </details>
                         )}
+                        {!!record.requestMetrics?.length && (
+                          <details className="wa-record-memory" data-testid="record-request-metrics">
+                            <summary className="wa-record-memory-label">对话模型输入 · {record.requestMetrics.length} 次调用</summary>
+                            <p className="wa-help">文本字符数包含对话的工具定义和返回，不等同于 Token；视觉与内部任务另行运行，不包含在此处。</p>
+                            {record.requestMetrics.map((request, index) => <p key={index}>
+                              第 {index + 1} 次 · {request.strategy === 'progressive-v1' ? '按需加载' : '完整模式'} · 共 {request.totalTextChars ?? 0} 字符<br />
+                              系统 {request.systemChars ?? 0} · 消息 {request.userChars ?? 0} · 工具定义 {request.toolSchemaChars ?? 0} · 工具结果 {request.toolResultChars ?? 0}
+                              {request.elapsedMs != null ? ` · ${(request.elapsedMs / 1000).toFixed(1)} 秒` : ''}
+                            </p>)}
+                          </details>
+                        )}
                         {record.reason && <p className="wa-alert">{record.reason}</p>}
                         {record.replyStyleWarning && (
                           <p className="wa-note-box" data-testid="reply-style-review">
@@ -207,7 +223,8 @@ export function Records({
                           </p>
                         )}
                         {record.acknowledgedMessageIds?.length > 0 && (
-                          <p className="wa-muted">
+                          <p className="wa-record-receipt">
+                            <Glyph name="check" className="wa-icon-small" />
                             微信服务端已确认 {record.acknowledgedMessageIds.length} 条消息；回执不代表对方已读。
                           </p>
                         )}

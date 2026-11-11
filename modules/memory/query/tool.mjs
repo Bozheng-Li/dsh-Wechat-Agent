@@ -164,6 +164,8 @@ function prepareMemoryRead(section, source, query, terms) {
 function memoryReadPage(read, { offset = 0, revision } = {}, maximum = MEMORY_PAGE_CHARS) {
   if (revision !== undefined && revision !== read.revision)
     throw new ChannelError('MEMORY_CHANGED', '记忆已更新，请从第一页重新核对，不能拼接旧版本资料');
+  if (offset > read.text.length || (offset > 0 && /[\uD800-\uDBFF]/u.test(read.text[offset - 1]) && /[\uDC00-\uDFFF]/u.test(read.text[offset] || '')))
+    throw new ChannelError('INVALID_MEMORY_QUERY', '记忆偏移无效，请使用上一页的 nextOffset');
   let end = Math.min(read.text.length, offset + maximum);
   // Keep ordinary JSON evidence records intact at page boundaries. Very long
   // individual records remain recoverable verbatim through explicit cursors.
@@ -175,6 +177,7 @@ function memoryReadPage(read, { offset = 0, revision } = {}, maximum = MEMORY_PA
     // That record necessarily needs marked fragments, so start it on this page.
     if (boundary > offset && (followingEnd - boundary <= maximum || boundary - offset >= maximum / 2)) end = boundary;
   }
+  if (end < read.text.length && /[\uD800-\uDBFF]/u.test(read.text[end - 1]) && /[\uDC00-\uDFFF]/u.test(read.text[end])) end--;
   const page = read.text.slice(offset, end), nextOffset = offset + page.length < read.text.length ? offset + page.length : null;
   const fragmented = !!page && ((offset > 0 && read.text[offset - 1] !== '\n') || (nextOffset !== null && read.text[end - 1] !== '\n'));
   const truncated = offset > 0 || nextOffset !== null || read.excerpted;
@@ -200,11 +203,32 @@ function memoryReadPage(read, { offset = 0, revision } = {}, maximum = MEMORY_PA
   };
 }
 
-export function conversationMemoryTool(memory, longMemory, scope, assertAllowed, { snapshot, onRead, promptStrategy = 'legacy' } = {}) {
+function compactMemoryResult(result) {
+  const compactPart = part => {
+    const { guidance, matchGuidance, fragmentGuidance, ...evidence } = part;
+    return { ...evidence, ...(part.fragmented ? {
+      fragmentGuidance: '跨页片段可能缺少人物或引文；沿用 revision 核对相邻页的完整来源后再归属事实。',
+    } : {}) };
+  };
+  const parts = result.partitions ?? [result];
+  const guidance = [
+    'found 只表示有资料，词面命中和 coverage 不代表答案已核实。',
+    parts.some(part => part.error) ? 'error 是读取失败，不等于没有资料。' : '',
+    result.omitted ? '未返回不代表没有记录；依据不足再换关键词或省略 query，需后文才按分区的 nextOffset、revision 续读。'
+      : result.partitions ? '两个分区均完整返回；有依据就直接回答，未能确认所问事实就如实说明，不重复查询。'
+        : '本次所选分区已完整返回；有依据就直接回答，不能据此判定其他分区没有记录。',
+    result.hasConflicts ? '有冲突，见 notices；争议事实不能确定。' : '',
+  ].filter(Boolean).join('');
+  return { ...compactPart(result),
+    ...(result.partitions ? { partitions: result.partitions.map(compactPart) } : {}), guidance };
+}
+
+export function conversationMemoryTool(memory, longMemory, scope, assertAllowed, { snapshot, onRead, onResult, promptStrategy = 'legacy' } = {}) {
   // A tool read belongs to the same turn as the quoted prompt. Keep the full
   // receive-time snapshot so model-side compression cannot erase its details.
   const conversation = snapshot ? structuredClone(snapshot) : undefined;
-  const pageChars = promptStrategy === 'progressive-v1' ? 4000 : MEMORY_PAGE_CHARS;
+  const progressive = promptStrategy === 'progressive-v1';
+  const pageChars = progressive ? 4000 : MEMORY_PAGE_CHARS;
   let lastRead;
   return {
     name: 'wechat_memory',
@@ -309,7 +333,11 @@ export function conversationMemoryTool(memory, longMemory, scope, assertAllowed,
         partitions: (result.partitions ?? [result]).map(({ section, revision, coverage, omitted, truncated, error }) => ({ section, revision, coverage, omitted, truncated, ...(error ? { error } : {}) })) };
       onRead?.(structuredClone(report));
       lastRead = report;
-      return JSON.stringify(result);
+      // Keep evidence and audit semantics intact. The model needs one set of
+      // reading instructions, not the same explanation in every partition.
+      const rendered = JSON.stringify(progressive ? compactMemoryResult(result) : result);
+      onResult?.(rendered);
+      return rendered;
     },
   };
 }

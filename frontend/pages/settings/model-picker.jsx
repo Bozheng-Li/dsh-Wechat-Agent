@@ -35,7 +35,7 @@ export function ModelPicker({ connection, catalog, status, blocked, busy, onSele
       .finally(() => { details.reload(); setRefreshing(false); });
   };
   return (
-    <>
+    <div className="wa-model-picker">
       <Field
         label="回复模型"
         id="wa-model"
@@ -157,7 +157,7 @@ export function ModelPicker({ connection, catalog, status, blocked, busy, onSele
       {!choice && !defaultModel?.model && !loading && (
         <p className="wa-alert wa-section-space">DSH 尚未设置默认模型，请选择一个可用模型。</p>
       )}
-    </>
+    </div>
   );
 }
 

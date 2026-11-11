@@ -54,8 +54,8 @@ export function RecoveryPage({ rpc, status }) {
     }
   };
   return (
-    <section className="wa-wb-page" data-testid="recovery-page">
-      <Heading title="发送恢复" text="核对原回复与微信回执，预览后再恢复发送。">
+    <section className="wa-wb-page wa-recovery-page" data-testid="recovery-page">
+      <Heading icon="refresh" title="发送恢复" text="核对原回复与微信回执，预览后再恢复发送。">
         <Button quiet disabled={state.busy} onClick={state.refresh}>
           重新读取
         </Button>
@@ -104,7 +104,7 @@ export function RecoveryPage({ rpc, status }) {
             清理当前分类
           </Button>
         </div>
-        <div className={'wa-wb-split' + (!records.length ? ' is-empty' : '')}>
+        <div className={'wa-wb-split wa-recovery-layout' + (!records.length ? ' is-empty' : '')}>
           <div className="wa-wb-list" aria-label="可恢复记录">
             {!records.length && !state.loading && (
               <Empty title="这里暂时没有待处理消息">之后失败或结果待核对的回复会出现在这里。</Empty>
@@ -148,9 +148,9 @@ export function RecoveryPage({ rpc, status }) {
               </div>
             ))}
           </div>
-          <div hidden={!records.length}>
+          <div className="wa-recovery-detail" hidden={!records.length}>
             {record ? (
-              <article className="wa-wb-card">
+              <article className="wa-recovery-sheet">
                 <div className="wa-wb-between"><h2>{record.conversationName}</h2><Tag state={record.state} /></div>
                 <p className="wa-wb-note">{record.reason}</p>
                 <div className="wa-wb-paper">
@@ -252,7 +252,7 @@ export function RecoveryPage({ rpc, status }) {
             )}
           </div>
         </div>
-        <details className="wa-wb-card wa-wb-history">
+        <details className="wa-settings-block wa-wb-history wa-recovery-history">
           <summary>最近的恢复操作 · {state.data?.draftCount || 0} 条</summary>
           <div className="wa-wb-between wa-wb-list-toolbar">
             <p className="wa-wb-note">
@@ -310,7 +310,7 @@ export function RecoveryPage({ rpc, status }) {
           ))}
         </details>
         {deleteTarget && (
-          <div className="wa-wb-review" role="region" aria-label="确认删除恢复记录">
+          <div className="wa-wb-review wa-recovery-confirm" role="region" aria-label="确认删除恢复记录">
             <h3>{deleteTarget.title}？</h3>
             <p>
               {deleteTarget.history ? '这些草稿或历史将从恢复列表移除。' : '这些恢复项及关联草稿将从恢复列表移除。'}

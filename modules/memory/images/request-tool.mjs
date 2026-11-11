@@ -5,7 +5,7 @@ import { defaultMemoryExpiry } from "../../../shared/memory-policy.mjs";
 
 const IMAGE_NOTE_PAGE_CHARS = 4000;
 const IMAGE_CATALOG_CHARS = 6000;
-const shortSource = (value, maximum) => String(value ?? '').replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(0, maximum);
+const shortSource = (value, maximum) => Array.from(String(value ?? '').replace(/[\u0000-\u001f\u007f]/gu, ' ')).slice(0, maximum).join('');
 
 function progressiveCatalog(catalog, currentKey) {
   const rows = [];
@@ -31,6 +31,8 @@ function imageNotePage(imageId, description, args) {
     throw new ChannelError('IMAGE_NOTE_CHANGED', '图像笔记已更新或缺少版本，请从 offset 0 重新读取');
   if (offset > description.length)
     throw new ChannelError('INVALID_IMAGE_REQUEST', '图像笔记偏移超出范围，请从 offset 0 重新读取');
+  if (offset > 0 && /[\uD800-\uDBFF]/u.test(description[offset - 1]) && /[\uDC00-\uDFFF]/u.test(description[offset] || ''))
+    throw new ChannelError('INVALID_IMAGE_REQUEST', '图像笔记偏移必须使用上一页的 nextOffset，不能拆开字符');
   let end = Math.min(description.length, offset + IMAGE_NOTE_PAGE_CHARS);
   if (end < description.length && /[\uD800-\uDBFF]/u.test(description[end - 1]) && /[\uDC00-\uDFFF]/u.test(description[end])) end--;
   const nextOffset = end < description.length ? end : null;
@@ -46,7 +48,7 @@ export function conversationImageTool(
   transport,
   scope,
   assertAllowed,
-  { snapshot, currentKey, onRead = () => {}, promptStrategy = 'legacy' } = {}
+  { snapshot, currentKey, onRead = () => {}, onNoteRead = () => {}, promptStrategy = 'legacy' } = {}
 ) {
   const progressive = promptStrategy === 'progressive-v1';
   const candidates = snapshot.entries.flatMap((entry) =>
@@ -146,7 +148,16 @@ export function conversationImageTool(
             imageMemoryId: attachment?.imageMemoryId || candidate.image.imageMemoryId };
           if (note.description) {
             const page = imageNotePage(args.imageId, note.description, args);
-            if (note.imageMemoryId) onRead(memory.images.content(scope, note.imageMemoryId).reference);
+            // A saved textual observation does not require loading pixels.
+            // Keep a turn-local validator so deletion, expiry, clearing or a
+            // changed note still cancels its use before sending the answer.
+            onNoteRead(() => {
+              assertAllowed();
+              const current = assertCurrent(candidate);
+              const description = current?.description || notes.get(args.imageId)?.description || candidate.image.description;
+              if (description !== note.description)
+                throw new ChannelError('IMAGE_NOTE_CHANGED', '图像笔记已更新，未继续使用旧笔记回复');
+            });
             return JSON.stringify({ ok: true, imageId: args.imageId, source: 'saved-image-note',
               ...page, quality: note.quality || 'unknown',
               guidance: '这是已保存的图像笔记，不代表本次重新看图。' + (page.guidance || ''),

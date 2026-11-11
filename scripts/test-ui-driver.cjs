@@ -3,6 +3,8 @@ const path = require('node:path');
 const assert = require('node:assert/strict');
 const { app, BrowserWindow } = require('electron');
 const expectedVersion = require('../package.json').version;
+const suiteTimeoutMs = Number(process.env.WECHAT_UI_TEST_TIMEOUT_MS || 210000);
+if (!Number.isSafeInteger(suiteTimeoutMs) || suiteTimeoutMs < 1) throw new Error('WECHAT_UI_TEST_TIMEOUT_MS must be a positive integer');
 
 const origin = process.env.WECHAT_UI_TEST_ORIGIN || process.argv[2], out = path.resolve(process.argv[3] || '');
 if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(origin || '') || !process.argv[3]) throw new Error('Pass an isolated localhost fixture and a report directory');
@@ -10,6 +12,7 @@ fs.mkdirSync(out, { recursive: true });
 fs.mkdirSync(path.join(out, 'browser-profile'), { recursive: true });
 app.setPath('userData', path.join(out, 'browser-profile'));
 app.disableHardwareAcceleration();
+if (process.env.WECHAT_UI_TEST_AUTHORIZATION_ONLY === '1' || process.env.WECHAT_UI_TEST_GENERATED_IMAGES_ONLY === '1') app.commandLine.appendSwitch('force-device-scale-factor', '1');
 const report = { ok: false, runId: process.env.WECHAT_UI_TEST_RUN_ID || null, assertions: [], errors: [], screenshots: [], at: new Date().toISOString() };
 let window;
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -43,6 +46,12 @@ async function waitFor(fn, args = [], timeout = 16000) {
   throw new Error('UI wait timed out: ' + fn.toString().slice(0, 220));
 }
 async function click(selector) {
+  if (selector.includes('nav-')) {
+    await evaluate(selector => {
+      const target = document.querySelector(selector), toggle = document.querySelector('[data-testid=mobile-navigation]');
+      if (target && !isVisible(target) && isVisible(toggle)) toggle.click();
+    }, selector);
+  }
   await waitFor(s => Array.from(document.querySelectorAll(s)).some(el => isUsable(el)), [selector]);
   await evaluate(s => { const el = Array.from(document.querySelectorAll(s)).find(el => isUsable(el)); el.scrollIntoView({ block: 'center' }); el.click(); }, selector);
 }
@@ -89,7 +98,7 @@ async function assertLayout(label) {
   });
   assert(result.document <= result.viewport + 1 && [result.panel, result.shell, result.workspace].every(([client, scroll]) => scroll <= client + 1), label + ' has horizontal overflow: ' + JSON.stringify(result));
 }
-function check(name) { report.assertions.push(name); }
+function check(name) { report.assertions.push(name); console.log('[ui ' + report.assertions.length + '] ' + name); }
 const peer = (state, id) => state.conversations.find(item => item.peerId === id);
 
 async function waitForReasoning(expectedValue = '') {
@@ -408,8 +417,12 @@ async function verifyMemory() {
   const selectedKey = name => evaluate(name => Array.from(document.querySelector('[aria-label="选择会话"]').options).find(option => option.textContent.includes(name)).value, name);
   const assertPanel = async id => {
     assert(await evaluate(id => {
-      return document.querySelector('#wa-memory-tab-' + id).getAttribute('aria-selected') === 'true' &&
-        ['conversation', 'global', 'images', 'review'].every(tab => isVisible(document.querySelector('#wa-memory-panel-' + tab)) === (tab === id));
+      return ['conversation', 'global', 'roles', 'images', 'generated-images', 'review'].every(tab => {
+        const button = document.querySelector('#wa-memory-tab-' + tab), panel = document.querySelector('#wa-memory-panel-' + tab);
+        return button?.getAttribute('aria-selected') === String(tab === id) && button.tabIndex === (tab === id ? 0 : -1) &&
+          button.getAttribute('aria-controls') === panel?.id && panel.getAttribute('aria-labelledby') === button.id &&
+          isVisible(panel) === (tab === id);
+      });
     }, id), id + ' must be the only visible memory panel');
   };
   const overview = async memoryDoc => {
@@ -458,7 +471,11 @@ async function verifyMemory() {
   check('image failures show grouped causes; unsuccessful retry reports remaining failures; success clears stale errors and keeps thumbnail limits');
 
   await evaluate(() => document.querySelector('#wa-memory-tab-conversation').focus());
-  for (const [keyCode, tab] of [['Right', 'global'], ['Left', 'conversation'], ['Left', 'review'], ['Right', 'conversation'], ['End', 'review'], ['Left', 'images'], ['Home', 'conversation']]) {
+  for (const [keyCode, tab] of [
+    ['Right', 'global'], ['Right', 'roles'], ['Right', 'images'], ['Right', 'generated-images'], ['Right', 'review'], ['Right', 'conversation'],
+    ['Left', 'review'], ['Left', 'generated-images'], ['Left', 'images'], ['Left', 'roles'], ['Left', 'global'], ['Left', 'conversation'],
+    ['End', 'review'], ['Home', 'conversation'],
+  ]) {
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode });
     await waitFor(tab => document.activeElement?.id === 'wa-memory-tab-' + tab && document.activeElement.getAttribute('aria-selected') === 'true', [tab]);
     await assertPanel(tab);
@@ -475,7 +492,7 @@ async function verifyMemory() {
   await clickText('撤销修改', globalPanel); assert.equal(await value('[aria-label="全局通用备注"]'), '');
   await input('[aria-label="全局通用备注"]', globalNotes);
   await clickText('会话记忆'); assert.equal(await value('[aria-label="记忆摘要"]'), localSummary);
-  check('real arrow/Home/End keys select and focus all four memory tabs including review; unsaved local/global drafts survive switching and undo restores each saved value');
+  check('real arrow/Home/End keys select and focus all six memory tabs with wraparound and matching accessible panels; unsaved local/global drafts survive switching and undo restores each saved value');
 
   await fixture('holdNext', { endpoint: 'memory.edit' }); await clickText('保存记忆', localPanel);
   await waitFor(async () => (await window.__uiFixture('heldRequest', { endpoint: 'memory.edit' })).started);
@@ -554,7 +571,15 @@ async function verifyMemory() {
 
 async function verifyImageMemory() {
   const panel = '#wa-memory-panel-images';
-  await click('[data-testid="nav-memory"]'); await clickText('图片记忆');
+  const pressImageKey = async (keyCode, modifiers = []) => {
+    window.webContents.focus();
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode, modifiers });
+    // A raw keyDown alone does not perform Chromium's native Enter activation.
+    if (keyCode === 'Enter') window.webContents.sendInputEvent({ type: 'char', keyCode: '\r', modifiers });
+    window.webContents.sendInputEvent({ type: 'keyUp', keyCode, modifiers });
+    await pause(60);
+  };
+  await click('[data-testid="nav-memory"]'); await clickText('会话图片记忆');
   const samples = await fixture('seedImageMemory');
   const alpha = samples.find(item => item.scope.peerId === 'group_alpha@chatroom'), beta = samples.find(item => item.scope.peerId === 'group_beta@chatroom'), privateImage = samples.find(item => item.scope.chatType === 'private');
   const choose = choice => input(panel + ' [aria-label="选择会话"]', choice);
@@ -563,11 +588,19 @@ async function verifyImageMemory() {
   await input('[aria-label="搜索图片记忆"]', 'ALPHA_IMAGE_NOTE');
   await waitFor(() => document.querySelectorAll('#wa-memory-panel-images [data-image-memory-id]').length === 1);
   await waitFor(() => document.querySelector('#wa-memory-panel-images .wa-image-open img')?.complete);
-  await click(`[data-image-memory-id="${alpha.id}"] .wa-image-open`);
+  await evaluate(id => document.querySelector(`[data-image-memory-id="${id}"] .wa-image-open`).focus(), alpha.id);
+  await pressImageKey('Enter');
   await waitFor(() => document.querySelector('[role="dialog"][aria-label="图片记忆预览"] .wa-image-preview')?.complete);
   assert((await evaluate(() => document.querySelector('[role="dialog"][aria-label="图片记忆预览"]').textContent)).includes('原图'));
+  await waitFor(() => document.activeElement?.textContent.trim() === '关闭图片预览');
+  await pressImageKey('Tab', ['shift']);
+  assert.equal(await evaluate(() => document.activeElement?.textContent.trim()), '删除这张图片记忆');
+  await pressImageKey('Tab');
+  assert.equal(await evaluate(() => document.activeElement?.textContent.trim()), '关闭图片预览');
   await screenshot('image-memory-preview-desktop-dark'); await screenshot('image-memory-preview-desktop-light', 'light');
-  await clickText('关闭图片预览', '[aria-label="图片记忆预览"]');
+  await pressImageKey('Escape');
+  await waitFor(id => !document.querySelector('[aria-label="图片记忆预览"]') && document.activeElement === document.querySelector(`[data-image-memory-id="${id}"] .wa-image-open`), [alpha.id]);
+  check('image preview opens from Enter, traps real Tab and Shift+Tab, and Escape restores focus to the original image');
   for (const [choice, sample] of [['group:group_beta@chatroom', beta], ['private:wxid_alice', privateImage]]) {
     await choose(choice); await findCard(sample.id);
     assert.equal(await evaluate(id => !!document.querySelector(`#wa-memory-panel-images [data-image-memory-id="${id}"]`), alpha.id), false);
@@ -582,12 +615,21 @@ async function verifyImageMemory() {
   await input('[aria-label="图片记忆保留天数"]', '');
   await screenshot('image-memory-desktop-dark'); await screenshot('image-memory-desktop-light', 'light');
   window.setContentSize(430, 900); await assertLayout('narrow image memory'); await screenshot('image-memory-narrow-dark'); await screenshot('image-memory-narrow-light', 'light');
-  await click(`[data-image-memory-id="${alpha.id}"] .wa-image-open`); await waitFor(() => document.querySelector('.wa-image-preview')?.complete);
+  await evaluate(id => document.querySelector(`[data-image-memory-id="${id}"] .wa-image-open`).focus(), alpha.id);
+  await pressImageKey('Enter'); await waitFor(() => document.querySelector('.wa-image-preview')?.complete);
   await assertLayout('narrow image preview'); await screenshot('image-memory-preview-narrow-light', 'light');
   await clickText('删除这张图片记忆', '[aria-label="图片记忆预览"]');
   await fixture('failNext', { endpoint: 'memory.images.delete' }); await clickText('确认删除图片记忆', '[aria-label="图片记忆预览"]');
-  await waitFor(() => document.querySelector('#wa-memory-panel-images [role="alert"]')?.textContent.includes('模拟保存失败'));
+  await waitFor(() => document.querySelector('[aria-label="图片记忆预览"] .wa-image-delete [role="alert"]')?.textContent.includes('模拟保存失败'));
   assert((await fixture('imageMemory')).items.some(item => item.id === alpha.id));
+  await screenshot('image-memory-delete-failed-narrow-light', 'light');
+  await pressImageKey('Escape');
+  await waitFor(id => !document.querySelector('[aria-label="图片记忆预览"]') && document.activeElement === document.querySelector(`[data-image-memory-id="${id}"] .wa-image-open`), [alpha.id]);
+  await pressImageKey('Enter'); await waitFor(() => document.querySelector('.wa-image-preview')?.complete);
+  await clickText('删除这张图片记忆', '[aria-label="图片记忆预览"]');
+  assert.equal(await evaluate(() => !!document.querySelector('[aria-label="图片记忆预览"] .wa-image-delete [role="alert"]')), false, 'Reopening deletion must not show the previous attempt error');
+  await fixture('failNext', { endpoint: 'memory.images.delete' }); await clickText('确认删除图片记忆', '[aria-label="图片记忆预览"]');
+  await waitFor(() => document.querySelector('[aria-label="图片记忆预览"] .wa-image-delete [role="alert"]')?.textContent.includes('模拟保存失败'));
   await clickText('确认删除图片记忆', '[aria-label="图片记忆预览"]');
   await waitFor(() => !document.querySelector('[aria-label="图片记忆预览"]'));
   assert(!(await fixture('imageMemory')).items.some(item => item.id === alpha.id));
@@ -596,7 +638,7 @@ async function verifyImageMemory() {
   await waitFor(() => document.querySelector('#wa-memory-panel-images [role="status"]')?.textContent.includes('保存已结束'));
   assert(!(await fixture('imageMemory')).items.some(item => item.id === alpha.id));
   window.setContentSize(1280, 940);
-  check('image memory renders real original and thumbnail previews, scopes group/private search, saves or clears retention, fits narrow screens, and preserves a failed deletion until retry without resurrecting it');
+  check('image memory renders real original and thumbnail previews, scopes group/private search, saves or clears retention, fits narrow screens, shows deletion failures inside its dialog, restores cancelled focus, and retries without resurrecting deleted images');
 }
 
 async function verifyTasks() {
@@ -719,6 +761,120 @@ async function verifyAdministrators() {
   check('removing a global administrator persists without altering conversation-specific administrators');
 }
 
+async function verifyMomentsLikes() {
+  await click('[data-testid="nav-moments"]'); await click('[data-testid="moments-tab-friends"]');
+  await waitFor(() => document.querySelectorAll('.wa-friend-post').length === 3 && !document.querySelector('.wa-likes-fields').disabled);
+  assert.equal(await evaluate(() => !!document.querySelector('[data-post-id="9007199254740997"]')), false);
+  assert.equal(await evaluate(() => !!document.querySelector('[aria-label="点赞动态 91002"]')), false);
+  assert(await evaluate(() => document.querySelector('[data-post-id="91002"]').textContent.includes('已点赞')));
+  const initial = (await fixture('momentLikes')).list;
+  assert.equal(initial.settings.enabled, false); assert.equal(initial.settings.respondToRequests, true);
+  assert.deepEqual(initial.settings.userIds, []);
+  await clickText('继续读取好友动态');
+  await waitFor(() => document.querySelectorAll('.wa-friend-post').length === 5);
+  assert.equal(await evaluate(() => document.querySelectorAll('[data-post-id="91001"]').length), 1);
+  assert((await fixture('momentLikes')).reads.every(query => query.limit === 20));
+  check('friend feed excludes the current account, preserves read-only existing likes, and deduplicates 20-item pagination');
+
+  await fixture('holdNext', { endpoint: 'moments.write' });
+  await evaluate(() => { const button = document.querySelector('[aria-label="点赞动态 91001"]'); button.click(); button.click(); });
+  await waitFor(async () => (await window.__uiFixture('heldRequest', { endpoint: 'moments.write' })).started);
+  assert.equal((await fixture('momentLikes')).requests.filter(row => row.endpoint === 'moments.write').length, 1);
+  await waitFor(() => document.querySelector('[data-post-id="91001"]').textContent.includes('等待微信确认'));
+  await fixture('releaseRequest', { endpoint: 'moments.write' });
+  await waitFor(() => document.querySelector('[data-post-id="91001"]').textContent.includes('已点赞'));
+  assert(await evaluate(() => document.querySelector('[data-post-id="91001"]').textContent.includes('7 个赞')));
+  const firstWrite = (await fixture('momentLikes')).requests.find(row => row.endpoint === 'moments.write').payload;
+  assert.match(firstWrite.requestId, /^ui-moments-[a-f0-9-]{36}$/); assert.equal(firstWrite.accountId, 'wxid_ui_fixture');
+  await click('[aria-label="点赞动态 91004"]');
+  await waitFor(() => document.querySelector('[data-post-id="91004"]').textContent.includes('已点赞（微信核实）'));
+  await click('[aria-label="点赞动态 91003"]');
+  await waitFor(() => document.querySelector('[data-post-id="91003"]').textContent.includes('此条不会再次提交'));
+  await click('[aria-label="点赞动态 91005"]');
+  await waitFor(() => document.querySelector('[data-post-id="91005"]').textContent.includes('合成点赞失败'));
+  await waitFor(() => isUsable(document.querySelector('[aria-label="重试点赞动态 91005"]')));
+  assert(await evaluate(() => document.querySelector('[data-post-id="91005"]').textContent.includes('未提交成功')));
+  assert.equal(await evaluate(() => !!document.querySelector('[aria-label="重试点赞动态 91003"]')), false);
+  await click('[aria-label="重试点赞动态 91005"]');
+  await waitFor(() => document.querySelector('[data-post-id="91005"]').textContent.includes('已点赞'));
+  const retryRequests = (await fixture('momentLikes')).requests.filter(row => row.endpoint === 'moments.write' && row.payload.postId === '91005');
+  assert.equal(retryRequests.length, 2); assert.notEqual(retryRequests[0].payload.requestId, retryRequests[1].payload.requestId);
+  check('definite not-sent failures offer an explicit retry with a new request ID while unknown results remain read-only');
+  const beforeRefresh = (await fixture('momentLikes')).requests.filter(row => row.endpoint === 'moments.write').length;
+  await clickText('刷新好友动态'); await waitFor(() => document.querySelectorAll('.wa-friend-post').length === 3);
+  assert.equal(await evaluate(() => !!document.querySelector('[aria-label="点赞动态 91003"]')), false);
+  await click('[data-testid="moments-tab-posts"]'); await click('[data-testid="moments-tab-friends"]');
+  await waitFor(() => document.querySelector('[data-post-id="91003"]')?.textContent.includes('结果不明'));
+  assert.equal((await fixture('momentLikes')).requests.filter(row => row.endpoint === 'moments.write').length, beforeRefresh);
+  check('manual likes lock synchronously, accept verified ACKs without inventing counts, and retain unknown operations across refresh and tab navigation');
+
+  // Deliberately ignore transport cancellation so the UI must reject stale results itself.
+  await evaluate(() => { window.__likesOriginalFetch = window.fetch; window.fetch = (url, options) => { let endpoint; try { endpoint = JSON.parse(options?.body || '{}').endpoint; } catch {} return window.__likesOriginalFetch(url, endpoint === 'moments.read' ? { ...options, signal: undefined } : options); }; });
+  await input('[aria-label="好友动态范围"]', 'user'); await input('[aria-label="好友动态查询对象"]', 'Alice');
+  await fixture('holdNext', { endpoint: 'moments.read' }); await clickText('读取好友动态');
+  await waitFor(async () => (await window.__uiFixture('heldRequest', { endpoint: 'moments.read' })).started);
+  await input('[aria-label="好友动态查询对象"]', 'wxid_bob'); await clickText('读取好友动态');
+  await waitFor(() => document.querySelectorAll('.wa-friend-post').length === 3 && !!document.querySelector('[data-post-id="91005"]'));
+  await fixture('releaseRequest', { endpoint: 'moments.read' }); await pause(180);
+  assert.equal(await evaluate(() => !!document.querySelector('[data-post-id="91001"]')), false);
+  assert.equal(await value('[aria-label="好友动态查询对象"]'), 'wxid_bob');
+  await fixture('failNext', { endpoint: 'moments.read' }); await clickText('刷新好友动态');
+  await waitFor(() => document.querySelector('.wa-friend-feed [role="alert"]')?.textContent.includes('模拟保存失败'));
+  await clickText('读取好友动态'); await waitFor(() => !!document.querySelector('[data-post-id="91004"]'));
+  check('exact user queries discard delayed responses after target changes even when abort is ignored; read failures remain retryable');
+
+  await click('[aria-label="开启定时点赞"]');
+  assert.equal(await evaluate(() => [...document.querySelectorAll('button')].find(button => button.textContent === '保存点赞设置').disabled), true);
+  await click('[aria-label="开启定时点赞"]');
+  await click('[aria-label="自动点赞好友 Alice·产品同事 wxid_alice"]');
+  await input('[aria-label="每轮最多点赞"]', '1'); await input('[aria-label="每天最多点赞"]', '2');
+  await click('[aria-label="包含开启前的动态"]');
+  await fixture('failNext', { endpoint: 'moments.likes.configure' }); await clickText('保存点赞设置');
+  await waitFor(() => document.querySelector('[data-testid="moments-likes-settings"] [role="alert"]')?.textContent.includes('模拟保存失败'));
+  assert.deepEqual((await fixture('momentLikes')).list.settings.userIds, []);
+  assert.equal(await evaluate(() => document.querySelector('[aria-label="自动点赞好友 Alice·产品同事 wxid_alice"]').checked), true);
+  await clickText('保存点赞设置');
+  await waitFor(async () => (await window.__uiFixture('momentLikes')).list.settings.userIds[0] === 'wxid_alice');
+  const saved = (await fixture('momentLikes')).list.settings;
+  assert.equal(saved.enabled, false); assert.equal(saved.respondToRequests, true); assert.equal(saved.maxLikesPerRun, 1); assert.equal(saved.maxLikesPerDay, 2);
+  await clickText('立即执行一轮');
+  await waitFor(async () => (await window.__uiFixture('momentLikes')).list.records.some(row => row.postId === '91003' && row.state === 'unknown'));
+  await waitFor(() => document.querySelector('[data-testid="moments-likes-history"]')?.textContent.includes('合成点赞未收到确认'));
+  assert.equal((await fixture('momentLikes')).list.today.attempted, 1);
+  assert.equal((await fixture('momentLikes')).list.today.liked, 0);
+  const autoWrites = (await fixture('momentWrites')).length;
+  await clickText('立即执行一轮'); await waitFor(async () => (await window.__uiFixture('momentLikes')).list.runs.length === 2);
+  assert.equal((await fixture('momentWrites')).length, autoWrites);
+  check('automatic settings save exact contact IDs, preserve failed drafts, validate empty selections, and show durable unknown history without replaying a consumed post');
+  await fixture('momentLikeReadGate', { mode: 'hold' }); await clickText('立即执行一轮');
+  await waitFor(async () => (await window.__uiFixture('momentLikeReadGate', { mode: 'status' })).started);
+  await clickText('停止本轮');
+  await waitFor(async () => (await window.__uiFixture('momentLikes')).list.lastRun?.state === 'cancelled');
+  await fixture('momentLikeReadGate', { mode: 'release' });
+  assert.equal((await fixture('momentWrites')).length, autoWrites);
+  assert.equal((await fixture('momentLikes')).requests.filter(row => row.endpoint === 'moments.likes.cancel').length, 1);
+  check('an active automatic round can be cancelled without submitting another like');
+  await assertLayout('friend moments desktop'); await screenshot('moments-friends-desktop-light', 'light');
+  window.setContentSize(430, 900); await assertLayout('friend moments narrow');
+  await screenshot('moments-friends-narrow-dark', 'dark');
+  await screenshot('moments-likes-settings-narrow-light', 'light', '[data-testid="moments-likes-settings"]');
+  check('friend feed and automatic settings fit narrow light/dark layouts');
+
+  await input('[aria-label="好友动态查询对象"]', 'Alice'); await fixture('holdNext', { endpoint: 'moments.read' }); await clickText('读取好友动态');
+  await waitFor(async () => (await window.__uiFixture('heldRequest', { endpoint: 'moments.read' })).started);
+  await fixture('switchAccount');
+  await waitFor(() => document.querySelector('[data-testid="moments-tab-posts"]')?.getAttribute('aria-selected') === 'true' && !document.querySelector('[data-testid="moments-friends"]'));
+  await click('[data-testid="moments-tab-friends"]');
+  await waitFor(() => document.querySelector('[data-testid="moments-friends"]')?.dataset.accountId === 'wxid_ui_other' && !document.querySelector('.wa-friend-post'));
+  await fixture('releaseRequest', { endpoint: 'moments.read' }); await pause(180);
+  await waitFor(() => !document.querySelector('.wa-likes-fields').disabled);
+  assert.equal(await evaluate(() => !!document.querySelector('.wa-likes-record') || !!document.querySelector('.wa-friend-post')), false);
+  assert.equal(await evaluate(() => document.querySelector('[aria-label="开启定时点赞"]').checked), false);
+  assert.equal(await evaluate(() => !!document.querySelector('[aria-label="移除自动点赞好友 wxid_alice"]')), false);
+  await evaluate(() => { window.fetch = window.__likesOriginalFetch; delete window.__likesOriginalFetch; });
+  check('account changes clear the feed, selected friends, settings drafts, and execution history while discarding pending reads');
+}
+
 app.whenReady().then(async () => {
   window = new BrowserWindow({ show: false, width: 1280, height: 940, useContentSize: true, autoHideMenuBar: true, backgroundColor: '#1b1d22',
     webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false, offscreen: true } });
@@ -728,11 +884,81 @@ app.whenReady().then(async () => {
     if ((severity === 'error' || severity === 3) && !text.includes('favicon.ico')) report.errors.push(text.slice(0, 600));
   });
   window.webContents.on('render-process-gone', (_event, details) => report.errors.push('Renderer exited: ' + details.reason));
-  const watchdog = setTimeout(() => { report.failure = 'UI verification exceeded 210 seconds'; fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2)); app.exit(1); }, 210000);
+  const watchdog = setTimeout(() => { report.failure = 'UI verification exceeded ' + suiteTimeoutMs + ' milliseconds'; fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2)); app.exit(1); }, suiteTimeoutMs);
   try {
     await window.loadURL(origin);
     await waitFor(() => typeof window.__uiFixture === 'function' && document.querySelector('.wa-account-name')?.textContent.includes('界面测试'));
     assert.equal((await fixture('state')).account.id, 'wxid_ui_fixture', 'Refuse to operate outside the synthetic fixture');
+
+    if (process.env.WECHAT_UI_TEST_ROLE_CARDS_ONLY === '1') {
+      await require('./test-role-cards-ui.cjs')({ evaluate, waitFor, click, clickText, input, fixture,
+        screenshot, assertLayout, check, resize: (width, height) => window.setContentSize(width, height) });
+      assert.deepEqual(report.errors, []); report.ok = true; return;
+    }
+
+    if (process.env.WECHAT_UI_TEST_GENERATED_IMAGES_ONLY === '1') {
+      await require('./test-generated-images-ui.cjs')({ evaluate, waitFor, click, clickText, input, fixture,
+        screenshot, assertLayout, check, resize: (width, height) => window.setContentSize(width, height) });
+      assert.deepEqual(report.errors, []); report.ok = true; return;
+    }
+
+    if (process.env.WECHAT_UI_TEST_AUTHORIZATION_ONLY === '1') {
+      await require('./test-authorization-ui.cjs')({ evaluate, waitFor, click, clickText, input, fixture, stateMatches,
+        screenshot, assertLayout, check, resize: (width, height) => window.setContentSize(width, height) });
+      assert.deepEqual(report.errors, []); report.ok = true; return;
+    }
+
+    if (process.env.WECHAT_UI_TEST_CLEANUP_ONLY === '1') {
+      await fixture('seedCleanup');
+      await click('[data-testid="nav-assets"]'); await clickText('朋友圈素材');
+      await waitFor(() => document.querySelectorAll('[data-material-id]').length === 3);
+      await click('[aria-label="选择素材 清理样本 0"]'); await click('[aria-label="选择素材 清理样本 1"]');
+      await clickText('删除选中 2 条素材'); await waitFor(() => document.querySelector('.wa-cleanup-control [role="alert"]')?.textContent.includes('将删除 2 条'));
+      await clickText('取消清理'); assert.equal((await fixture('momentMaterials')).items.length, 3);
+      await clickText('删除选中 2 条素材'); await clickText('确认删除 2 条');
+      await waitFor(() => document.querySelectorAll('[data-material-id]').length === 1);
+      check('material selection previews an exact count, cancels safely and deletes through owner RPC');
+      await clickText('清空素材库'); await clickText('取消清理'); await clickText('清空素材库');
+      await fixture('seedCleanup', { arrive: true });
+      window.setContentSize(430, 900); await assertLayout('cleanup confirmation narrow'); await screenshot('cleanup-materials-narrow-light', 'light', '.wa-cleanup-control [role="alert"]');
+      await clickText('确认删除 1 条');
+      await waitFor(async () => (await window.__uiFixture('momentMaterials')).items.length === 1 && (await window.__uiFixture('momentMaterials')).items[0].title === '确认后新增');
+      check('clear-all confirmation preserves materials created after its snapshot');
+      await click('[data-testid="moments-materials"] details > summary'); await click('[aria-label="允许素材按需生图"]'); await clickText('保存取材设置');
+      await waitFor(async () => (await window.__uiFixture('momentMaterials')).settings.generatedImagesEnabled === true);
+      check('optional image generation permission saves independently of chat and web permissions');
+      window.setContentSize(1280, 940);
+      await click('[data-testid="nav-moments"]'); await clickText('自动发布', '[role="tablist"]');
+      await waitFor(() => document.querySelectorAll('.wa-moments-records .wa-wb-list-item').length === 3);
+      await click('.wa-moments-records .wa-wb-list-item'); await clickText('删除这条记录'); await clickText('确认删除 1 条');
+      await waitFor(() => document.querySelectorAll('.wa-moments-records .wa-wb-list-item').length === 2);
+      await clickText('清空发布记录'); await assertLayout('publishing cleanup desktop'); await screenshot('cleanup-publishing-desktop-light', 'light', '.wa-moments-records'); await clickText('确认删除 2 条');
+      await waitFor(() => document.querySelectorAll('.wa-moments-records .wa-wb-list-item').length === 0);
+      assert.equal((await fixture('momentWrites')).length, 0);
+      check('single and all publishing cleanup remove drafts without publishing or deleting WeChat posts');
+      await clickText('定时回复', '[role="tablist"]'); await clickText('删除回复记录'); await clickText('确认删除 1 条');
+      await waitFor(() => document.querySelector('.wa-moments-replies')?.textContent.includes('尚无记录'));
+      await clickText('好友动态', '[role="tablist"]'); await clickText('清空执行轮次'); await clickText('确认删除 1 条');
+      await clickText('删除点赞记录'); await clickText('确认删除 1 条');
+      await waitFor(() => document.querySelector('.wa-likes-history')?.textContent.includes('暂无执行记录'));
+      check('reply and like cleanup reach the correct record categories');
+      await fixture('taskHistory'); await click('[data-testid="nav-tasks"]'); await click('[data-testid="task-tab-history"]');
+      await waitFor(() => document.querySelectorAll('.wa-task-history-row').length === 20);
+      await clickText('清空任务历史');
+      await waitFor(() => document.querySelector('.wa-cleanup-control [role="alert"]')?.textContent.includes('将删除 27 条'));
+      assert(await evaluate(() => document.querySelector('.wa-cleanup-control [role="alert"]').textContent.includes('另有 1 条')));
+      await clickText('确认删除 27 条'); await waitFor(() => document.querySelectorAll('.wa-task-history-row').length === 1);
+      await click('[data-testid="task-tab-current"]'); await waitFor(() => document.querySelectorAll('.wa-task').length === 3);
+      check('task clear-all covers off-page history and preserves active schedules and unknown outcomes');
+      await click('[data-testid="nav-digests"]'); await clickText('清空历史简报'); await clickText('确认删除 1 条');
+      await waitFor(() => document.querySelectorAll('.wa-digest-index .wa-wb-list-item').length === 0);
+      check('digest clear-all removes only the owner selected historical summaries');
+      assert.deepEqual(report.errors, []); report.ok = true; return;
+    }
+
+    if (process.env.WECHAT_UI_TEST_LIKES_ONLY === '1') {
+      await verifyMomentsLikes(); assert.deepEqual(report.errors, [], 'Browser errors must be resolved'); report.ok = true; return;
+    }
 
     if (process.env.WECHAT_UI_TEST_PERSONA_ONLY === '1') {
       const initial = await fixture('state');
@@ -779,11 +1005,159 @@ app.whenReady().then(async () => {
       check('conversation links open the same global editor; authorizations and conversation count remain intact');
       assert.deepEqual(report.errors,[]); report.ok=true; return;
     }
+    if (process.env.WECHAT_UI_TEST_ARRANGEMENT_ONLY === '1') {
+      await click('[data-testid="nav-moments"]'); await clickText('自动发布', '[role="tablist"]');
+      await waitFor(() => document.querySelector('[data-testid="moments-arrangement"]'));
+      assert.equal((await fixture('state')).moments.publishing.settings.automatic.enabled, false);
+      check('automatic arranging is off on existing accounts until explicitly selected');
+      await click('[aria-label="按每天次数自动生成发布计划"]');
+      await input('[aria-label="每天自动安排条数"]', '2');
+      await input('[aria-label="自动安排开始时间"]', '07:00'); await input('[aria-label="自动安排结束时间"]', '23:00');
+      await click('.wa-moments-arrangement-content > summary');
+      await input('[aria-label="自动安排发布方式"]', 'review');
+      await input('[aria-label="自动安排内容要求"]', '可以轻松一点，长短自然变化。');
+      await pause(3300); assert.equal(await value('[aria-label="自动安排内容要求"]'), '可以轻松一点，长短自然变化。');
+      await clickText('读取微信标签与联系人'); await waitFor(() => document.querySelector('[aria-label="屏蔽标签 产品同事"]'));
+      await click('[aria-label="屏蔽标签 产品同事"]');
+      await clickText('保存自动发布设置');
+      await stateMatches(state => state.moments.publishing.settings.automatic.enabled && state.moments.publishing.plans.length >= 4);
+      let publishing = (await fixture('state')).moments.publishing;
+      assert.equal(publishing.settings.enabled, false); assert.equal(publishing.settings.automatic.dailyCount, 2);
+      assert(publishing.plans.every(plan => plan.automatic && plan.settings.reviewRequired && plan.settings.blockedLabelIds.includes('1')));
+      assert.equal((await fixture('momentWrites')).length, 0);
+      check('saving daily frequency creates one-off plans immediately, inherits review and audience, and preserves unsaved edits during polling');
+      await assertLayout('automatic arrangement desktop'); await screenshot('arrangement-desktop-light', 'light');
+      await screenshot('arrangement-fields-desktop-light', 'light', '.wa-moments-arrangement');
+      window.setContentSize(430, 900); await assertLayout('automatic arrangement narrow'); await screenshot('arrangement-narrow-dark', 'dark');
+      window.setContentSize(320, 850); await assertLayout('automatic arrangement smallest'); await screenshot('arrangement-small-light', 'light');
+      await screenshot('arrangement-fields-small-light', 'light', '.wa-moments-arrangement .wa-wb-generator');
+      window.setContentSize(1280, 940);
+      await click('.wa-moments-arrangement-content > summary');
+      const edited = publishing.plans.find(plan => plan.automatic && plan.nextRunAt > Date.now());
+      await clickText('编辑计划', '[data-plan-id="' + edited.id + '"]');
+      await input('[aria-label="发布计划名称"]', '我自己调整的自动计划'); await input('[aria-label="发布主题"]', '窗边的小观察');
+      assert.equal(await evaluate(() => document.querySelector('[aria-label="发布计划周期"]').disabled), true);
+      await clickText('保存发布计划');
+      await stateMatches(state => state.moments.publishing.plans.some(plan => plan.settings.name === '我自己调整的自动计划' && plan.automatic.edited));
+      await clickText('新增发布计划'); await input('[aria-label="发布计划名称"]', '我手动添加的晚间计划');
+      await input('[aria-label="每天发布时间"]', '23:30'); await click('[aria-label="保存并开启发布计划"]'); await clickText('保存发布计划');
+      await stateMatches(state => state.moments.publishing.plans.some(plan => !plan.automatic && plan.settings.name === '我手动添加的晚间计划'));
+      check('generated plans remain individually editable and manual recurring plans can coexist');
+      await screenshot('arrangement-plan-list', 'light', '.wa-moments-plan-list');
+      publishing = (await fixture('state')).moments.publishing;
+      const removable = publishing.plans.find(plan => plan.automatic && !plan.automatic.edited && plan.nextRunAt > Date.now());
+      await clickText('删除计划', '[data-plan-id="' + removable.id + '"]'); await clickText('确认删除计划', '[data-plan-id="' + removable.id + '"]');
+      await stateMatches((state, id) => !state.moments.publishing.plans.some(plan => plan.id === id), removable.id);
+      await input('[aria-label="每天自动安排条数"]', '3'); await clickText('保存自动发布设置');
+      await stateMatches(state => state.moments.publishing.settings.automatic.dailyCount === 3);
+      publishing = (await fixture('state')).moments.publishing;
+      assert(!publishing.plans.some(plan => plan.id === removable.id));
+      assert.equal(publishing.plans.find(plan => plan.id === edited.id).settings.name, '我自己调整的自动计划');
+      await clickText('暂停计划', '[data-plan-id="' + edited.id + '"]');
+      await stateMatches((state, id) => !state.moments.publishing.plans.find(plan => plan.id === id).settings.enabled, edited.id);
+      check('rule changes retain owner edits and deletions, and individual automatic plans can be paused');
+      await click('[aria-label="按每天次数自动生成发布计划"]'); await clickText('保存自动发布设置');
+      await stateMatches(state => !state.moments.publishing.settings.automatic.enabled);
+      assert((await fixture('state')).moments.publishing.plans.some(plan => !plan.automatic && plan.settings.enabled));
+      assert.equal((await fixture('momentWrites')).length, 0);
+      check('turning off automatic arranging retains manual plans and no fixture post was submitted');
+      assert.deepEqual(report.errors, []); report.ok = true; return;
+    }
+    if (process.env.WECHAT_UI_TEST_MATERIALS_ONLY === '1') {
+      await click('[data-testid="nav-assets"]'); await clickText('朋友圈素材');
+      await waitFor(() => document.querySelector('[data-testid="moments-materials"]'));
+      assert.equal((await fixture('momentMaterials')).settings.enabled, false);
+      assert.equal((await fixture('momentMaterials')).settings.sources.length, 0);
+      check('independent material library starts with no chat sources and automatic organizing off');
+      await clickText('记一条素材'); await input('[aria-label="朋友圈素材标题"]', '留一点空白');
+      await input('[aria-label="朋友圈素材内容"]', '有时桌上留一块空地方，看着就很舒服。');
+      await pause(3300); assert.equal(await value('[aria-label="朋友圈素材内容"]'), '有时桌上留一块空地方，看着就很舒服。');
+      await clickText('保存朋友圈素材');
+      await waitFor(async () => (await window.__uiFixture('momentMaterials')).items.length === 1);
+      const noteId = (await fixture('momentMaterials')).items[0].id;
+      await clickText('编辑素材', '[data-material-id="' + noteId + '"]');
+      await input('[aria-label="朋友圈素材内容"]', '留一块空白，随时放下新的想法。'); await clickText('保存朋友圈素材');
+      await waitFor(async () => (await window.__uiFixture('momentMaterials')).items[0].text === '留一块空白，随时放下新的想法。');
+      check('manual text creates and edits durably while polling preserves unsaved content');
+      await evaluate(async () => {
+        const canvas = document.createElement('canvas'); canvas.width = canvas.height = 128;
+        const ctx = canvas.getContext('2d'); ctx.fillStyle = '#527c69'; ctx.fillRect(0, 0, 128, 128);
+        const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+        const transfer = new DataTransfer(); transfer.items.add(new File([blob], '窗边的绿色.png', { type: 'image/png' }));
+        const uploader = document.querySelector('[aria-label="上传朋友圈素材图片"]'); uploader.files = transfer.files; uploader.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      await waitFor(() => document.querySelector('[data-testid="material-editor"]'));
+      await input('[aria-label="朋友圈图片来源"]', 'artwork'); await clickText('保存朋友圈素材');
+      await waitFor(async () => (await window.__uiFixture('momentMaterials')).items.some(item => item.kind === 'image' && item.text));
+      const picture = (await fixture('momentMaterials')).items.find(item => item.kind === 'image');
+      assert.equal(picture.imageOrigin, 'artwork'); assert.equal(picture.imageUse, 'publish');
+      await waitFor(() => Array.from(document.querySelectorAll('.wa-material-thumbnail')).some(image => image.complete && image.naturalWidth === 128));
+      check('real PNG upload saves bytes and automatic description and displays its image');
+      await click('[data-testid="moments-materials"] details > summary');
+      await click('[aria-label="素材取材 产品讨论组"]'); await clickText('保存取材设置');
+      await waitFor(async () => (await window.__uiFixture('momentMaterials')).settings.sources.length === 1);
+      await clickText('整理一次素材');
+      await waitFor(async () => (await window.__uiFixture('momentMaterials')).items.some(item => item.origin === 'chat'));
+      const organized = (await fixture('momentMaterials')).items.find(item => item.origin === 'chat');
+      assert.equal(organized.sources[0].peerId, 'group_alpha@chatroom');
+      await clickText('整理一次素材');
+      await waitFor(async () => (await window.__uiFixture('momentMaterials')).lastRun.state === 'empty');
+      check('selected conversations organize safe material with private provenance and no duplicate processing');
+      await click('[aria-label="自动整理朋友圈素材"]'); await clickText('保存取材设置');
+      await waitFor(async () => (await window.__uiFixture('momentMaterials')).settings.enabled);
+      assert.equal((await fixture('momentMaterials')).settings.intervalMinutes, 180);
+      check('automatic organizing saves an explicit source and a three-hour interval');
+      assert.equal((await fixture('momentMaterials')).settings.webImagesEnabled, false);
+      await click('[aria-label="允许素材按需联网取图"]'); await clickText('保存取材设置');
+      await waitFor(async () => (await window.__uiFixture('momentMaterials')).settings.webImagesEnabled);
+      const webMaterialSettings = (await fixture('momentMaterials')).settings;
+      assert.equal(webMaterialSettings.enabled, true); assert.equal(webMaterialSettings.sources.length, 1); assert.equal(webMaterialSettings.intervalMinutes, 180);
+      assert.equal((await fixture('momentMaterials')).items.length, 3); assert.equal((await fixture('momentWrites')).length, 0);
+      check('optional web image setting saves without changing sources, interval, materials or publishing');
+      await screenshot('materials-settings-light', 'light');
+      await click('[data-testid="moments-materials"] details > summary');
+      await screenshot('materials-desktop-dark'); await screenshot('materials-desktop-light', 'light'); await assertLayout('material library desktop');
+      window.setContentSize(430, 900); await assertLayout('material library narrow'); await screenshot('materials-narrow-light', 'light');
+      window.setContentSize(320, 850); await assertLayout('material library smallest'); await screenshot('materials-small-dark');
+      await screenshot('materials-cards-small-dark', 'dark', '.wa-material-grid');
+      window.setContentSize(1280, 900);
+      await click('[data-testid="nav-moments"]'); await clickText('素材库');
+      await waitFor(() => document.querySelectorAll('[data-material-id]').length === 3);
+      check('Moments and media entry points share the same collection in desktop and narrow layouts');
+      await clickText('自动发布'); await clickText('新增发布计划');
+      assert.equal(await value('[aria-label="发布主题"]'), '');
+      await clickText('生成预览（不发布）');
+      await stateMatches(state => state.moments.publishing.runs.some(row => row.state === 'draft'));
+      const draft = (await fixture('state')).moments.publishing.runs.find(row => row.state === 'draft');
+      assert.equal(draft.imageMaterialId, picture.id); assert.equal(draft.hasImage, true); assert(draft.selectedMaterials.length > 0);
+      assert.equal((await fixture('momentWrites')).length, 0);
+      await screenshot('materials-publishing-preview-dark');
+      check('blank themes choose content and a library image at preview time without publishing');
+      await clickText('素材库');
+      await clickText('暂不使用', '[data-material-id="' + picture.id + '"]');
+      await waitFor(async () => !(await window.__uiFixture('momentMaterials')).items.find(item => item.kind === 'image').enabled);
+      await clickText('自动发布'); await click('[data-testid="moments-publishing"] .wa-wb-list-item'); await clickText('发布这份草稿');
+      await waitFor(() => Array.from(document.querySelectorAll('[role="alert"]')).some(el => el.textContent.includes('选用素材已更新')));
+      assert.equal((await fixture('momentWrites')).length, 0);
+      check('disabling an image invalidates an existing draft before any transport write');
+      await clickText('素材库'); await clickText('删除素材', '[data-material-id="' + organized.id + '"]');
+      await clickText('确认删除素材', '[data-material-id="' + organized.id + '"]');
+      await waitFor(() => document.querySelectorAll('[data-material-id]').length === 2);
+      await click('[data-testid="moments-materials"] details > summary'); await clickText('整理一次素材');
+      await waitFor(async () => (await window.__uiFixture('momentMaterials')).lastRun.state === 'empty');
+      assert.equal((await fixture('momentMaterials')).items.length, 2); assert.equal((await fixture('momentWrites')).length, 0);
+      check('deleted chat materials stay deleted when the same history is organized again');
+      assert.deepEqual(report.errors, []); report.ok = true; return;
+    }
+    if (process.env.WECHAT_UI_TEST_MOMENTS_RECOVERY_ONLY === '1') {
+      await require('./test-moments-recovery-ui.cjs')({ fixture, click, clickText, waitFor, stateMatches, evaluate, screenshot, assertLayout, check, window });
+      assert.deepEqual(report.errors, []); report.ok = true; return;
+    }
     if (process.env.WECHAT_UI_TEST_MOMENTS_ONLY === '1') {
       await click('[data-testid="nav-moments"]'); await waitFor(() => !!document.querySelector('[data-testid="moments-page"]'));
       await clickText('定时回复', '[role="tablist"]');
       assert.equal((await fixture('state')).moments.settings.enabled, false); check('moments automation defaults disabled');
-      await input('[aria-label="抓取间隔（分钟）"]', '15'); await input('[aria-label="每轮最多尝试回复"]', '3'); await clickText('保存定时设置');
+      await input('[aria-label="抓取间隔（分钟）"]', '15'); await input('[aria-label="自己朋友圈每轮最多尝试回复"]', '3'); await clickText('保存定时设置');
       await stateMatches(state => state.moments.settings.intervalMinutes === 15 && state.moments.settings.maxRepliesPerRun === 3 && !state.moments.settings.enabled);
       check('polling interval and attempt cap save through owner RPC'); await assertLayout('moments settings desktop'); await screenshot('moments-settings-desktop-dark');
       await clickText('我的动态', '[role="tablist"]'); await clickText('拉取我的动态'); await waitFor(() => document.querySelector('.wa-wb-list-item')?.textContent.includes('合成朋友圈'));
@@ -831,8 +1205,15 @@ app.whenReady().then(async () => {
         await stateMatches(state => state.moments.publishing.runs.some(row => row.state === 'draft'));
         await waitFor(() => !!document.querySelector('[aria-label="自动发布草稿正文"]'));
         assert.equal((await fixture('momentWrites')).filter(row=>row.action === 'publish').length,1); check('AI preview creates a durable draft without posting');
-        await input('[aria-label="自动发布草稿正文"]','修改过的 AI 测试草稿。'); await clickText('保存草稿修改');
+        await input('[aria-label="自动发布草稿正文"]','  修改过的 AI 测试草稿。  ');
+        await pause(3500);
+        assert.equal(await evaluate(() => document.querySelector('[aria-label="自动发布草稿正文"]').value), '  修改过的 AI 测试草稿。  ');
+        check('background status refresh preserves unsaved draft text');
+        await clickText('保存草稿修改');
         await stateMatches(state => state.moments.publishing.runs[0].text === '修改过的 AI 测试草稿。');
+        await waitFor(() => Array.from(document.querySelectorAll('button')).some(button => button.textContent.trim() === '发布这份草稿' && !button.disabled));
+        assert.equal(await evaluate(() => document.querySelector('[aria-label="自动发布草稿正文"]').value), '修改过的 AI 测试草稿。');
+        check('saved trimming is reflected in the editor and does not leave publishing disabled');
         await clickText('发布这份草稿'); await stateMatches(state => state.moments.publishing.runs[0].state === 'published');
         check('edited draft posts only on explicit click and displays verified receipt');
         await clickText('关闭编辑'); await clickText('开启计划');
@@ -843,11 +1224,113 @@ app.whenReady().then(async () => {
         window.setContentSize(430, 900); await assertLayout('AI publishing narrow'); await screenshot('moments-publishing-narrow-light','light');
         await clickText('删除计划'); await clickText('确认删除计划'); await stateMatches(state => state.moments.publishing.plans.length === 0 && state.moments.publishing.runs.length === 1);
         check('deleting a plan preserves published content and history');
+        await clickText('新增发布计划'); await fixture('momentGeneration', { mode: 'hold' });
+        await clickText('生成预览（不发布）');
+        await waitFor(() => document.querySelector('[data-testid="moments-publishing"]')?.textContent.includes('正在生成正文'));
+        assert(await evaluate(() => document.querySelector('[data-testid="moments-publishing"]').textContent.includes('最多 5 分钟')));
+        check('an ongoing model request shows its real generation stage and five-minute limit without manual refresh');
+        await fixture('momentGeneration', { mode: 'release' });
+        await stateMatches(state => state.moments.publishing.runs.some(row => row.state === 'draft'));
+        await waitFor(() => Array.from(document.querySelectorAll('button')).some(button => button.textContent.trim() === '生成预览（不发布）' && !button.disabled));
+        await fixture('momentGeneration', { mode: 'fail' }); await clickText('生成预览（不发布）');
+        await stateMatches(state => state.moments.publishing.runs.some(row => row.state === 'failed'));
+        await waitFor(() => Array.from(document.querySelectorAll('[role="alert"]')).some(el => el.textContent.includes('正文生成失败')));
+        assert(!(await evaluate(() => document.querySelector('.wa-alert.is-success')?.textContent || '')).includes('预览已生成'));
+        check('a failed generation retains its error after status refresh and is not announced as a successful draft');
+        await click('[data-testid="moments-publishing"] .wa-wb-list-item');
+        const beforeRetry = (await fixture('momentGeneration', { mode: 'status' })).calls;
+        await clickText('重新生成预览（不发布）');
+        await stateMatches(state => state.moments.publishing.runs.length === 4 && state.moments.publishing.runs[0].state === 'draft');
+        assert.equal((await fixture('momentGeneration', { mode: 'status' })).calls, beforeRetry + 1);
+        assert.equal((await fixture('momentWrites')).filter(row => row.action === 'publish').length, 2);
+        check('explicit retry uses one new generation while retaining the failed record and never posting');
       assert.deepEqual(report.errors, []); report.ok = true; return;
+    }
+    if (process.env.WECHAT_UI_TEST_IMAGE_MEMORY_ONLY === '1') {
+      await verifyImageMemory();
+      assert.deepEqual(report.errors, [], 'Browser errors must be resolved'); report.ok = true; return;
     }
     if (process.env.WECHAT_UI_TEST_MEMORY_ONLY === '1') {
       await verifyManualCompression();
       assert.deepEqual(report.errors, [], 'Browser errors must be resolved'); report.ok = true; return;
+    }
+    if (process.env.WECHAT_UI_TEST_PROMPT_ONLY === '1') {
+      await click('[data-testid="nav-settings"]'); await click('[data-testid="open-model"]');
+      await click('[data-testid="model-advanced"] summary');
+      assert.equal(await value('#wa-prompt-strategy'), 'legacy');
+      await input('#wa-prompt-strategy', 'progressive-v1');
+      await fixture('failNext', { endpoint: 'model.configure' }); await clickText('保存生成参数');
+      await waitFor(() => document.querySelector('[role="alert"]')?.textContent.includes('模拟保存失败'));
+      assert.equal(await value('#wa-prompt-strategy'), 'progressive-v1');
+      assert.equal((await fixture('state')).modelConfig.promptStrategy, 'legacy');
+      await clickText('保存生成参数'); await stateMatches(s => s.modelConfig.promptStrategy === 'progressive-v1');
+      await input('#wa-prompt-strategy', 'legacy'); await clickText('取消更改');
+      assert.equal(await value('#wa-prompt-strategy'), 'progressive-v1');
+      await click('[data-testid="nav-settings"]'); await click('[data-testid="open-model"]');
+      await click('[data-testid="model-advanced"] summary');
+      assert.equal(await value('#wa-prompt-strategy'), 'progressive-v1');
+      check('progressive mode saves, survives reread and cancel; failed saves preserve the draft and previous runtime setting');
+      for (const [size, width, height] of [['desktop', 1280, 940], ['narrow', 430, 900]]) {
+        window.setContentSize(width, height); await assertLayout(size + ' progressive context settings');
+        await screenshot('progressive-settings-' + size + '-light', 'light', '[data-testid="model-advanced"]');
+      }
+      assert.deepEqual(report.errors, []); report.ok = true; return;
+    }
+    if (process.env.WECHAT_UI_TEST_SEARCH_ONLY === '1') {
+      await click('[data-testid="nav-settings"]'); await click('[data-testid="open-model"]');
+      await click('[data-testid="model-advanced"] summary');
+      assert(await evaluate(() => document.querySelector('#wa-search-provider').disabled && document.querySelector('#wa-tavily-url').disabled));
+      check('search selector and endpoint are disabled while web search is off');
+      await click('[aria-label="启用联网搜索"]'); await clickText('保存生成参数');
+      await stateMatches(s => s.modelConfig.webSearch === true);
+      assert.equal(await value('#wa-search-provider'), 'tavily');
+      assert(await evaluate(() => document.querySelector('[data-testid="search-settings"]').textContent.includes('回退DeepSeek 原生一次')));
+      check('Tavily remains the default with an explicit one-time DeepSeek fallback');
+      await input('#wa-search-provider', 'dsh');
+      assert(await evaluate(() => isUsable(document.querySelector('#wa-tavily-url'), true) && document.querySelector('[data-testid="search-settings"]').textContent.includes('回退Tavily一次')));
+      check('selecting DeepSeek keeps the alternate Tavily endpoint editable and reverses fallback order');
+      await input('#wa-tavily-url', 'https://search.fixture.invalid/api/tavily');
+      await fixture('failNext', { endpoint: 'model.configure' }); await clickText('保存生成参数');
+      await waitFor(() => document.querySelector('[role="alert"]')?.textContent.includes('模拟保存失败'));
+      assert.equal(await value('#wa-search-provider'), 'dsh');
+      assert.equal(await value('#wa-tavily-url'), 'https://search.fixture.invalid/api/tavily');
+      assert.equal((await fixture('state')).modelConfig.searchProvider, 'tavily');
+      check('failed configuration saves preserve both draft values and the previous runtime selection');
+      await clickText('保存生成参数');
+      await stateMatches(s => s.modelConfig.searchProvider === 'dsh' && s.modelConfig.tavilyBaseURL === 'https://search.fixture.invalid/api/tavily');
+      await input('#wa-search-provider', 'tavily'); await clickText('保存生成参数');
+      await stateMatches(s => s.modelConfig.searchProvider === 'tavily');
+      check('both provider orders persist through the actual configuration RPC');
+      await fixture('searchFallback');
+      await waitFor(() => document.querySelector('[data-testid="search-status"]')?.textContent.includes('已从Tavily回退至DeepSeek 原生'));
+      assert(await evaluate(() => document.querySelector('[data-testid="search-status"]').textContent.includes('3 条') && document.querySelector('[data-testid="search-status"]').getAttribute('role') === 'status'));
+      check('completed fallback displays the actual provider and returned source count');
+      await fixture('searchBothFailed');
+      await waitFor(() => document.querySelector('[data-testid="search-status"]')?.getAttribute('role') === 'alert');
+      assert(await evaluate(() => /Tavily.*DeepSeek/.test(document.querySelector('[data-testid="search-status"]').textContent)));
+      check('two failed services remain a visible failure without inventing cited results');
+      await click('[data-testid="search-credentials"] summary');
+      await input('#wa-search-key-tavily', 'fixture-tavily-key'); await clickText('保存Tavily密钥');
+      await waitFor(() => document.querySelector('#wa-search-key-tavily')?.value === '');
+      await input('#wa-search-key-dsh', 'fixture-deepseek-key'); await clickText('保存DeepSeek 原生密钥');
+      await waitFor(() => document.querySelector('#wa-search-key-dsh')?.value === '');
+      await stateMatches(s => s.search.credentials.dsh === true && s.search.credentials.tavily === true);
+      assert(await evaluate(() => [...document.querySelectorAll('[data-testid="search-credentials"] input')].every(el => el.type === 'password' && !el.value)));
+      check('primary and alternate credentials save independently and never reappear as plain text');
+      await click('[data-testid="search-credentials"] summary');
+      await fixture('searchFallback');
+      await waitFor(() => document.querySelector('[data-testid="search-status"]')?.textContent.includes('回退至DeepSeek'));
+      for (const [size, width, height] of [['desktop', 1280, 980], ['narrow', 430, 900]]) {
+        window.setContentSize(width, height); await assertLayout(size + ' search fallback');
+        await screenshot('search-fallback-' + size + '-light', 'light', '[data-testid="search-settings"]');
+        await screenshot('search-fallback-' + size + '-dark', 'dark', '[data-testid="search-settings"]');
+      }
+      check('fallback settings and results fit desktop and narrow layouts in both themes');
+      await click('[aria-label="启用联网搜索"]'); await clickText('保存生成参数');
+      await stateMatches(s => s.modelConfig.webSearch === false && s.modelConfig.searchProvider === 'tavily');
+      assert(await evaluate(() => document.querySelector('#wa-search-provider').disabled && document.querySelector('#wa-tavily-url').disabled));
+      check('turning search off persists without resetting provider or endpoint settings');
+      assert.deepEqual(report.errors, []); report.ok = true; return;
     }
     if (process.env.WECHAT_UI_TEST_MODEL_ONLY === '1') {
       await click('[data-testid="nav-settings"]'); await click('[data-testid="open-model"]');
@@ -1026,7 +1509,7 @@ app.whenReady().then(async () => {
     const originalPersona = (await fixture('state')).persona;
     const customPrompt = '你是小胖，喜欢有依据的讨论，性格温和、有一点幽默。用自然短句接话，不机械复述。';
     await input('#wa-persona-prompt', customPrompt);
-    await click('details.wa-subsection summary');
+    await click('[data-testid="persona-identity-settings"] > summary');
     await input('#wa-persona-name', '小胖'); await input('#wa-persona-aliases', '胖胖\n小胖同学');
     await pause(2300); assert.equal(await value('#wa-persona-prompt'), customPrompt);
     assert.equal(await evaluate(() => !!document.querySelector('#wa-persona-background')), false);

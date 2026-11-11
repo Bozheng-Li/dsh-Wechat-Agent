@@ -106,6 +106,7 @@ async function searchFixture(t, handler) {
   });
   const origin = `http://127.0.0.1:${server.address().port}`;
   const service = new SearchService({ credentials: { resolve: async ref => {
+    if (ref === SEARCH_CREDENTIALS.dsh) return undefined;
     assert.equal(ref, SEARCH_CREDENTIALS.tavily); return { value: 'fixture-local-only-key' };
   } } }, { fetchImpl: (url, options) => {
     assert.equal(url, 'https://search-fixture.invalid/api/search');

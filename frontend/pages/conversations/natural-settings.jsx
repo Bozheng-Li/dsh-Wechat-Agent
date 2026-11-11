@@ -10,11 +10,12 @@ export function NaturalChatSettings({ draft, blocked, onChange, status, error, o
   }, [status?.deliveryBlockedKey]);
   const change = (key, value) => onChange({ ...draft, [key]: value });
   return (
-    <div className="wa-subsection" data-testid="natural-chat-settings">
+    <div className="wa-subsection wa-natural-settings" data-testid="natural-chat-settings">
       <h2>自然陪聊</h2>
       <p className="wa-help">
         结合当前话题择机开口，有人接话时继续聊，无人回应时逐渐退让。
       </p>
+      <div className="wa-natural-basics">
       <Field
         label="参与倾向"
         id="wa-natural-temperament"
@@ -48,6 +49,7 @@ export function NaturalChatSettings({ draft, blocked, onChange, status, error, o
           <option value="fixed">固定分钟数</option>
         </select>
       </Field>
+      </div>
       <div className="wa-number-range">
         <span>每</span>
         {draft.intervalMode === 'fixed' ? (
@@ -138,6 +140,7 @@ export function NaturalChatSettings({ draft, blocked, onChange, status, error, o
       )}
       <details className="wa-subsection">
         <summary>连续对话与发言分寸</summary>
+        <div className="wa-natural-limits">
         <Field
           label="连续对话窗口（秒）"
           id="wa-natural-followup"
@@ -189,6 +192,7 @@ export function NaturalChatSettings({ draft, blocked, onChange, status, error, o
             onChange={(event) => change('minGapMinutes', event.target.value)}
           />
         </Field>
+        </div>
       </details>
       {error && (
         <p className="wa-alert" role="alert">

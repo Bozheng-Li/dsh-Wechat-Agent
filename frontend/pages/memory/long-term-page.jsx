@@ -8,7 +8,6 @@ const stamp = (value) =>
   value ? new Date(value < 1e12 ? value * 1000 : value).toLocaleString('zh-CN', { hour12: false }) : '时间未记录';
 const replace = (document, range, value) =>
   document.markdown.slice(0, range.start) + value + document.markdown.slice(range.end);
-const css = `.wa-long-note{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8}.wa-long-facts{display:flex;flex-direction:column;gap:12px;margin-top:18px}.wa-long-fact{border:1px solid var(--wa-border);border-radius:10px;padding:16px;min-width:0}.wa-long-fact>.wa-help{margin-top:10px}.wa-long-fact>.wa-row{margin-top:12px}.wa-long-fact.is-old{opacity:.7}.wa-long-preview{white-space:pre-wrap;overflow-wrap:anywhere;max-height:400px;overflow:auto;font-size:12px;line-height:1.7}.wa-long-tools{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}.wa-long-source{margin-top:20px}.wa-long-source .wa-select{max-width:480px}.wa-long-source-head{margin-top:20px}.wa-long-editor{min-height:220px}`;
 
 /** Owner-facing editor; hidden Markdown markers are preserved by scoped edits. */
 export function LongTermMemoryPage({ rpc, status, rows = [] }) {
@@ -97,10 +96,10 @@ export function LongTermMemoryPage({ rpc, status, rows = [] }) {
       className={'wa-long-fact' + (entry.state === 'superseded' ? ' is-old' : '')}
       data-long-fact-id={entry.id}
     >
-      <div className="wa-between">
-        <span className="wa-badge">{entry.state === 'superseded' ? '已被后续更正' : '长期事实'}</span>
-        <span className="wa-help">{stamp(entry.createdAt)}</span>
-      </div>
+      <header className="wa-long-fact-meta">
+        <span>{entry.state === 'superseded' ? '已被后续更正' : '长期事实'}</span>
+        <time>{stamp(entry.createdAt)}</time>
+      </header>
       {editing?.id === entry.id ? (
         <div className="wa-section-space">
           <textarea
@@ -135,15 +134,16 @@ export function LongTermMemoryPage({ rpc, status, rows = [] }) {
           </div>
         </div>
       ) : (
-        <p className="wa-long-note wa-section-space">{entry.text}</p>
+        <p className="wa-long-note">{entry.text}</p>
       )}
       <p className="wa-help">
+        对象：{entry.subjectId === 'group' ? '本群共同事项' : entry.subjectName || '原会话资料 · 人物未确认'}；
         来源：{section.name} ·{' '}
         {[...new Set((entry.sources || []).map((source) => source.sender).filter(Boolean))].join('、') || '会话成员'}
         ；仅用于这个会话。
       </p>
       {!editing && (
-        <div className="wa-row">
+        <div className="wa-long-fact-actions">
           <Button
             disabled={!!busy || dirty || !!rawDraft}
             onClick={() => setEditing({ id: entry.id, base: doc, range: entry.bodyRange, value: entry.text })}
@@ -185,8 +185,7 @@ export function LongTermMemoryPage({ rpc, status, rows = [] }) {
   );
   return (
     <>
-      <style>{css}</style>
-      <PageHead title="长期记忆" description="稳定偏好与重要约定，按来源会话分别保留。">
+      <PageHead icon="memory" title="长期记忆" description="稳定偏好与重要约定，按来源会话分别保留。">
         {accountId && <Button icon="refresh" disabled={!doc || !!busy || dirty || !!editing || !!rawDraft}
           onClick={() => { void reload(true).catch((failure) => setError(failure.message)); }}>重新读取</Button>}
       </PageHead>
@@ -215,15 +214,15 @@ export function LongTermMemoryPage({ rpc, status, rows = [] }) {
               请修复记忆文件的位置或体积后重新读取。当前无法编辑、清空或整理这份文件。
             </p>
           )}
-          <section className="wa-card wa-long-shared">
-            <div className="wa-between">
+          <section className="wa-document-section wa-long-shared">
+            <header className="wa-document-heading">
               <div>
                 <h2>所有会话通用的内容</h2>
                 <p className="wa-help">
                   由你手动填写，当前账号的授权会话都会参考。自动提取的私人信息保留在下方的来源会话内。
                 </p>
               </div>
-            </div>
+            </header>
             {notesEditing || !doc.globalNotes ? (
               <>
                 <label className="wa-field wa-automation-field">
@@ -231,7 +230,7 @@ export function LongTermMemoryPage({ rpc, status, rows = [] }) {
                   <textarea
                     className="wa-textarea wa-long-editor"
                     aria-label="全局通用备注"
-                    rows={8}
+                    rows={5}
                     maxLength={100000}
                     disabled={!!busy || doc.invalid || !!editing || !!rawDraft}
                     value={notes}
@@ -269,8 +268,8 @@ export function LongTermMemoryPage({ rpc, status, rows = [] }) {
                 </div>
               </>
             ) : (
-              <div className="wa-section-space" data-testid="saved-global-notes">
-                <span className="wa-badge">{doc.globalNotesExpired ? '已到期' : '已保存'}</span>
+              <div className="wa-long-saved-document" data-testid="saved-global-notes">
+                <span className="wa-long-document-status">{doc.globalNotesExpired ? '已到期' : '已保存'}</span>
                 <p className="wa-long-note wa-section-space">{doc.globalNotes}</p>
                 <div className="wa-long-tools">
                   <Button
@@ -293,9 +292,11 @@ export function LongTermMemoryPage({ rpc, status, rows = [] }) {
                 : ''}
             </p>
           </section>
-          <section className="wa-card wa-long-collected">
-            <h2>来自各会话的重要事实</h2>
-            <p className="wa-help">更正会保留旧事实，不再作为当前结论使用。</p>
+          <section className="wa-document-section wa-long-collected">
+            <header className="wa-document-heading">
+              <div><h2>来自各会话的重要事实</h2>
+              <p className="wa-help">更正会保留旧事实，不再作为当前结论使用。</p></div>
+            </header>
             <div className="wa-long-source">
               <select
                 className="wa-select"
@@ -333,7 +334,7 @@ export function LongTermMemoryPage({ rpc, status, rows = [] }) {
             )}
             {sections.map((section) => (
               <div key={section.key} className="wa-long-source-head">
-                <h3>{section.name}</h3>
+                <div className="wa-long-source-title"><h3>{section.name}</h3><span>{section.facts.filter((entry) => entry.state === 'active').length} 条当前事实</span></div>
                 <div className="wa-long-facts">
                   {section.facts.filter((entry) => entry.state === 'active').map((entry) => fact(entry, section))}
                 </div>
@@ -355,7 +356,7 @@ export function LongTermMemoryPage({ rpc, status, rows = [] }) {
               </p>
             )}
           </section>
-          <section className="wa-card wa-long-storage">
+          <section className="wa-document-section wa-long-storage">
             <h2>记忆文件与维护</h2>
             <details className="wa-subsection">
               <summary>保存位置与编辑说明</summary>

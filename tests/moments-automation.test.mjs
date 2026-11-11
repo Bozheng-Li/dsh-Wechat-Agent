@@ -98,3 +98,69 @@ test('invalid persisted social state disables only this subsystem and preserves 
   const invalid = new MomentsAutomation(f.channel); assert(invalid.error); invalid.start(); await invalid.tick();
   assert.equal(fs.readFileSync(file, 'utf8'), '{broken'); assert.equal(f.calls.length, 0); assert.equal(f.channel.closed, undefined);
 });
+
+test('an unavailable newer post does not block healthy comments and its read backoff survives discovery and restart', async t => {
+  const f = fixture(t), broken = { ...f.own, id: '9007199254740998', createdAt: f.own.createdAt + 1 };
+  const read = f.channel.transport.readMoments; let failures = 0;
+  f.channel.transport.readMoments = async (args, signal) => {
+    if (args.query.action === 'timeline') return { accountId: f.accountId, items: [broken, f.own] };
+    if (args.query.postId === broken.id) { failures++; throw new ChannelError('ERR_MOMENTS_REJECTED', 'target unavailable', { ret: -2 }); }
+    return read(args, signal);
+  };
+  f.configure(); f.comments.set(f.own.id, [f.comment(1)]); f.advance(60000); await f.manager.tick();
+  let view = f.manager.list(f.accountId);
+  assert.equal(f.writes.length, 1); assert.equal(view.lastRun.state, 'partial'); assert.equal(view.lastRun.unavailable, 1); assert.equal(view.lastError, null);
+  assert.equal(view.posts.find(post => post.id === broken.id).deleted, false, 'ret -2 is not deletion proof');
+  assert.equal(view.posts.find(post => post.id === broken.id).readFailure.attempts, 1);
+  f.channel.momentsAutomation = new MomentsAutomation(f.channel); f.channel.momentsAutomation.stopped = false;
+  f.comments.get(f.own.id).push(f.comment(2)); f.advance(60000); await f.channel.momentsAutomation.tick();
+  view = f.channel.momentsAutomation.list(f.accountId);
+  assert.equal(failures, 1); assert.equal(view.lastRun.deferred, 1); assert.equal(f.writes.length, 2);
+  f.advance(5 * 60000); await f.channel.momentsAutomation.tick();
+  assert.equal(failures, 2); assert.equal(f.channel.momentsAutomation.list(f.accountId).posts.find(post => post.id === broken.id).readFailure.attempts, 2);
+});
+
+test('a successful explicit read restores an unavailable post without changing automatic-reply settings', async t => {
+  const f = fixture(t); f.manager.remember(f.accountId, [f.own]); f.configure();
+  f.manager.recordReadFailure(f.accountId, f.own.id, new ChannelError('ERR_MOMENTS_REJECTED', 'unavailable', { ret: -2 }));
+  const settings = f.manager.list(f.accountId).settings;
+  await f.manager.read(f.accountId, { action: 'comments', postId: f.own.id, limit: 50 }, new AbortController().signal);
+  assert.equal(f.manager.list(f.accountId).posts[0].readFailure, undefined);
+  assert.deepEqual(f.manager.list(f.accountId).settings, settings); assert.equal(f.writes.length, 0);
+});
+
+test('a stale timeline cannot revive an own post with a confirmed deletion receipt', async t => {
+  const f = fixture(t); f.manager.remember(f.accountId, [f.own]); f.configure();
+  f.manager.recordReceipt({ accountId: f.accountId, action: 'delete', postId: f.own.id, deleted: true, delivery: 'server-ack' });
+  f.advance(60000); await f.manager.tick();
+  assert.equal(f.manager.list(f.accountId).posts[0].deleted, true);
+  assert.equal(f.calls.filter(call => call.query.action === 'comments').length, 0); assert.equal(f.models.length, 0);
+});
+
+test('failure on a later comment page discards that incomplete snapshot and continues other posts', async t => {
+  const f = fixture(t), broken = { ...f.own, id: '9007199254740998', createdAt: f.own.createdAt + 1 };
+  const read = f.channel.transport.readMoments;
+  f.channel.transport.readMoments = async (args, signal) => {
+    if (args.query.action === 'timeline') return { accountId: f.accountId, items: [broken, f.own] };
+    if (args.query.postId !== broken.id) return read(args, signal);
+    if (!args.query.cursor) return { accountId: f.accountId, items: [f.comment(55)], nextCursor: 'next' };
+    throw new ChannelError('ERR_MOMENTS_REJECTED', 'unavailable', { ret: -2 });
+  };
+  f.configure(); f.comments.set(f.own.id, [f.comment(1)]); f.advance(60000); await f.manager.tick();
+  assert.equal(f.writes.length, 1); assert.equal(f.writes[0].query.postId, f.own.id);
+  assert.equal(f.manager.list(f.accountId).lastRun.unavailable, 1);
+});
+
+test('authentication rejection and account changes cannot be hidden as one unavailable post', async t => {
+  for (const switched of [false, true]) {
+    const f = fixture(t), read = f.channel.transport.readMoments;
+    f.channel.transport.readMoments = async (args, signal) => {
+      if (args.query.action === 'timeline') return read(args, signal);
+      if (switched) f.status.account.id = 'another-account';
+      throw new ChannelError('ERR_MOMENTS_REJECTED', 'rejected', { ret: switched ? -2 : -13 });
+    };
+    f.configure(); f.advance(60000); await f.manager.tick();
+    assert.equal(f.manager.list(f.accountId).lastRun.state, 'failed');
+    assert.equal(f.manager.list(f.accountId).posts[0].readFailure, undefined); assert.equal(f.writes.length, 0);
+  }
+});

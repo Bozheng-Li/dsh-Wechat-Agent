@@ -1,4 +1,5 @@
 import { defaults, object, historyLimit, clone } from "./helpers.mjs";
+import { messageReferences, withMessageReferences, describeReferencedImage, unavailableMessageContext } from '../../shared/message-references.mjs';
 import { initializeState } from "./initialize.mjs";
 import { migrateNamedDirectories } from "./initialize.mjs";
 import { validateArchiveView } from "./archive.mjs";
@@ -21,6 +22,7 @@ import {
 import { sameDirectory, writableDirectory } from "./paths.mjs";
 import { identity, conversationFolder, info, recordInfo } from "./keys.mjs";
 import { CONFIG_FIELDS } from '../config/repository.mjs';
+import { RoleCards } from './role-cards.mjs';
 
 /**
  * config.yaml owns settings; channel.json owns the runtime/path index. Each conversation owns one
@@ -30,6 +32,7 @@ import { CONFIG_FIELDS } from '../config/repository.mjs';
 export class StateStore {
   constructor(root) {
     initializeState(this, root);
+    this.roleCards = new RoleCards(this);
   }
   _directory(
     conversation,
@@ -142,7 +145,7 @@ export class StateStore {
     return clone(this.data.persona ?? defaults.persona());
   }
   conversationPersona(accountId, chatType, peerId) {
-    return this.persona();
+    return this.roleCards.persona({ accountId, chatType, peerId }, this.persona());
   }
   modelConfig() {
     return clone(this.data.modelConfig ?? defaults.model());
@@ -296,7 +299,7 @@ export class StateStore {
           .map((segment) => '[' + (mediaNames[segment.type] || '非文本') + '消息]')
       ),
     ].join(' ');
-    return {
+    const entry = {
       key,
       messageId: message.serverMessageId || message.id || key,
       direction: message.direction || 'incoming',
@@ -311,6 +314,38 @@ export class StateStore {
         .filter((segment) => ['image', 'face'].includes(segment.type) && typeof segment.data?.resourceId === 'string')
         .map((segment) => ({ resourceId: segment.data.resourceId, type: segment.type })),
     };
+    const unavailable = unavailableMessageContext(message);
+    if (unavailable) Object.assign(entry, { bodyText: entry.text, text: entry.text + '\n\n' + unavailable, contentUnavailable: true });
+    const references = messageReferences(segments, message.peerId);
+    return references.length ? withMessageReferences(entry, references) : entry;
+  }
+  updateMessageReferences(input, key, references) {
+    const view = this.views.get(info(input.accountId, input.chatType, input.peerId).key),
+      entry = view?.messages.find(value => value.key === key), record = view?.records.find(value => value.key === key);
+    const serialized = JSON.stringify(references);
+    if (entry && JSON.stringify(entry.references) !== serialized || record && JSON.stringify(record.references) !== serialized) {
+      if (entry) Object.assign(entry, withMessageReferences(entry, clone(references)));
+      if (record) record.references = clone(references);
+      this.save();
+    }
+    this.memory?.updateMessageReferences(input, key, references);
+  }
+  describeImageReferences(input, image) {
+    const view = this.views.get(info(input.accountId, input.chatType, input.peerId).key);
+    if (view) {
+      let changed = false;
+      view.messages = view.messages.map(entry => {
+        const next = describeReferencedImage(entry, input, image);
+        if (next !== entry) changed = true;
+        return next;
+      });
+      for (const record of view.records) if (record.references?.length) {
+        const source = { references: record.references }, next = describeReferencedImage(source, input, image);
+        if (next !== source) { record.references = clone(next.references); changed = true; }
+      }
+      if (changed) this.save();
+    }
+    this.memory?.describeImageReferences(input, image);
   }
   remember(key, at, record, observation = {}) {
     if (Object.hasOwn(this.data.seen, key)) return false;
@@ -346,6 +381,7 @@ export class StateStore {
       this.claimOwners.set(key, target.key);
       if (observation.message && !view.messages.some((message) => message.key === key)) {
         view.messages.push(this._observation(key, target.accountId, observation.message, at));
+        if (record && view.messages.at(-1).references) record.references = clone(view.messages.at(-1).references);
         if (view.messages.length > historyLimit) view.messages = view.messages.slice(-historyLimit);
       }
       if (observation.progress !== undefined) {
@@ -400,6 +436,7 @@ export class StateStore {
     }
     if (
       view &&
+      !record.toolProgress &&
       !record.remoteQuery &&
       !record.workRequest && !record.workJobId &&
       !record.modeControl &&

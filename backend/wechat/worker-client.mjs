@@ -65,6 +65,8 @@ export class WorkerClient extends EventEmitter {
   send(params, signal) { return this.call('send', params, { signal }); }
   media(params, signal) { return this.call('media', params, { signal, timeoutMs: 30000 }); }
   readMoments(params, signal) { return this.call('moments.read', params, { signal, timeoutMs: 20000 }); }
+  readMomentsPublication(params, signal) { return this.call('moments.publication', params, { signal, timeoutMs: 20000 }); }
+  readMomentsImages(params, signal) { return this.call('moments.images', params, { signal, timeoutMs: 100000 }); }
   readMomentsAudience(params, signal) { return this.call('moments.audience', params, { signal, timeoutMs: 300000 }); }
   writeMoments(params, signal) { return this.call('moments.write', params, { signal, timeoutMs: 600000 }); }
   async close() {

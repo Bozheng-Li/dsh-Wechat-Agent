@@ -37,7 +37,7 @@ function mergeRetry(service, jobId, attemptId, record) {
     parts[partIndex] = { index: oldPart?.index ?? partIndex, type: artifact.kind, name: artifact.name, bytes: artifact.bytes, sha256: artifact.sha256,
       state: confirmed ? 'acknowledged' : state === 'failed' || state === 'suppressed' ? 'not-sent' : state,
       ...(confirmed ? { serverMessageId: part.serverMessageId } : {}), retryRecordKey: attempt.recordKey };
-    return { ...artifact, state, ...(confirmed ? { serverMessageId: part.serverMessageId } : {}) };
+    return { ...artifact, state, ...(confirmed ? { serverMessageId: part.serverMessageId, sentAt: record.sentAt ?? record.acknowledgedAt ?? record.updatedAt ?? service.channel.now() } : {}) };
   });
   const acknowledgedMessageIds = [...new Set([...original.acknowledgedMessageIds, ...deliveries.filter(value => value?.state === 'sent').map(value => value.serverMessageId)])];
   const complete = deliveries.every(value => value?.state === 'sent') && original.deliveryParts.some(value => value.type === 'text') &&

@@ -33,10 +33,10 @@ const requests = new Set(['你好', parentRequest, ...childRequests, '/dsh tasks
   '回顾刚才的工作对话', '继续这项工作，只检查现有文件', '创建 followup.txt，内容为 CONTEXT_FILE_MARKER', '删除这个文件',
   '测试润色数字保护', '测试润色 API 故障', '解释工具调用', '读取当前微信朋友圈', '点赞当前微信朋友圈', '评论当前微信朋友圈', '发布文字朋友圈',
   '拉取当前微信朋友圈评论区', '回复当前微信朋友圈评论', '删除当前微信朋友圈', '屏蔽同事发布朋友圈', '设置自动发布计划', '预览朋友圈草稿', '设置定时评论回复']);
-const executionNames = ['wechat_work_exec', 'wechat_work_generate_image', 'wechat_work_list', 'wechat_work_output', 'wechat_work_read',
+const executionNames = ['wechat_generated_image_memory', 'wechat_memory', 'wechat_web_search', 'wechat_moments_interact', 'wechat_work_exec', 'wechat_work_generate_image', 'wechat_work_list', 'wechat_work_output', 'wechat_work_read',
   'wechat_work_ssh_connect', 'wechat_work_ssh_exec', 'wechat_work_status', 'wechat_work_vscode_connect', 'wechat_work_write', 'wechat_moments_read',
   'wechat_moments_comments', 'wechat_moments_audience', 'wechat_moments_like', 'wechat_moments_comment', 'wechat_moments_reply', 'wechat_moments_publish', 'wechat_moments_delete',
-  'wechat_moments_plan', 'wechat_moments_draft', 'wechat_moments_reply_schedule'];
+  'wechat_moments_plan', 'wechat_moments_draft', 'wechat_moments_reply_schedule', 'wechat_moments_material_search', 'wechat_moments_material_download'];
 const managementNames = ['wechat_work_cancel', 'wechat_work_continue', 'wechat_work_history', 'wechat_work_parallel', 'wechat_work_start', 'wechat_work_task', 'wechat_work_tasks'];
 const toolResults = options => options.messages.slice(options.messages.findLastIndex(message => message.role === 'user') + 1)
   .filter(message => message.role === 'tool').flatMap(message => message.content)
@@ -66,19 +66,29 @@ class Fixture extends LlmAdapter {
     const system = options.messages.filter(message => message.role === 'system').flatMap(message => message.content).filter(block => block.type === 'text').map(block => block.text).join('\n');
     const names = (options.tools ?? []).map(tool => tool.name).sort();
     if (this.surface === 'polish') {
+      if (system.includes('检查一份即将公开的朋友圈草稿')) {
+        assert.deepEqual(names, []); const data = JSON.parse(userTexts.at(-1).split('本次消息：\n').at(-1));
+        assert.equal(data.phase, 'proposal'); assert.equal(data.imagePlanned, false);
+        assert.equal(data.theme, '原生测试笑话'); assert(data.text.includes('测试草稿'));
+        yield* textReply('{"ok":true,"reason":""}'); return;
+      }
       if (system.includes('为当前扫码登录账号撰写一条朋友圈')) {
         assert.deepEqual(names, []); const data = JSON.parse(userTexts.at(-1));
         assert.deepEqual(data.themes, ['原生测试笑话']); assert(!system.includes('NATIVE_DSH_CONTEXT'));
         yield* textReply(JSON.stringify({ theme: data.themes[0], text: '原生生成的测试草稿，冰箱里大家很冷静。', imagePrompt: '' })); return;
       }
-      if (system.includes('前置工作判断器')) {
+      let routeInput;
+      try { routeInput = JSON.parse(userTexts.at(-1)); } catch {}
+      if (typeof routeInput?.message === 'string' && Array.isArray(routeInput.tasks) && Array.isArray(routeInput.history)) {
         assert.deepEqual(names, []); assert(!system.includes('NATIVE_DSH_CONTEXT')); assert(!system.includes('CHAT_SENTINEL'));
-        const data = JSON.parse(userTexts.at(-1)); routingRequests.push(data);
+        const data = routeInput; routingRequests.push(data);
         assert(!userTexts.some(text => /CHAT_SENTINEL|角色背景|当前会话记忆/.test(text)));
         // Deliberately classify delete as new: session continuity must not depend on this judgment.
         const followup = ['继续这项工作，只检查现有文件'].includes(data.message);
         yield* textReply(JSON.stringify({ action: data.message === '你好' ? 'chat' : followup ? 'continue' : 'new',
-          taskId: followup ? data.currentTaskId : null })); return;
+          taskId: followup ? data.currentTaskId : null,
+          review: { intent: data.message === '你好' ? 'chat' : followup ? 'continue' : 'execute',
+            evidence: data.message === '你好' ? '' : data.message, target: followup ? 'unique' : 'none' } })); return;
       }
       if (!system.includes('只改善语言和排版') && !system.includes('你负责查看一个仍在执行的工作任务的进度')) {
         yield* textReply('聊天回应'); return;
@@ -100,10 +110,11 @@ class Fixture extends LlmAdapter {
     assert(system.includes('PERSONA_WORK_STYLE'), 'native work conversation lost the current persona');
     assert(!/CHAT_SENTINEL|工作对话 Agent|独立工作 Agent|后端工作状态|independent-task-sessions/.test(system));
     assert(!system.includes('OLD_TASK_') && !system.includes('OLD_DIALOGUE_'));
-    const expected = [...executionNames.filter(name => administrator || !/ssh|vscode|status|moments/.test(name)), ...managementNames, 'native_fixture_file'].sort();
+    const request = userTexts.findLast(text => requests.has(text));
+    const expected = [...executionNames.filter(name => administrator || !/ssh|vscode|status|moments/.test(name)), ...managementNames, 'native_fixture_file',
+      ...(administrator && request === '点赞当前微信朋友圈' ? ['wechat_moments_like_recent'] : [])].sort();
     assert.deepEqual(names, expected); assert(!names.includes('run_code'));
     assert(options.tools.every(tool => typeof tool.description === 'string' && tool.parameters?.type === 'object' && tool.execute === undefined));
-    const request = userTexts.findLast(text => requests.has(text));
     assert.equal(typeof request, 'string', 'original task message was not submitted: ' + JSON.stringify(userTexts));
     assert(!userTexts.some(text => /recentDialogue|"currentTime"|OLD_TASK_|OLD_DIALOGUE_/.test(text)));
     nativeRequests.push({ request, names });
@@ -170,7 +181,7 @@ class Fixture extends LlmAdapter {
       const tool = request.startsWith('点赞') ? 'wechat_moments_like' : request.startsWith('评论') ? 'wechat_moments_comment' :
         request.startsWith('回复') ? 'wechat_moments_reply' : request.startsWith('删除') ? 'wechat_moments_delete' : 'wechat_moments_publish';
       if (!results.length) { yield* callTool(tool, tool === 'wechat_moments_publish' ? { text: 'NATIVE_POST_FACT' } :
-        { postId: '9007199254740997', ...(['wechat_moments_comment', 'wechat_moments_reply'].includes(tool) ? { text: 'NATIVE_COMMENT_FACT' } : {}),
+        { postId: '9007199254740997', ...(tool === 'wechat_moments_like' ? { subject: 'account' } : {}), ...(['wechat_moments_comment', 'wechat_moments_reply'].includes(tool) ? { text: 'NATIVE_COMMENT_FACT' } : {}),
           ...(tool === 'wechat_moments_reply' ? { commentId: '3' } : {}) }); return; }
       assert.equal(results.at(-1).ok, true); assert.equal(results.at(-1).delivery, 'server-ack');
       if (tool === 'wechat_moments_reply') assert.equal(results.at(-1).replyToCommentId, '3');
@@ -280,7 +291,7 @@ const until = async predicate => {
         return { accountId, source: 'wechat-contacts-live', fetchedAt: new Date().toISOString(), membershipComplete: true, unavailableCount: 0,
           contacts: [{ id: 'wxid_alice', name: 'Alice', nickname: 'Alice', remark: '', labelIds: ['1'] }], labels: [{ id: '1', name: '同事', memberCount: 1, userIds: ['wxid_alice'] }] }; },
       readMoments: async (args, signal) => { signal.throwIfAborted(); assert.equal(args.accountId, accountId); momentsCalls.push(args);
-        return { accountId, action: args.query.action, source: 'wechat-sns-live', items: [{ id: '9007199254740997', text: 'NATIVE_MOMENTS_FACT', imageCount: 1 }], nextCursor: null, mediaContentIncluded: false }; },
+        return { accountId, action: args.query.action, source: 'wechat-sns-live', items: [{ id: '9007199254740997', author: { userId: accountId, nickname: '合成账号' }, text: 'NATIVE_MOMENTS_FACT', imageCount: 1 }], nextCursor: null, mediaContentIncluded: false }; },
       writeMoments: async (args, signal) => { signal.throwIfAborted(); assert.equal(args.accountId, accountId); assert.match(args.clientId, /^sns_[a-f0-9]{64}$/); momentsWrites.push(args);
         return { accountId, action: args.query.action, postId: args.query.postId ?? '9007199254740999', text: args.query.text,
           liked: true, commentId: '9007199254741000', imageCount: args.query.images?.length ?? 0, delivery: 'server-ack',

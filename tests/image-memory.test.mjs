@@ -225,8 +225,11 @@ test('image tools enforce cancellation, vision state, receive-time boundaries an
   assert.equal(JSON.parse(await tool.execute({ action: 'read', imageId: saved.id }, { signal: signal() })).quality, 'thumbnail');
   f.store.setModelConfig({ ...f.store.modelConfig(), vision: false });
   assert.equal(JSON.parse(await tool.execute({ action: 'read', imageId: saved.id }, { signal: signal() })).code, 'VISION_DISABLED');
+  f.store.setModelConfig({ ...f.store.modelConfig(), vision: true });
   const before = imageMemoryTool(f.images, { run: () => assert.fail('future image must not enter an old turn') }, f.scope, () => {}, { maxTime: entry().time - 1 });
   assert.equal(JSON.parse(await before.execute({ action: 'search' }, { signal: signal() })).total, 0);
+  assert.equal(JSON.parse(await before.execute({ action: 'read', imageId: saved.id }, { signal: signal() })).code, 'IMAGE_MEMORY_UNAVAILABLE');
+  assert.equal(f.images.list(f.scope, { before: entry().time }).total, 1);
   const controller = new AbortController(); controller.abort(new Error('cancelled'));
   await assert.rejects(tool.execute({ action: 'search' }, { signal: controller.signal }), /cancelled/);
 });

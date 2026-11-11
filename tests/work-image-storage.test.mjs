@@ -55,6 +55,15 @@ function assertSaved(job, archive, expected) {
   assert.deepEqual(fs.readFileSync(path.join(job.workspaceRoot, archive.path)), expected);
   assert.equal(archive.sha256, digest(expected));
 }
+function assertImageMemory(f, job, expected, deliveryState) {
+  const selector = { ...scope, collection: 'generated' },
+    items = f.channel.imageMemory.list(selector).items.filter(item => item.generation.jobId === job.id);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].digest, digest(expected));
+  assert.equal(items[0].generation.deliveryState, deliveryState);
+  assert.deepEqual(Buffer.from(f.channel.imageMemory.content(selector, items[0].id).data, 'base64'), expected);
+  return items[0];
+}
 
 test('parallel same-name images get independent main-directory copies and return the original bytes', async t => {
   const gate = Promise.withResolvers(); let count = 0;
@@ -73,6 +82,7 @@ test('parallel same-name images get independent main-directory copies and return
     const original = fs.readFileSync(path.join(job.workspaceRoot, job.folder, 'puppy.png'));
     assert.equal(job.imageArchives.length, 1); assertSaved(job, job.imageArchives[0], original);
     assert.equal(job.result.artifacts[0].path, 'puppy.png'); assert.equal(job.delivery.state, 'sent');
+    assertImageMemory(f, job, original, 'sent');
   }
   assert.equal(f.sent.length, 2);
   for (const payload of f.sent) {
@@ -91,16 +101,19 @@ test('a generated image is archived immediately and survives a later DSH executi
   });
   const created = f.channel.work.create(scope, '生成图片后执行一个失败步骤'); await started.promise;
   const running = f.channel.work.get(created.id, scope); assert.equal(running.state, 'running'); assertSaved(running, running.imageArchives[0], puppy);
+  assertImageMemory(f, running, puppy, 'not-confirmed');
   released.resolve(); await f.channel.work.whenIdle();
   const job = new WorkStore(f.store).get(created.id); assert.equal(job.state, 'failed'); assertSaved(job, job.imageArchives[0], puppy);
   assert.equal(job.result.artifacts[0].sha256, digest(puppy)); assert.equal(job.delivery.state, 'sent');
   assert.deepEqual(Buffer.from(f.sent[0].message.find(part => part.type === 'image').data.base64, 'base64'), puppy);
   assert.deepEqual(fs.readFileSync(path.join(created.cwd, 'puppy.png')), puppy);
+  assertImageMemory(f, job, puppy, 'sent');
 });
 
 test('cancellation after native file creation still archives the image without sending or rerunning', async t => {
   const started = Promise.withResolvers(), released = Promise.withResolvers(); let runs = 0;
   const f = fixture(t, async input => {
+    assert(input.imageMemoryTools.some(tool => tool.name === 'wechat_generated_image_memory'));
     runs++; await input.onSession('native-cancelled-image', { native: true });
     fs.writeFileSync(path.join(input.cwd, 'puppy.png'), puppy); started.resolve(); await released.promise; input.signal.throwIfAborted();
   });
@@ -108,6 +121,7 @@ test('cancellation after native file creation still archives the image without s
   f.channel.work.cancel(created.id, scope); released.resolve(); await f.channel.work.whenIdle();
   const job = new WorkStore(f.store).get(created.id); assert.equal(job.state, 'cancelled'); assert.equal(job.delivery.state, 'suppressed');
   assertSaved(job, job.imageArchives[0], puppy); assert.equal(f.sent.length, 0); assert.equal(runs, 1);
+  assertImageMemory(f, job, puppy, 'not-confirmed');
 });
 
 test('changed registered image retains both versions while stale delivery stops before the text', async t => {
@@ -135,6 +149,8 @@ test('continuing a task does not archive its unchanged old image as a new genera
   const first = await f.start(), second = await f.start('只检查原图，不重新生成', first.id);
   assert.equal(first.imageArchives.length, 1); assert.equal(second.imageArchives, undefined);
   assert.equal(second.folder, first.folder); assertSaved(first, first.imageArchives[0], puppy);
+  assertImageMemory(f, first, puppy, 'sent');
+  assert.equal(f.channel.imageMemory.list({ ...scope, collection: 'generated' }).storedCount, 1);
 });
 
 test('archive directory junctions fail visibly while retaining and delivering the task original', async t => {
@@ -160,10 +176,16 @@ test('preexisting different archive contents are never overwritten and repeated 
   assert.equal(fs.readdirSync(path.dirname(existing)).length, 2);
 });
 
-test('an original image above 20 MiB keeps exact bytes in the main directory and uses a file attachment automatically', t => {
+test('an original image above 20 MiB keeps exact bytes in generated memory and uses a file attachment automatically', async t => {
   const f = fixture(t), job = f.directJob('abcdef012346'), large = image(200, 21 * 1024 * 1024 + 1);
   fs.writeFileSync(path.join(job.cwd, 'large.png'), large);
   const artifact = readWorkArtifact(job.cwd, 'large.png').metadata;
   const [saved] = archiveWorkImages(job, job.cwd, [artifact]); assertSaved(job, saved, large);
   assert.equal(saved.kind, 'file'); assert.equal(artifact.path, 'large.png'); assert.equal(saved.bytes, large.length);
+  const generated = { ...job, ...scope, operations: [], imageArchives: [saved], request: '合成大图', createdAt: Date.now() };
+  assert.equal((await f.channel.work.generatedImages.captureJob(generated)).saved, 1);
+  const item = assertImageMemory(f, job, large, 'not-confirmed');
+  assert(item.hasThumbnail, item.thumbnailError);
+  await assert.rejects(f.channel.imageMemory.capture(scope, { messageId: 'large-received' },
+    { resourceId: 'large-received' }, { data: large.toString('base64'), mediaType: 'image/png', quality: 'original' }), { code: 'IMAGE_MEMORY_INVALID' });
 });

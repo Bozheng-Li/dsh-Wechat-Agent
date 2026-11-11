@@ -4,10 +4,15 @@ import { atomicJson } from '../../backend/storage/atomic-json.ts';
 import { workPath } from '../work/policy.mjs';
 import { ChannelError, publicError } from '../../shared/contracts.mjs';
 import { identity } from '../../backend/storage/keys.mjs';
-import { momentsId, momentsSettings } from '../../shared/moments.mjs';
+import { momentsId, momentsSettings, momentsReplyEnabled } from '../../shared/moments.mjs';
 import { readPrompt } from '../../prompts/loader.mjs';
 import { personaInstructions } from '../../prompts/reply/compose.mjs';
 import { MomentsPublishing } from './publishing.mjs';
+import { MomentsMaterials } from './materials.mjs';
+import { MomentsLikes } from './likes.mjs';
+import { MomentsInteractions } from './interactions.mjs';
+import { runFriendReplies, validateFriendReplies } from './friend-replies.mjs';
+import { unavailableMoment, nextMomentReadFailure } from './read-state.mjs';
 
 const key = (accountId, postId, commentId) => identity([accountId, postId, commentId ?? '']);
 const clone = value => structuredClone(value);
@@ -16,22 +21,31 @@ const clone = value => structuredClone(value);
 export class MomentsAutomation {
   constructor(channel) {
     this.channel = channel; this.now = channel.now; this.stopped = true;
+    this.materials = new MomentsMaterials(channel);
     this.publishing = new MomentsPublishing(channel);
-    this.data = { version: 1, ownerStoreId: channel.store.data.storeId, accounts: {}, posts: {}, replies: {} };
+    this.likes = new MomentsLikes(channel);
+    this.interactions = new MomentsInteractions(channel);
+    this.data = { version: 1, ownerStoreId: channel.store.data.storeId, accounts: {}, posts: {}, replies: {}, friendPosts: {} };
     try {
       const stored = JSON.parse(fs.readFileSync(this.file(), 'utf8'));
       if (stored.version !== 1 || stored.ownerStoreId !== channel.store.data.storeId ||
           ![stored.accounts, stored.posts, stored.replies].every(value => value && typeof value === 'object' && !Array.isArray(value))) throw Error();
       for (const rule of Object.values(stored.accounts)) {
-        momentsSettings(rule.settings);
+        rule.settings = momentsSettings(rule.settings);
+        rule.friendEnabledAt ??= 0;
+        if (!Number.isSafeInteger(rule.friendEnabledAt) || rule.friendEnabledAt < 0 || rule.settings.friendRepliesEnabled && rule.friendEnabledAt === 0) throw Error();
         if (!Number.isSafeInteger(rule.enabledAt) || !Number.isSafeInteger(rule.nextRunAt) || typeof rule.revision !== 'string') throw Error();
       }
-      for (const post of Object.values(stored.posts)) if (!momentsId(post.id) || typeof post.accountId !== 'string' || !Number.isSafeInteger(post.createdAt)) throw Error();
+      for (const post of Object.values(stored.posts)) if (!momentsId(post.id) || typeof post.accountId !== 'string' || !Number.isSafeInteger(post.createdAt) ||
+          post.readFailure && (!Number.isSafeInteger(post.readFailure.attempts) || post.readFailure.attempts < 1 ||
+            !Number.isSafeInteger(post.readFailure.failedAt) || !Number.isSafeInteger(post.readFailure.retryAt))) throw Error();
       for (const reply of Object.values(stored.replies)) {
         if (!momentsId(reply.postId) || !momentsId(reply.commentId) || typeof reply.accountId !== 'string' ||
-            !['generating', 'draft', 'sending', 'sent', 'unknown', 'failed', 'rejected', 'existing'].includes(reply.state)) throw Error();
+            !['generating', 'draft', 'sending', 'sent', 'unknown', 'failed', 'rejected', 'existing', 'skipped'].includes(reply.state)) throw Error();
         if (reply.state === 'sending') { reply.state = 'unknown'; reply.error = '上次提交中断，结果不明，未自动重试'; }
       }
+      stored.friendPosts ??= {};
+      validateFriendReplies(stored);
       this.data = stored;
     } catch (error) { if (error.code !== 'ENOENT') this.error = '朋友圈记录无法读取或归属无效；原文件保留，定时操作已停止'; }
   }
@@ -48,21 +62,23 @@ export class MomentsAutomation {
     if (this.channel.closed || this.channel.fault || !status.online || status.account?.id !== accountId)
       throw new ChannelError('ACCOUNT_CHANGED', '微信连接、账号或运行状态已变化，未继续朋友圈操作');
   }
-  rule(accountId) { return this.data.accounts[accountId] ?? { settings: momentsSettings(), enabledAt: 0, nextRunAt: 0, revision: '' }; }
+  rule(accountId) { return this.data.accounts[accountId] ?? { settings: momentsSettings(), enabledAt: 0, friendEnabledAt: 0, nextRunAt: 0, revision: '' }; }
   list(accountId) {
-    return { ...clone(this.rule(accountId)), publishing: this.publishing.list(accountId), running: this.activeAccount === accountId, schedulerStarted: !this.stopped, error: this.error ?? null,
+    return { ...clone(this.rule(accountId)), publishing: this.publishing.list(accountId), likes: this.likes.list(accountId), interactions: this.interactions.list(accountId), running: this.activeAccount === accountId, schedulerStarted: !this.stopped, error: this.error ?? null,
       posts: Object.values(this.data.posts).filter(post => post.accountId === accountId).sort((a, b) => b.createdAt - a.createdAt).slice(0, 100).map(clone),
-      replies: Object.values(this.data.replies).filter(reply => reply.accountId === accountId).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 100).map(clone) };
+      replies: Object.values(this.data.replies).filter(reply => reply.accountId === accountId && !reply.historyDeleted).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 100).map(clone) };
   }
   configure(accountId, input) {
-    this.check(accountId); const settings = momentsSettings(input), previous = this.rule(accountId);
-    if (settings.scope === 'selected') for (const id of settings.selectedPostIds) {
+    this.check(accountId); momentsSettings(input, { partial: true });
+    const previous = this.rule(accountId), settings = momentsSettings({ ...previous.settings, ...input });
+    if (settings.enabled && settings.scope === 'selected') for (const id of settings.selectedPostIds) {
       const post = this.data.posts[key(accountId, id)];
       if (!post || post.deleted) throw new ChannelError('MOMENTS_TARGET_INVALID', '请先读取并选择当前账号自己发布且未删除的朋友圈');
     }
     if (this.activeAccount === accountId) this.controller?.abort(new ChannelError('MOMENTS_SETTINGS_CHANGED', '定时设置已变更，旧轮次已停止'));
     const enabledAt = !previous.settings.enabled && settings.enabled ? this.now() : previous.enabledAt;
-    this.data.accounts[accountId] = { ...previous, settings, enabledAt, revision: randomUUID(), nextRunAt: settings.enabled ? this.now() + settings.intervalMinutes * 60000 : 0 };
+    const friendEnabledAt = settings.friendRepliesEnabled && !previous.settings.friendRepliesEnabled ? this.now() : previous.friendEnabledAt;
+    this.data.accounts[accountId] = { ...previous, settings, enabledAt, friendEnabledAt, revision: randomUUID(), nextRunAt: momentsReplyEnabled(settings) ? this.now() + settings.intervalMinutes * 60000 : 0 };
     this.save(); return this.list(accountId);
   }
   remember(accountId, items = []) {
@@ -70,20 +86,40 @@ export class MomentsAutomation {
     let changed = false;
     for (const post of items) {
       if (post.author?.userId !== accountId || !momentsId(post.id) || !Number.isSafeInteger(post.createdAt)) continue;
-      const id = key(accountId, post.id), value = { accountId, id: post.id, createdAt: post.createdAt, text: post.text ?? '', imageCount: post.imageCount ?? 0, deleted: !!post.deleted };
+      const id = key(accountId, post.id), previous = this.data.posts[id],
+        value = { ...previous, accountId, id: post.id, createdAt: post.createdAt, text: post.text ?? '', imageCount: post.imageCount ?? 0,
+          deleted: !!post.deleted || !!previous?.deleted };
       if (JSON.stringify(this.data.posts[id]) !== JSON.stringify(value)) { this.data.posts[id] = value; changed = true; }
     }
     if (changed) this.save();
   }
+  recordReadFailure(accountId, postId, error) {
+    const post = this.data.posts[key(accountId, postId)];
+    if (this.error || !post || post.deleted || !unavailableMoment(error)) return false;
+    post.readFailure = nextMomentReadFailure(post.readFailure, error, this.now()); this.save(); return true;
+  }
+  recordReadSuccess(accountId, postId) {
+    const post = this.data.posts[key(accountId, postId)];
+    if (this.error || !post?.readFailure || post.deleted) return;
+    delete post.readFailure; this.save();
+  }
   recordReceipt(result) {
     if (this.error) return;
     const { accountId, postId } = result;
+    if (result.action === 'comment' && momentsId(postId)) {
+      this.data.friendPosts[key(accountId, postId)] = { accountId, id: postId, commentedAt: this.now() };
+      this.save();
+    }
     if (result.action === 'publish') this.remember(accountId, [{ id: postId, author: { userId: accountId }, createdAt: result.createdAt ?? Math.floor(this.now() / 1000), text: result.text, imageCount: result.imageCount }]);
-    if (result.action === 'delete' && this.data.posts[key(accountId, postId)]) { this.data.posts[key(accountId, postId)].deleted = true; this.save(); }
+    if (result.action === 'delete' && result.deleted === true && this.data.posts[key(accountId, postId)]) {
+      Object.assign(this.data.posts[key(accountId, postId)], { deleted: true, deletedAt: this.now(), deletionDelivery: result.delivery }); this.save();
+    }
     if (result.replyToCommentId) {
       const id = key(accountId, postId, result.replyToCommentId), previous = this.data.replies[id] ?? {};
+      const mismatch = previous.origin === 'friend' && result.replyToUserId !== previous.incomingReply.userId;
       this.data.replies[id] = { ...previous, accountId, postId, commentId: result.replyToCommentId, replyId: result.commentId, text: result.text,
-        replyToUserId: result.replyToUserId, state: 'sent', delivery: result.delivery, updatedAt: this.now(), error: null }; this.save();
+        replyToUserId: result.replyToUserId, state: mismatch ? 'unknown' : 'sent', delivery: result.delivery, updatedAt: this.now(),
+        error: mismatch ? '回复回执的接收者不匹配，结果不明，未重发' : null }; this.save();
     }
   }
   async read(accountId, query, signal) {
@@ -91,7 +127,9 @@ export class MomentsAutomation {
     const result = await this.channel.transport.readMoments({ accountId, scopeKey: 'moments-owner:' + accountId, query }, signal);
     this.check(accountId, signal);
     if (result?.accountId !== accountId) throw new ChannelError('ACCOUNT_CHANGED', '朋友圈结果与当前账号不匹配');
-    this.remember(accountId, result.items); return result;
+    this.remember(accountId, result.items);
+    if (['comments', 'detail'].includes(query.action)) this.recordReadSuccess(accountId, query.postId);
+    return result;
   }
   async discover(accountId, signal, lookbackDays = 7) {
     let cursor; const threshold = this.now() - lookbackDays * 86400000;
@@ -109,17 +147,20 @@ export class MomentsAutomation {
     return this.channel.moments.writeOwner(query, accountId, requestId, signal, () => this.check(accountId, signal));
   }
   start() {
+    this.materials.start();
     this.publishing.start();
+    this.likes.start();
+    this.interactions.automation.start();
     if (this.timer || this.error) return; this.stopped = false;
     this.timer = setInterval(() => { void this.tick().catch(() => {}); }, 10000); this.timer.unref?.();
   }
-  async close() { this.stopped = true; clearInterval(this.timer); this.timer = undefined; this.controller?.abort(); await Promise.all([this.pending?.catch(() => {}), this.publishing.close()]); }
-  async whenIdle() { await Promise.all([this.pending?.catch(() => {}), this.publishing.whenIdle()]); }
+  async close() { this.stopped = true; clearInterval(this.timer); this.timer = undefined; this.controller?.abort(); await Promise.all([this.pending?.catch(() => {}), this.publishing.close(), this.materials.close(), this.likes.close(), this.interactions.close()]); }
+  async whenIdle() { await Promise.all([this.pending?.catch(() => {}), this.publishing.whenIdle(), this.materials.whenIdle(), this.likes.whenIdle(), this.interactions.whenIdle()]); }
   tick() {
     if (this.pending) return this.pending;
     const status = this.channel.transport.status(), accountId = status.account?.id, rule = this.rule(accountId);
     if (this.stopped || this.error || !accountId || !status.online || !status.momentsReadReady || !status.momentsWriteReady ||
-        !this.channel.store.settings(accountId).enabled || !rule.settings.enabled || rule.nextRunAt > this.now()) return Promise.resolve();
+        !this.channel.store.settings(accountId).enabled || !momentsReplyEnabled(rule.settings) || rule.nextRunAt > this.now()) return Promise.resolve();
     this.activeAccount = accountId; this.controller = new AbortController();
     this.pending = this.run(accountId, clone(rule), AbortSignal.any([this.controller.signal, AbortSignal.timeout(300000)]))
       .finally(() => { this.pending = undefined; this.controller = undefined; this.activeAccount = undefined; });
@@ -127,18 +168,30 @@ export class MomentsAutomation {
   }
   async run(accountId, rule, signal) {
     const check = () => { this.check(accountId, signal);
-      if (this.stopped || !this.channel.store.settings(accountId).enabled || this.rule(accountId).revision !== rule.revision)
+      if (this.stopped || !this.channel.store.settings(accountId).enabled || this.rule(accountId).revision !== rule.revision || !momentsReplyEnabled(this.rule(accountId).settings))
         throw new ChannelError('MOMENTS_SETTINGS_CHANGED', '定时回复已暂停或设置变更，旧轮次未继续'); };
-    let scanned = 0, replied = 0, skipped = 0, attempted = 0; const startedAt = this.now();
+    let scanned = 0, replied = 0, skipped = 0, attempted = 0, unavailable = 0, deferred = 0, friend, ownError = null; const startedAt = this.now();
     try {
-      check(); if (rule.settings.scope === 'own') await this.discover(accountId, signal, rule.settings.lookbackDays); check();
+      check();
+      try {
+      if (rule.settings.enabled && rule.settings.scope === 'own') await this.discover(accountId, signal, rule.settings.lookbackDays); check();
       const threshold = this.now() - rule.settings.lookbackDays * 86400000;
-      const posts = Object.values(this.data.posts).filter(post => post.accountId === accountId && !post.deleted && post.createdAt * 1000 >= threshold &&
+      const posts = Object.values(this.data.posts).filter(post => rule.settings.enabled && post.accountId === accountId && !post.deleted && post.createdAt * 1000 >= threshold &&
         (rule.settings.scope === 'own' || rule.settings.selectedPostIds.includes(post.id))).sort((a, b) => b.createdAt - a.createdAt).slice(0, 100);
       outer: for (const post of posts) {
+        check();
+        const current = this.data.posts[key(accountId, post.id)];
+        if (current?.deleted) continue;
+        if (current?.readFailure?.retryAt > this.now()) { deferred++; continue; }
         const comments = []; let cursor;
-        do { check(); const result = await this.read(accountId, { action: 'comments', postId: post.id, limit: 50, ...(cursor ? { cursor } : {}) }, signal);
-          comments.push(...result.items); cursor = result.nextCursor; check(); } while (cursor);
+        try {
+          do { check(); const result = await this.read(accountId, { action: 'comments', postId: post.id, limit: 50, ...(cursor ? { cursor } : {}) }, signal);
+            comments.push(...result.items); cursor = result.nextCursor; check(); } while (cursor);
+        } catch (error) {
+          check();
+          if (!this.recordReadFailure(accountId, post.id, error)) throw error;
+          unavailable++; continue;
+        }
         const existing = new Set(comments.filter(comment => !comment.deleted && comment.userId === accountId && comment.replyToCommentId).map(comment => comment.replyToCommentId));
         for (const comment of comments) {
           scanned++; const id = key(accountId, post.id, comment.id), prior = this.data.replies[id];
@@ -171,13 +224,25 @@ export class MomentsAutomation {
           }
         }
       }
-      Object.assign(this.data.accounts[accountId], { lastRun: { startedAt, finishedAt: this.now(), scanned, attempted, replied, skipped, state: attempted > replied ? 'partial' : 'completed' }, lastError: null });
+      } catch (error) {
+        // A failed own-post read must not prevent the independently enabled
+        // friend conversation pass. Connection/configuration changes still stop both.
+        check(); ownError = publicError(error, '自己的朋友圈评论读取未完成').message;
+      }
+      if (rule.settings.friendRepliesEnabled) {
+        friend = { scanned: 0, attempted: 0, replied: 0, skipped: 0, unknown: 0, failed: 0, readFailed: 0 };
+        await runFriendReplies(this, accountId, rule, signal, check, friend);
+      }
+      Object.assign(this.data.accounts[accountId], { lastRun: { startedAt, finishedAt: this.now(), ownEnabled: rule.settings.enabled, scanned, attempted, replied, skipped, unavailable: unavailable + deferred, deferred,
+        ...(friend ? { friend } : {}), state: ownError ? friend || replied ? 'partial' : 'failed'
+          : attempted > replied || unavailable || deferred || friend?.failed || friend?.unknown || friend?.readFailed ? 'partial' : 'completed' }, lastError: ownError });
     } catch (error) {
-      if (this.data.accounts[accountId]) Object.assign(this.data.accounts[accountId], { lastRun: { startedAt, finishedAt: this.now(), scanned, attempted, replied, skipped, state: 'failed' },
+      if (this.data.accounts[accountId]) Object.assign(this.data.accounts[accountId], { lastRun: { startedAt, finishedAt: this.now(), ownEnabled: rule.settings.enabled, scanned, attempted, replied, skipped, unavailable: unavailable + deferred, deferred,
+          ...(friend ? { friend } : {}), state: signal.aborted ? 'cancelled' : 'failed' },
         lastError: publicError(error, '本轮朋友圈抓取未完成').message });
     } finally {
       if (!this.error && this.rule(accountId).revision === rule.revision) {
-        this.data.accounts[accountId].nextRunAt = this.rule(accountId).settings.enabled ? this.now() + rule.settings.intervalMinutes * 60000 : 0; this.save();
+        this.data.accounts[accountId].nextRunAt = momentsReplyEnabled(this.rule(accountId).settings) ? this.now() + rule.settings.intervalMinutes * 60000 : 0; this.save();
       }
     }
   }

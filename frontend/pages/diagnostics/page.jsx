@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { formatTime } from "../../shared/conversations.mjs";
 import { Button, Tag, Heading, Feedback, Offline } from "../../components/workbench-ui.jsx";
 import { useWorkbench } from "../../hooks/use-workbench.mjs";
+import { Glyph } from '../../components/glyph.jsx';
 
 export function DiagnosticsPage({ rpc, status, onNavigate }) {
   const statusKey = JSON.stringify([
@@ -24,8 +25,8 @@ export function DiagnosticsPage({ rpc, status, onNavigate }) {
     return () => clearInterval(timer);
   }, [status.account?.id]);
   return (
-    <section className="wa-wb-page" data-testid="diagnostics-page">
-      <Heading title="运行检查" text="检查微信连接、模型与已启用的能力，查看实际结果。">
+    <section className="wa-wb-page wa-diagnostics-page" data-testid="diagnostics-page">
+      <Heading icon="spark" title="运行检查" text="检查微信连接、模型与已启用的能力，查看实际结果。">
         <Button disabled={state.busy || !status.account} onClick={() => state.execute('diagnostics.run')}>
           {state.busy ? '正在逐项检查…' : '检查现在能做什么'}
         </Button>
@@ -37,7 +38,7 @@ export function DiagnosticsPage({ rpc, status, onNavigate }) {
       </Heading>
       <Feedback state={state} cancellable={false} />
       <Offline status={status}>
-        <div className="wa-wb-strip">
+        <div className="wa-diagnostics-summary">
           <div>
             <span>最近检查</span>
             <strong>{state.data?.finishedAt ? formatTime(state.data.finishedAt) : '—'}</strong>
@@ -60,7 +61,8 @@ export function DiagnosticsPage({ rpc, status, onNavigate }) {
                 detail: '点击上方按钮，开始实际检查。',
               }))
           ).map((item) => (
-            <article className="wa-wb-card wa-wb-capability wa-diagnostics-row" key={item.id}>
+            <article className="wa-diagnostics-row" key={item.id} data-state={item.state}>
+              <span className="wa-diagnostics-mark" aria-hidden="true"><Glyph name={item.state === 'passed' ? 'check' : item.state === 'failed' ? 'close' : 'clock'} /></span>
               <div className="wa-diagnostics-content">
                 <div className="wa-wb-between"><h2>{item.title}</h2><Tag state={item.state} /></div>
                 <p>{item.error?.message || item.detail}</p>

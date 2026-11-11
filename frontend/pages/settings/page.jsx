@@ -5,6 +5,7 @@ export function SettingsIndex({ status, onNavigate }) {
   const groups = [
     {
       title: '助手与能力',
+      description: '定义它如何理解和回应。',
       items: [
         { page: 'persona', icon: 'person', title: '默认助手', text: '名字、唤醒词与表达偏好', value: status.persona?.name || '微信助手' },
         { page: 'identity', icon: 'shield', title: '全局身份', text: '共同遵循的身份与行为规则' },
@@ -14,6 +15,7 @@ export function SettingsIndex({ status, onNavigate }) {
     },
     {
       title: '运行与数据',
+      description: '管理权限、保存位置与运行状态。',
       items: [
         { page: 'administrators', icon: 'shield', title: '管理员', text: '远程查询与工作权限', value: (status.remote?.globalAdminIds?.length || 0) + ' 位管理员' },
         { page: 'storage', icon: 'folder', title: '工作目录', text: '记录、记忆与任务的保存位置' },
@@ -23,14 +25,14 @@ export function SettingsIndex({ status, onNavigate }) {
     },
   ];
   return <>
-    <PageHead title="设置" description="管理助手能力、运行权限与数据。" />
+    <PageHead icon="settings" title="设置" description="管理助手能力、运行权限与数据。" />
     <div className="wa-settings-sections">
       {groups.map(group => <section className="wa-settings-section" key={group.title}>
-        <header className="wa-settings-section-head"><h2>{group.title}</h2></header>
+        <header className="wa-settings-section-head"><h2>{group.title}</h2><p>{group.description}</p></header>
         <div className="wa-settings-list">
           {group.items.map(item => <button type="button" className="wa-setting-link"
             data-testid={'open-' + item.page} key={item.page} onClick={() => onNavigate(item.page, 'settings')}>
-            <div className="wa-card-icon"><Glyph name={item.icon} /></div>
+            <span className="wa-setting-symbol"><Glyph name={item.icon} /></span>
             <div className="wa-setting-copy"><h3>{item.title}</h3><p>{item.text}</p></div>
             <span className="wa-setting-value">{item.value || ''}</span>
             <Glyph name="arrow" className="wa-icon-small" />

@@ -21,8 +21,14 @@ import { retryArtifacts, retryWorkDelivery } from './delivery.mjs';
 import { consolidateWorkProjects, migrateWorkProjectSession } from './projects.mjs';
 import { sameDirectory } from '../../backend/storage/paths.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
+import { createToolNotifier } from '../conversation/tool-notices.mjs';
 import { WorkProgressReporter } from './progress.mjs';
 import { workPresentation } from './presentation.mjs';
+import { GeneratedImageMemory } from '../memory/images/generated.mjs';
+import { imageMemoryTool } from '../memory/images/tool.mjs';
+import { referenceText } from '../../shared/message-references.mjs';
+import { refreshReferenceImages } from '../memory/images/references.mjs';
+import { workConversationMemoryTool } from '../memory/query/work-tool.mjs';
 
 const matches = (job, scope = {}) => ['accountId', 'chatType', 'peerId', 'senderId'].every(key => scope[key] === undefined || scope[key] === job[key]);
 const folderKey = job => {
@@ -36,6 +42,8 @@ export class WorkService {
     this.active = new Map(); this.held = new Set(); this.changed = Promise.withResolvers();
     this.deliveries = new Map();
     this.imageGeneration = new ImageGenerationService(channel.runner?.ctx, channel.store);
+    this.generatedImages = new GeneratedImageMemory(channel.imageMemory, this.store);
+    this.chatSnapshots = new Map();
   }
   assertAllowed(job, signal, { artifactRecovery = false, retryId } = {}) {
     if (retryId) { retryArtifacts(job, retryId); artifactRecovery = true; }
@@ -84,7 +92,7 @@ export class WorkService {
     const key = folderKey(job);
     return [...this.active.values(), ...this.deliveries.values()].some(value => folderKey(value.job) === key);
   }
-  create(scope, request, previousId, { defer = false, imageRequest, conversationTurn = false } = {}) {
+  create(scope, request, previousId, { defer = false, imageRequest, conversationTurn = false, quotedReferences, conversationSnapshot } = {}) {
     this.assertAllowed(scope);
     if (typeof request !== 'string' || !request.trim() || request.length > 12000)
       throw new ChannelError('WORK_REQUEST_INVALID', '工作要求应为 1–12000 字');
@@ -97,12 +105,28 @@ export class WorkService {
     const id = randomBytes(6).toString('hex'), folder = previous?.folder ?? `微信agent/work/${id}`;
     const workspaceRoot = path.resolve(this.channel.store.storageSettings().workspacePath), cwd = taskDirectory(this.channel.store, folder);
     fs.mkdirSync(cwd, { recursive: true, mode: 0o700 });
-    const job = this.store.add({ id, ...scope, request: request.trim(), folder, workspaceRoot, connectionAccess,
+    const requestedAt = scope.requestedAt ?? this.channel.now();
+    let chatSnapshot = conversationSnapshot && structuredClone(conversationSnapshot);
+    if (!chatSnapshot && this.channel.memory?.snapshot) {
+      try {
+        chatSnapshot = this.channel.memory.snapshot(scope, scope.requestKey);
+        chatSnapshot.entries = chatSnapshot.entries.filter(entry => (entry.observedAt ?? entry.time) <= requestedAt);
+        // A later compaction may cover material not yet visible to this request.
+        if (chatSnapshot.updatedAt > requestedAt) chatSnapshot.summary = '';
+      } catch (error) {
+        if (!(error instanceof ChannelError)) throw error;
+        // A damaged optional memory must not prevent unrelated native work.
+        chatSnapshot = { unavailable: publicError(error, '当前会话记忆不可读取').message };
+      }
+    }
+    const job = this.store.add({ id, ...scope, requestedAt, request: request.trim(), folder, workspaceRoot, connectionAccess,
       ...(selectedImage ? { imageRequest: selectedImage } : {}),
+      ...(quotedReferences?.length ? { quotedReferences: structuredClone(quotedReferences) } : {}),
       ...(previous ? { continues: previous.id } : {}),
       ...(conversationTurn ? { conversationTurn: true } : {}),
       sessionId: previous?.workspaceRoot === workspaceRoot ? previous.sessionId : null,
       state: 'queued', delivery: { state: 'not-ready' }, operations: [], createdAt: this.channel.now(), updatedAt: this.channel.now() });
+    if (chatSnapshot) this.chatSnapshots.set(id, structuredClone(chatSnapshot));
     if (defer) this.held.add(id);
     this.pending.push(id); this.notify(); this.drain(); return this.view(job);
   }
@@ -115,6 +139,12 @@ export class WorkService {
     if (command.action === 'help') return WORK_HELP;
     this.assertAllowed(scope);
     if (command.action === 'input-required') return '当前是工作模式，请用文字说明要执行的任务。';
+    if (command.action === 'status' && command.all === true) {
+      const jobs = this.store.list(scope), recent = jobs.slice(0, 12);
+      if (!jobs.length) return '你目前没有工作任务。';
+      return [`你有 ${jobs.length} 项工作${jobs.length > recent.length ? `，下面是最近 ${recent.length} 项` : ''}：`,
+        ...recent.map(job => `${workStateLabels[job.state]}：${job.request.replace(/\s+/g, ' ').slice(0, 100)}${job.request.length > 100 ? '…' : ''}（${workDeliveryLabels[job.delivery.state]}）`)].join('\n');
+    }
     const id = command.id ?? this.store.list(scope)[0]?.id;
     if (['status', 'cancel'].includes(command.action) && !id) return '此会话中你还没有工作任务。';
     if (command.action === 'status') {
@@ -128,9 +158,9 @@ export class WorkService {
     const job = this.create(scope, command.request, previousId, options);
     options?.onCreated?.(job);
     if (job.continues && this.folderBusy(job) && !this.active.has(job.id))
-      return '收到，已追加到原工作会话，当前一轮完成并回传后接着处理。';
-    if (!this.active.has(job.id) && this.active.size >= this.capacity().maxConcurrent) return '收到了，目前同时执行的任务已满，空出一个会话就开始，结果出来后发你。';
-    return job.continues ? '好，我在原工作会话接着处理，完成后把结果发你。'
+      return '收到，等前一项处理并回传完，我接着做。';
+    if (!this.active.has(job.id) && this.active.size >= this.capacity().maxConcurrent) return '收到了，现在还在排队，前面的任务空出位置后就开始。';
+    return job.continues ? '好，我接着处理，完成后把结果发你。'
       : remoteInspectionRequest(job.request) ? '好，我来查一下，拿到结果后发你。' : '好，我来处理，完成后把结果发你。';
   }
   drain() {
@@ -149,7 +179,7 @@ export class WorkService {
       const active = { id, job, controller: new AbortController(), finished: finished.promise };
       this.active.set(id, active);
       active.pending = this.execute(id, active).catch(error => this.channel.fail(error)).finally(() => {
-        this.active.delete(id); finished.resolve(); this.notify(); this.drain();
+        this.active.delete(id); this.chatSnapshots.delete(id); finished.resolve(); this.notify(); this.drain();
       });
       this.notify();
     }
@@ -167,9 +197,12 @@ export class WorkService {
     let createdTaskCount = 0;
     let producedResult;
     const imageSnapshot = workImageSnapshot(cwd);
-    const saveImages = artifacts => {
+    const saveImages = async artifacts => {
       const archives = archiveWorkImages(job, cwd, artifacts);
-      if (archives.length) job = save({ imageArchives: mergeImageArchives(job.imageArchives, archives) });
+      if (archives.length) {
+        job = save({ imageArchives: mergeImageArchives(job.imageArchives, archives) });
+        await this.generatedImages.captureJob(job);
+      }
     };
     let progress;
     try {
@@ -198,27 +231,43 @@ export class WorkService {
           }
         }
       }
-      job = save({ state: 'running', startedAt: this.channel.now() });
+      job = save({ state: 'running', startedAt: this.channel.now(),
+        ...(job.quotedReferences?.length ? { quotedReferences: refreshReferenceImages(this.channel.imageMemory, job, job.quotedReferences) } : {}) });
       progress = new WorkProgressReporter(this, id, controller.signal);
       active.progress = progress;
-      const result = await this.runner.run({ request: job.request, cwd, workspaceRoot: job.workspaceRoot, sessionId: job.sessionId, signal: controller.signal, limits, connectionAccess: job.connectionAccess === true,
+      const result = await this.runner.run({ request: [job.request, referenceText(job.quotedReferences)].filter(Boolean).join('\n\n'), cwd, workspaceRoot: job.workspaceRoot, sessionId: job.sessionId, signal: controller.signal, limits, connectionAccess: job.connectionAccess === true,
         onProgress: event => progress.observe(event),
+        onBeforeTool: createToolNotifier(this.channel, { scope: job, requestKey: job.id, workJobId: job.id,
+          signal: controller.signal, assertAllowed: () => this.assertAllowed(job, controller.signal),
+          presentation: workPresentation(this.channel, job) }),
         presentation: workPresentation(this.channel,job),
         ...(job.imageRequest ? { imageRequest: structuredClone(job.imageRequest) } : {}),
         imageGeneration: this.imageGeneration,
+        memoryTools: this.chatSnapshots.has(job.id) ? [workConversationMemoryTool(this.channel, job, this.chatSnapshots.get(job.id),
+          () => this.assertAllowed(job, controller.signal))] : [],
+        imageMemoryTools: ['generated', ...(job.quotedReferences?.some(ref => ref.images?.some(image => image.collection === 'conversation')) ? ['conversation'] : [])].map(collection =>
+          imageMemoryTool(this.channel.imageMemory, this.channel.runner,
+            { ...job, collection, currentJobId: job.id }, () => this.assertAllowed(job, controller.signal),
+            { maxTime: job.requestedAt ?? job.createdAt,
+              ...(collection === 'generated' ? { prepare: signal => this.generatedImages.sync(job, signal, () => this.assertAllowed(job, controller.signal),
+                { before: job.requestedAt ?? job.createdAt, currentJobId: job.id }) } : {}) })),
         moments: job.connectionAccess && this.channel.moments.available(job) ? {
+          subjects: this.channel.moments.subjects(job),
           read: (query, signal) => this.channel.moments.read(query, job, signal, () => this.assertAllowed(job, signal)),
+          ...(this.channel.moments.imagesAvailable(job) ? { readImages: (query, signal) => this.channel.moments.readImages(query, job, signal, () => this.assertAllowed(job, signal)) } : {}),
           ...(this.channel.moments.audienceAvailable(job) ? { audience: signal => this.channel.moments.audience(job, signal, () => this.assertAllowed(job, signal)) } : {}),
           ...(this.channel.moments.writeAvailable(job) ? { write: (query, signal, operationKey) => this.channel.moments.write(query, job, job.id, signal, () => this.assertAllowed(job, signal), operationKey) } : {}),
+          ...(this.channel.moments.likeRecentAvailable(job, job.request) ? { likeRecent: (query, signal) => this.channel.moments.likeRecent(query, job, job.id, job.request, signal, () => this.assertAllowed(job, signal)) } : {}),
           ...(this.channel.momentsAutomation?.publishing ? { manage: (args, signal, operationKey) => this.channel.moments.managePublishing(args, job, job.id, signal, () => this.assertAllowed(job, signal), operationKey) } : {}),
+          ...(this.channel.momentsAutomation?.interactions ? { manageInteractions: (args, signal) => this.channel.moments.manageInteractions(args, job, job.id, signal, () => this.assertAllowed(job, signal)) } : {}),
         } : undefined,
         sessionManagement: { channel: this.channel, scope: job, signal: controller.signal, request: job.request,
           readDialogue: workDialogueHistory(this.channel, { record: { createdAt: job.createdAt } }, job),
           taskState: taskId => workDialogueState(this.channel, job, taskId), createdTaskCount: () => createdTaskCount,
           createTask: (request, previousId, options) => {
             if (createdTaskCount >= WORK_TURN_TASK_LIMIT) throw new ChannelError('WORK_QUEUE_FULL', '本任务最多安排八项独立工作');
-            const scope = Object.fromEntries(['accountId', 'chatType', 'peerId', 'senderId', 'senderName'].map(key => [key, job[key]]));
-            const child = this.create(scope, request, previousId, options); createdTaskCount++;
+            const scope = Object.fromEntries(['accountId', 'chatType', 'peerId', 'senderId', 'senderName', 'requestedAt', 'requestKey'].map(key => [key, job[key]]));
+            const child = this.create(scope, request, previousId, { ...options, conversationSnapshot: this.chatSnapshots.get(job.id) }); createdTaskCount++;
             return { task: { id: child.id, request: child.request, state: child.state }, capacity: this.capacity() };
           } },
         queryStatus: job.connectionAccess ? (query, signal) => {
@@ -228,19 +277,20 @@ export class WorkService {
         assertAllowed: () => this.assertAllowed(job, controller.signal),
         onSession: (sessionId, { native = false } = {}) => { job = save({ sessionId, ...(native ? { nativeExecution: true } : {}) }); },
         onSessionHistory: sessionHistory => { job = save({ sessionHistory }); },
-        onOperation: operation => {
+        onOperation: async operation => {
           const recorded = structuredClone(operation);
           if (recorded.result.text?.length > 2000) recorded.result = { ...recorded.result, text: recorded.result.text.slice(0, 2000), textTruncated: true };
           job = save({ operations: [...job.operations, { ...recorded, at: this.channel.now() }] });
           if (recorded.result.ok && ['wechat_work_output', 'wechat_work_generate_image'].includes(recorded.tool))
-            saveImages(recorded.result.artifacts ?? []);
+            await saveImages(recorded.result.artifacts ?? []);
         } });
       await progress.stop();
+      if (result.requestMetrics?.length) job = save({ requestMetrics: result.requestMetrics });
       producedResult = { text: result.text, ...(result.native ? { originalText: result.text } : {}), files: workFiles(cwd), artifacts: [] };
       const artifacts = workArtifacts([...job.operations, ...(result.artifacts?.length
         ? [{ tool: 'wechat_work_output', result: { ok: true, artifacts: result.artifacts } }] : [])]);
       producedResult.artifacts = artifacts;
-      saveImages(artifacts);
+      await saveImages(artifacts);
       this.assertAllowed(job, controller.signal);
       const polished = result.native ? await polishWorkResult(this.channel.runner, result.text, job.request, controller.signal,workPresentation(this.channel,job)) : { text: result.text };
       this.assertAllowed(job, controller.signal);
@@ -263,6 +313,7 @@ export class WorkService {
       await progress?.stop();
       const archives = archiveChangedWorkImages(job, cwd, imageSnapshot);
       if (archives.length) job = save({ imageArchives: mergeImageArchives(job.imageArchives, archives) });
+      if (job.imageArchives?.length) await this.generatedImages.captureJob(job);
     }
     atomicBytes(workPath(cwd, `.wechat-work/${id}.md`), Buffer.from(workResult(job, cwd, { full: true })));
     if (controller.signal.aborted || job.state === 'cancelled') {
@@ -292,11 +343,12 @@ export class WorkService {
           else if (matched && part.state === 'not-sent') state = 'not-sent';
           else if (matched && ['acknowledged', 'unknown'].includes(part.state) || ['unknown', 'partial'].includes(record.state)) state = 'unknown';
           else if (record.state === 'cancelled') state = 'suppressed';
-          return { ...value, state, ...(state === 'sent' ? { serverMessageId: part.serverMessageId } : {}) };
+          return { ...value, state, ...(state === 'sent' ? { serverMessageId: part.serverMessageId, sentAt: record.sentAt ?? record.acknowledgedAt ?? record.updatedAt ?? this.channel.now() } : {}) };
         });
         this.store.update(job.id, { delivery: { state: record.state === 'sent' ? 'sent' : record.state === 'partial' ? 'partial' :
           record.state === 'unknown' ? 'unknown' : record.state === 'cancelled' ? 'suppressed' : 'failed', recordKey: record.key,
           acknowledgedMessageIds: record.acknowledgedMessageIds ?? [], deliveryParts: record.deliveryParts ?? [], artifacts: deliveries, reason: record.reason ?? '' } });
+        await this.generatedImages.captureJob(this.store.get(job.id));
       } catch (error) {
         if (error?.code === 'STATE_WRITE_FAILED') throw error;
         this.store.update(job.id, { delivery: { state: 'suppressed', reason: publicError(error, '工作结果未回传，请查询任务').message } });
@@ -325,6 +377,7 @@ export class WorkService {
     else if (job.state === 'queued') {
       this.pending = this.pending.filter(value => value !== id);
       this.held.delete(id);
+      this.chatSnapshots.delete(id);
       const cancelled = this.store.update(id, { state: 'cancelled', delivery: { state: 'suppressed', reason: '用户取消，未执行' } });
       this.notify(); this.drain(); return cancelled;
     }
@@ -345,5 +398,5 @@ export class WorkService {
       await Promise.race([this.changed.promise, ...active.map(value => value.finished), ...deliveries.map(value => value.pending)]);
     }
   }
-  async close() { this.closed = true; this.cancelAll('应用停止，未自动重放任务'); await this.whenIdle(); }
+  async close() { this.closed = true; this.cancelAll('应用停止，未自动重放任务'); await this.whenIdle(); this.chatSnapshots.clear(); }
 }

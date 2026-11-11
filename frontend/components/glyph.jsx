@@ -1,5 +1,6 @@
 export function Glyph({ name = 'chat', size, className = '' }) {
   const paths = {
+    menu: <path d="M4 6h16M4 12h16M4 18h16" />,
     chat: (
       <>
         <path d="M20.5 11.2c0 4.6-4.4 8-9.1 8-1.4 0-2.7-.3-3.9-.8L3 20l1.1-4.3a7 7 0 0 1-1.6-4.5c0-4.4 4-8 9-8s9 3.6 9 8Z" />

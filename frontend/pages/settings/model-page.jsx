@@ -35,10 +35,10 @@ export function ModelSettings({
   return (
     <>
       <Back label={backLabel} onClick={onBack} />
-      <PageHead title="模型设置" description="选择回复使用的模型，并单独设置生成参数。" />
+      <PageHead icon="model" title="模型设置" description="选择回复使用的模型，并单独设置生成参数。" />
       <Notice notice={notice} area="model" />
-      <div className="wa-stack wa-content-narrow">
-        <section className="wa-card wa-model-card">
+      <div className="wa-settings-stack wa-content-narrow wa-model-settings">
+        <section className="wa-settings-block wa-model-card">
           <div className="wa-card-heading">
             <div>
               <h2>模型连接</h2>
@@ -48,7 +48,7 @@ export function ModelSettings({
           <ModelPicker connection={connection} catalog={catalog} status={status} blocked={blocked} busy={busy} onSelect={onSelect} />
         </section>
         <form
-          className="wa-card"
+          className="wa-settings-block wa-model-parameters"
           onSubmit={(event) => {
             event.preventDefault();
             onModelSave();
@@ -156,7 +156,7 @@ export function ModelSettings({
           Button={Button}
         />
         <form
-          className="wa-card"
+          className="wa-settings-block wa-model-prompt"
           onSubmit={(event) => {
             event.preventDefault();
             onPromptSave();

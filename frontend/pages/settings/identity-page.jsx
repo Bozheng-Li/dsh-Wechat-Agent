@@ -74,7 +74,7 @@ export function IdentitySettings({ connection, blocked, onSave, onBack, backLabe
   return (
     <>
       <Back label={backLabel} onClick={onBack} />
-      <PageHead
+      <PageHead icon="shield"
         title="全局身份"
         description="所有授权会话共同遵循的身份与行为规则。"
       />
@@ -89,19 +89,20 @@ export function IdentitySettings({ connection, blocked, onSave, onBack, backLabe
         </div>
       )}
       <form
-        className="wa-card wa-content-narrow wa-identity-manuscript"
+        className="wa-settings-document wa-content-narrow wa-identity-manuscript"
         data-testid="agent-identity-editor"
         onSubmit={(event) => {
           event.preventDefault();
           void save();
         }}
       >
-        <div className="wa-card-heading">
+        <div className="wa-editor-toolbar">
           <div>
             <h2>身份与行为正文</h2>
             <p className="wa-muted">直接编辑 Markdown，保存后下一轮读取。</p>
           </div>
         </div>
+        {loading && <p className="wa-editor-loading" role="status">正在读取身份正文…</p>}
         <Field
           label="全局身份 Markdown"
           id="wa-identity-markdown"

@@ -1,6 +1,7 @@
 import { promptText } from "../../prompts/loader.mjs";
 import { ChannelError, publicError } from "../../shared/contracts.mjs";
 import { identity } from "../../backend/storage/keys.mjs";
+import { createToolNotifier } from './tool-notices.mjs';
 import { replyMemoryContext } from "./reply-context.mjs";
 import { REMINDER_REACTIONS, reminderReaction, reminderReceipt } from "./task-confirmation.mjs";
 import { simpleReminder } from "../tasks/scheduler.mjs";
@@ -9,11 +10,18 @@ import { conversationMemoryTool } from "../memory/query/tool.mjs";
 import { NATURAL_REASONS, parseNaturalDecision } from "./natural-chat.mjs";
 import { imageMemoryTool } from "../memory/images/tool.mjs";
 import { conversationImageTool } from "../memory/images/request-tool.mjs";
+import { resolveMessageReferences, refreshReferenceImages } from '../memory/images/references.mjs';
+import { messageReferences, referenceText, unavailableMessageContext } from '../../shared/message-references.mjs';
+import { recentGeneratedImageContext } from '../memory/images/recent.mjs';
 import { matches } from "./helpers.mjs";
 import { replyToWork, recordWorkCreation } from '../work/dialogue.mjs';
 import { routeWorkMessage } from '../work/routing.mjs';
+import { workChatFallbackPrompt } from '../work/routing-context.mjs';
 import { workPresentation } from '../work/presentation.mjs';
 import { momentsTool, momentsCommentsTool, momentsWriteTools, momentsAudienceTool } from '../tools/moments.mjs';
+import { momentsLikeRequestTool } from '../tools/moments-likes.mjs';
+import { momentsInteractionTool } from '../tools/moments-interactions.mjs';
+import { momentsImagesTool } from '../tools/moments-images.mjs';
 import { chatMomentsMedia } from '../moments/media.mjs';
 import { momentsPublishingTools } from '../tools/moments-publishing.mjs';
 
@@ -48,11 +56,12 @@ export async function processReply(channel, item) {
         const priorKeys = new Set(channel.context(item).map(entry => entry.key));
         item.memorySnapshot.entries = item.memorySnapshot.entries.filter(entry =>
           (entry.observedAt ?? entry.time ?? Infinity) < record.createdAt || priorKeys.has(entry.key));
-        item.prompt = [item.prompt, '本轮前置判断为聊天。保持当前聊天人设，直接回应；若委托或任务目标不明确，先澄清。不要启动、修改或取消 DSH 工作，不要声称已开始工作。'].filter(Boolean).join('\n\n');
+        item.prompt = [item.prompt, workChatFallbackPrompt(item)].filter(Boolean).join('\n\n');
       } else {
         item.workCommand = decision.action === 'new' ? { action: 'create', request: item.text }
           : decision.action === 'continue' ? { action: 'continue', id: decision.taskId, request: item.text }
-          : { action: decision.action, id: decision.taskId };
+          : { action: decision.action, id: decision.taskId,
+            ...(decision.action === 'status' && !decision.taskId ? { all: true } : {}) };
         item.workNatural = true;
         channel.store.update(record, { mode: 'work', workRequest: item.workCommand.action,
           agentName: undefined, workRoute: decision });
@@ -62,6 +71,7 @@ export async function processReply(channel, item) {
     let confirmationTask;
     let selectedMedia;
     const imageReferences = [];
+    const imageNoteChecks = [];
     let replySelectionApplied = false;
     const persona = item.modeControl || item.workCommand || item.remoteCommand || item.scheduled?.workJobId ? null
       : channel.store.conversationPersona(record.accountId, record.chatType, record.peerId);
@@ -87,9 +97,7 @@ export async function processReply(channel, item) {
         ? simpleReminder(item.text, [persona.name, ...persona.aliases], record.createdAt)
         : null;
     const work = item.workCommand;
-    if (item.workRoute?.fallback) {
-      result = { text: '我暂时没能判断这条消息是否需要执行工作，还没有启动或修改任务。请再说明一下；要明确执行新任务，也可以用 /work 加上任务要求。' };
-    } else if (item.modeControl) {
+    if (item.modeControl) {
       result = { text: item.modeResult };
     } else if (item.remoteCommand) {
       try {
@@ -104,11 +112,16 @@ export async function processReply(channel, item) {
     } else if (work) {
       try {
         const workScope = { accountId: record.accountId, chatType: record.chatType,
-          peerId: record.peerId, senderId: record.senderId, senderName: record.sender };
+          peerId: record.peerId, senderId: record.senderId, senderName: record.sender,
+          requestedAt: record.createdAt, requestKey: record.key };
         if (work.action !== 'help') { channel.work.assertAllowed(workScope, controller.signal); item.workRequestAuthorized = true; }
+        if (['create', 'continue'].includes(work.action)) item.quotedReferences = await resolveMessageReferences(channel, workScope, {
+          key: record.key, messageId: item.message.serverMessageId || item.message.id, time: record.createdAt,
+          observedAt: record.createdAt, references: messageReferences(item.message.message || [], record.peerId),
+        }, controller.signal, () => channel.work.assertAllowed(workScope, controller.signal));
         if (item.workNatural && work.request?.length > 12000) throw new ChannelError('WORK_REQUEST_INVALID', '工作要求应为 1–12000 字');
         result = item.workNatural && work.action !== 'input-required' ? await replyToWork(channel, item, workScope, controller.signal)
-          : { text: channel.work.handle(work, workScope, { defer: true, onCreated: job => recordWorkCreation(channel, item, job) }) };
+          : { text: channel.work.handle(work, workScope, { defer: true, quotedReferences: item.quotedReferences, onCreated: job => recordWorkCreation(channel, item, job) }) };
       } catch (error) {
         if (['STATE_WRITE_FAILED', 'CONFIG_CHANGED'].includes(error?.code) || controller.signal.aborted ||
             item.workRequestAuthorized && error?.code === 'WORK_NOT_AUTHORIZED') throw error;
@@ -177,6 +190,14 @@ export async function processReply(channel, item) {
         const promptStrategy = channel.store.modelConfig().promptStrategy ?? 'legacy';
         const history = channel.context(item);
         await channel.memory.enrich(record, channel.runner, channel.transport, controller.signal);
+        const quotedEntry = channel.memory.load(record).entries.find(entry => entry.key === record.key) ?? {
+          key: record.key, messageId: item.message.serverMessageId || item.message.id, time: record.createdAt,
+          observedAt: record.createdAt, references: messageReferences(item.message.message || [], record.peerId),
+        };
+        const quotedReferences = await resolveMessageReferences(channel, scope, quotedEntry, controller.signal,
+          () => { controller.signal.throwIfAborted(); channel.assertAllowed(item); });
+        for (const image of quotedReferences.flatMap(ref => ref.images ?? []))
+          imageReferences.push({ ...scope, collection: image.collection, id: image.id, digest: image.digest });
         const currentMemory = channel.memory.load(record);
         channel.longMemory.capture(record, currentMemory);
         if (
@@ -197,6 +218,8 @@ export async function processReply(channel, item) {
           throw new ChannelError('MEMORY_CHANGED', '记忆已清空，已取消旧上下文回复');
         doc.entries = doc.entries.map((entry) => ({
           ...entry,
+          ...(entry.references ? { references: currentMemory.entries.find(value => value.key === entry.key)?.references || entry.references,
+            text: currentMemory.entries.find(value => value.key === entry.key)?.text || entry.text } : {}),
           attachments: currentMemory.entries.find((value) => value.key === entry.key)?.attachments || entry.attachments,
         }));
         if (item.memorySnapshot) {
@@ -208,11 +231,14 @@ export async function processReply(channel, item) {
         }
         const lookupSnapshot = doc;
         const currentImage = currentMemory.entries.find((entry) => entry.key === record.key);
+        let generatedContext = '';
+        const unavailableContext = unavailableMessageContext(item.message);
         const imageContext = currentImage?.attachments
           ?.map((image) =>
             image.type === 'face'
               ? '表情包：不调用图像理解。'
-              : image.description ||
+              : (image.description && promptStrategy === 'progressive-v1'
+                  ? image.description.slice(0, 300) + (image.description.length > 300 ? '（笔记摘录；详情可用图片工具按需读取）' : '') : image.description) ||
                 image.error ||
                 '普通图片已接收，尚未按需查看；只有回答确实需要看图才调用 wechat_read_image，不能猜测画面。'
           )
@@ -273,6 +299,8 @@ export async function processReply(channel, item) {
             )
           );
         const onDemand = item.config.memoryMode === 'on-demand';
+        const memoryReadResults = [];
+        let otherToolUsed = false;
         if (!item.naturalDecision)
           tools.push(
             conversationMemoryTool(
@@ -283,23 +311,33 @@ export async function processReply(channel, item) {
                 controller.signal.throwIfAborted();
                 channel.assertAllowed(item);
               },
-              { snapshot: lookupSnapshot, promptStrategy }
+              { snapshot: lookupSnapshot, promptStrategy, onResult: value => { memoryReadResults.push(value); if (memoryReadResults.length > 2) memoryReadResults.shift(); } }
             )
           );
         if (!item.ambient && !item.naturalDecision && !item.scheduled) {
+          if (channel.moments.likeRecentAvailable(scope, item.text)) {
+            const assertAllowed = () => { controller.signal.throwIfAborted(); channel.assertAllowed(item); };
+            tools.push(momentsLikeRequestTool({ assertAllowed, subjects: channel.moments.subjects(scope),
+              like: (query, signal) => channel.moments.likeRecent(query, scope, record.key, item.text,
+                AbortSignal.any([controller.signal, signal].filter(Boolean)), assertAllowed) }));
+          }
           if (channel.moments.available(scope)) {
             const assertAllowed = () => { controller.signal.throwIfAborted(); channel.assertAllowed(item); };
-            tools.push(momentsTool({ assertAllowed,
+            tools.push(momentsTool({ assertAllowed, subjects: channel.moments.subjects(scope),
               read: (query, signal) => channel.moments.read(query, scope, AbortSignal.any([controller.signal, signal].filter(Boolean)), assertAllowed) }));
             tools.push(momentsCommentsTool({ assertAllowed,
               read: (query, signal) => channel.moments.read(query, scope, AbortSignal.any([controller.signal, signal].filter(Boolean)), assertAllowed) }));
+            if (channel.moments.imagesAvailable(scope)) tools.push(momentsImagesTool({ assertAllowed,
+              readImages: (query, signal) => channel.moments.readImages(query, scope, AbortSignal.any([controller.signal, signal].filter(Boolean)), assertAllowed) }));
             if (channel.moments.audienceAvailable(scope)) tools.push(momentsAudienceTool({ assertAllowed,
               audience: signal => channel.moments.audience(scope, AbortSignal.any([controller.signal, signal].filter(Boolean)), assertAllowed) }));
-            if (channel.moments.writeAvailable(scope)) tools.push(...momentsWriteTools({ assertAllowed,
+            if (channel.moments.writeAvailable(scope)) tools.push(...momentsWriteTools({ assertAllowed, subjects: channel.moments.subjects(scope),
               media: chatMomentsMedia(channel, scope, lookupSnapshot, record.key),
               write: (query, signal, operationKey) => channel.moments.write(query, scope, record.key, AbortSignal.any([controller.signal, signal].filter(Boolean)), assertAllowed, operationKey) }));
             if (channel.momentsAutomation?.publishing) tools.push(...momentsPublishingTools({ assertAllowed,
               manage: (args, signal, operationKey) => channel.moments.managePublishing(args, scope, record.key, AbortSignal.any([controller.signal, signal].filter(Boolean)), assertAllowed, operationKey) }));
+            if (channel.momentsAutomation?.interactions) tools.push(momentsInteractionTool({ assertAllowed, subjects: channel.moments.subjects(scope),
+              manage: (args, signal) => channel.moments.manageInteractions(args, scope, record.key, AbortSignal.any([controller.signal, signal].filter(Boolean)), assertAllowed) }));
           }
           if (channel.store.modelConfig().vision !== false) {
             const imageSnapshot = {
@@ -323,6 +361,7 @@ export async function processReply(channel, item) {
                 promptStrategy,
                 currentKey: record.key,
                 onRead: (reference) => imageReferences.push(reference),
+                onNoteRead: check => imageNoteChecks.push(check),
               }
             );
             if (imageTool) tools.push(imageTool);
@@ -348,8 +387,26 @@ export async function processReply(channel, item) {
               error instanceof ChannelError ? error.message : '图片记忆暂时无法读取'
             );
           }
+          try {
+            const generatedScope = { ...scope, collection: 'generated' },
+              assertAllowed = () => { controller.signal.throwIfAborted(); channel.assertAllowed(item); };
+            await channel.work.generatedImages.sync(scope, controller.signal, assertAllowed, { before: record.createdAt });
+            const saved = channel.imageMemory.list(generatedScope, { limit: 1, before: record.createdAt });
+            generatedContext = recentGeneratedImageContext(channel, scope, record.createdAt,
+              { references: quotedReferences, onRead: reference => imageReferences.push(reference) });
+            if (saved.settings.enabled && saved.total)
+              tools.push(imageMemoryTool(channel.imageMemory, channel.runner, generatedScope, assertAllowed,
+                { maxTime: record.createdAt, onRead: reference => imageReferences.push(reference) }));
+          } catch (error) {
+            controller.signal.throwIfAborted();
+            channel.imageMemory.errors.set(identity([identity([record.accountId, record.chatType, record.peerId]), 'generated']),
+              error instanceof ChannelError ? error.message : '生成图片记忆暂时无法读取');
+          }
         }
-        const longMemory = onDemand ? '' : channel.longMemory.prompt(record, {
+        const role = onDemand ? null : channel.longMemory.roleContext?.(record, {
+          text: item.text, history: doc.entries.filter(entry => entry.key !== record.key), persona, beforeTime: record.createdAt,
+        });
+        const longMemory = onDemand || role ? '' : channel.longMemory.prompt(record, {
           includeGlobal: false,
           beforeTime: record.createdAt,
         });
@@ -358,6 +415,7 @@ export async function processReply(channel, item) {
           history,
           text: item.text,
           longTerm: longMemory,
+          role,
           onDemand,
           ambient: item.ambient,
           persona,
@@ -367,6 +425,7 @@ export async function processReply(channel, item) {
           mode: context.mode,
           recentMessages: context.history.length,
           referenceChars: context.referenceChars,
+          ...(role ? { roleId: role.roleId, selectedFacts: role.selectedIds, targetPeople: role.targets } : {}),
           ...(context.matchedTerms ? { matchedTerms: context.matchedTerms, omitted: context.omitted } : {}),
         } });
         let decision;
@@ -376,17 +435,27 @@ export async function processReply(channel, item) {
         };
         controller.signal.throwIfAborted();
         channel.assertAllowed(item);
+        const notifyTool = createToolNotifier(channel, { scope, requestKey: record.key, signal: controller.signal,
+          assertAllowed: () => channel.assertAllowed(item), presentation: { persona, prompt: item.prompt,
+            identityMarkdown: channel.runner.getRuntimeSettings?.()?.identityMarkdown } });
         result = await channel.runner.run({
-          text: item.text + (imageContext ? promptText("conversation/templates.json", "reply-text-4", [imageContext]) : ''),
+          text: item.text + (imageContext ? promptText("conversation/templates.json", "reply-text-4", [imageContext]) : '') +
+            (quotedReferences.length ? '\n\n' + referenceText(quotedReferences) : '') +
+            (generatedContext ? '\n\n' + generatedContext : '') + (unavailableContext ? '\n\n' + unavailableContext : ''),
           group: item.message.chatType === 'group',
           mode: item.mode,
           prompt: item.prompt,
-          persona,
-          adminNotes: channel.longMemory.adminNotes(record),
+          persona: role?.persona || persona,
+          adminNotes: role ? role.adminNotes : channel.longMemory.adminNotes(record),
           history: context.history,
           memory: context.memory,
           tools,
           scheduledTask: item.scheduled,
+          assertAllowed: () => { controller.signal.throwIfAborted(); channel.assertAllowed(item); },
+          onBeforeTool: (name, args, execution) => {
+            if (!['wechat_memory', 'wechat_capabilities'].includes(name)) otherToolUsed = true;
+            return notifyTool(name, args, execution);
+          },
           speaker: item.ambient && item.naturalDecision ? undefined : { id: record.senderId, name: record.sender },
           account: channel.transport.status().account,
           naturalDecision: item.naturalDecision,
@@ -415,6 +484,7 @@ export async function processReply(channel, item) {
           }
         }
         for (const reference of imageReferences) channel.imageMemory.assertReference(reference);
+        for (const check of imageNoteChecks) check();
         if (selectedMedia && !replySelectionApplied)
           result.text =
             typeof channel.runner.polishReply === 'function'
@@ -425,6 +495,23 @@ export async function processReply(channel, item) {
                   },
                 })
               : selectedMedia.caption;
+        if (!selectedMedia && !item.scheduled && !item.naturalDecision && (!otherToolUsed || generatedContext || quotedReferences.some(ref => ref.images?.length)) &&
+            typeof channel.runner.reviewMemoryReply === 'function') {
+          const reviewed = await channel.runner.reviewMemoryReply({ text: item.text, persona: role?.persona || persona,
+            speaker: { id: record.senderId, name: record.sender }, group: record.chatType === 'group',
+            currentContext: [imageContext, quotedReferences.length ? referenceText(refreshReferenceImages(channel.imageMemory, scope, quotedReferences)) : '',
+              generatedContext ? recentGeneratedImageContext(channel, scope, record.createdAt, { references: quotedReferences }) : '', unavailableContext].filter(Boolean).join('\n'),
+            imageEvidence: { available: imageReferences.length > 0, visionEnabled: channel.store.modelConfig().vision !== false,
+              sent: !!generatedContext || quotedReferences.some(ref => ref.messageId && ref.images?.some(image => image.collection === 'generated')) },
+            memory: context.memory, history: context.history, adminNotes: role ? role.adminNotes : '',
+            extraReadResults: memoryReadResults }, result.text, {
+              signal: controller.signal, assertAllowed: () => channel.assertAllowed(item),
+            });
+          result.text = typeof channel.runner.polishReply === 'function'
+            ? await channel.runner.polishReply(reviewed.text, item.text, controller.signal, role?.persona || persona, { prompt: item.prompt })
+            : reviewed.text;
+          channel.store.update(record, { memoryReflection: reviewed.audit });
+        }
         if (item.scheduled && !result.text?.trim() && !selectedMedia)
           throw new ChannelError('MODEL_EMPTY', '模型未生成提醒正文');
       } catch (error) {
@@ -443,6 +530,7 @@ export async function processReply(channel, item) {
           : controller.signal;
         selectedMedia = undefined;
         imageReferences.length = 0;
+        imageNoteChecks.length = 0;
         result = { text: promptText("conversation/templates.json", "reply-text-5") + item.scheduled.content + promptText("conversation/templates.json", "reply-text-6") };
         channel.store.update(record, {
           taskFallback: { code: error?.code || 'REPLY_FAILED', reason: publicError(error, '智能内容生成失败').message },
@@ -493,6 +581,7 @@ export async function processReply(channel, item) {
     }
     if (replyMedia) channel.library.resolveAsset(record.accountId, replyMedia.id);
     for (const reference of imageReferences) channel.imageMemory.assertReference(reference);
+    for (const check of imageNoteChecks) check();
     // Commit intent before crossing the side-effect boundary.
     channel.store.update(record, {
       state: 'sending',
@@ -556,7 +645,7 @@ export async function processReply(channel, item) {
       delivery: details.delivery || (record.sendAttempted ? 'unknown' : 'not-sent'),
       ...(Array.isArray(details.deliveryParts) ? { deliveryParts: details.deliveryParts } : {}),
       state: ids.length ? 'partial' : uncertain ? 'unknown' : cancelled ? 'cancelled' : 'failed',
-      ...(ids.length ? { acknowledgedMessageIds: ids } : {}),
+      ...(ids.length ? { acknowledgedMessageIds: ids, acknowledgedAt: channel.now() } : {}),
       reason: ids.length
         ? '部分消息已获得服务端回执，其余未确认，未自动重发' + (failureMessage ? '；' + failureMessage : '')
         : uncertain

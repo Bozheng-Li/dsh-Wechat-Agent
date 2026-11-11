@@ -133,7 +133,8 @@ test('a valid API original above 10 MiB is saved and delivered as an exact file 
   const runner = { run: async input => {
     assert.equal(input.mode, 'work-routing'); assert.deepEqual(input.tools, []);
     assert.equal(JSON.parse(input.text).message, '生成一张小狗的图片给我');
-    return { text: JSON.stringify({ action: 'new', taskId: null }) };
+    return { text: JSON.stringify({ action: 'new', taskId: null,
+      review: { intent: 'execute', evidence: JSON.parse(input.text).message, target: 'none' } }) };
   } };
   const workRunner = { run: async input => {
     await input.onSession('large-image-session');

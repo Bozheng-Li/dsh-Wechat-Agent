@@ -36,7 +36,9 @@ export async function downloadImageChunk(account: Credential, body: Buffer, sign
     }
   } finally { await reader.cancel(); }
   signal.throwIfAborted();
-  const decoded = decodeCgiBody(Buffer.concat(chunks), key, s08, request);
+  // GetMsgImg uses response checksums (including the observed zero/zero
+  // envelope), not the request-checksum echo used by file-upload ACKs.
+  const decoded = decodeCgiBody(Buffer.concat(chunks), key, s08, request, { responseChecksum: true });
   if (decoded.uin !== account.uin || decoded.innerCmd !== 109)
     throw new BridgeError('ERR_PROTOCOL', '微信图片响应的账号或请求类型不匹配，未使用返回内容');
   return decoded.body;

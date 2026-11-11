@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { StateStore, WechatChannel } from '../lib/testing.js';
-import { fixtureWorkRoute } from './fixtures/work-dialogue.mjs';
+import { fixtureWorkRoute, fixtureWorkRouteDecision } from './fixtures/work-dialogue.mjs';
 
 const accountId = 'wxid_sender_route_bot', room = 'sender-route@chatroom';
 function fixture(t, options = {}) {
@@ -25,7 +25,8 @@ function fixture(t, options = {}) {
   const runner = { run: async input => {
     if (input.mode === 'work-routing') {
       routes.push(input); await options.routeBefore?.(input);
-      return options.route ? { text: JSON.stringify(options.route(JSON.parse(input.text))) } : fixtureWorkRoute(input);
+      const data = JSON.parse(input.text);
+      return options.route ? { text: JSON.stringify(fixtureWorkRouteDecision(data, options.route(data))) } : fixtureWorkRoute(input);
     }
     if (input.mode === 'work-result') return { text: JSON.parse(input.text).result };
     chat.push(input); await options.chatBefore?.(input); input.signal.throwIfAborted(); return { text: '普通聊天回复' };

@@ -21,10 +21,8 @@ export function MemoryOverview({ document, name, longTerm = false }) {
     >
       <div className="wa-memory-overview-heading">
         <div>
-          <h2>{longTerm ? '长期记忆概况' : name}</h2>
-          <p className="wa-help">
-            {longTerm ? '自动事实仅用于来源会话，共同约定可共享。' : '近期消息与已保存摘要。'}
-          </p>
+          <h2>{longTerm ? '记忆概况' : name}</h2>
+          {longTerm && <p className="wa-help">自动事实仅用于来源会话，共同约定可共享。</p>}
         </div>
         {document.compacting || document.extracting || document.compressionQueued ? (
           <span className="wa-badge is-accent">{longTerm ? '正在整理' : document.compacting ? '正在压缩' : '等待压缩'}</span>
@@ -40,11 +38,11 @@ export function MemoryOverview({ document, name, longTerm = false }) {
       </dl>
       {!longTerm && (
         <div className="wa-memory-capacity">
-          <div>
+          <div className="wa-memory-capacity-label">
             <span>窗口使用</span>
-            <span>
+            <strong>
               {document.chars.toLocaleString()} / {document.windowChars.toLocaleString()} 字
-            </span>
+            </strong>
           </div>
           <div className="wa-memory-meter" aria-hidden="true">
             <span style={{ width: ratio + '%' }} />

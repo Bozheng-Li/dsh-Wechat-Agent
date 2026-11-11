@@ -9,6 +9,8 @@ import { conversationKey } from "../../../backend/storage/keys.mjs";
 import { atomicJson } from "../../../backend/storage/atomic-json.ts";
 import { inspectAssetImage } from "../../media/image-format.mjs";
 import { DEFAULT_MEMORY_RETENTION_DAYS, defaultMemoryExpiry } from "../../../shared/memory-policy.mjs";
+import { IMAGE_MEMORY_COLLECTIONS, imageMemoryCollection, imageMemoryByteLimit, generatedImageMetadata, imageGenerationAt } from '../../../shared/image-memory.mjs';
+import { referencedMessageId } from '../../../shared/message-references.mjs';
 
 const sha = (value) =>
   createHash('sha256')
@@ -24,6 +26,10 @@ const validId = (id) => typeof id === 'string' && /^[a-f0-9]{64}$/.test(id);
 const noSignal = () => new AbortController().signal;
 const sourceTime = (value) =>
   Number.isFinite(value) && value > 0 ? Math.trunc(value < 1e12 ? value * 1000 : value) : null;
+// Unsent group task images retain the work task's requester boundary. Owner
+// management passes no sender; confirmed group images are visible in that room.
+const visibleTo = (input, item, before = input.beforeTime ?? Infinity) => input.collection !== 'generated' || !input.senderId ||
+  item.generation?.requesterId === input.senderId || imageGenerationAt(item.generation, before)?.deliveryState === 'sent';
 
 export function validateImageMemorySettings(settings) {
   if (
@@ -53,20 +59,20 @@ function plain(file, directory = false, missing = true) {
     if (path.dirname(current) === current) break;
   }
 }
-function imageBytes(image) {
-  const data = image?.data;
+function imageBytes(image, collection) {
+  const data = image?.data, maxBytes = imageMemoryByteLimit(collection);
   if (
     typeof data !== 'string' ||
     !data ||
-    data.length > 13981020 ||
+    data.length > Math.ceil(maxBytes / 3) * 4 ||
     data.length % 4 ||
     !/^[A-Za-z0-9+/]*={0,2}$/.test(data)
   )
-    throw fail('IMAGE_MEMORY_INVALID', '图片记忆需要有效的图片内容，单张最多 10 MiB');
+    throw fail('IMAGE_MEMORY_INVALID', `图片记忆需要有效的图片内容，单张最多 ${maxBytes / 1024 / 1024} MiB`);
   const bytes = Buffer.from(data, 'base64');
   let info;
   try {
-    info = inspectAssetImage(bytes);
+    info = inspectAssetImage(bytes, { maxBytes });
   } catch {
     throw fail('IMAGE_MEMORY_INVALID', '图片无法解码或超过保存范围，未将其当作已保存');
   }
@@ -164,7 +170,8 @@ export class ImageMemory {
         this.sweepError = '部分会话的图片期限未能检查，请检查会话记录与目录权限';
         continue;
       }
-      for (const scope of peers) {
+      for (const peer of peers) for (const collection of IMAGE_MEMORY_COLLECTIONS) {
+        const scope = this.selector({ ...peer, collection });
         try {
           const index = path.join(this.directory(scope), 'index.json');
           plain(index);
@@ -189,13 +196,17 @@ export class ImageMemory {
       typeof input.peerId !== 'string'
     )
       throw fail('INVALID_IMAGE_MEMORY_SCOPE', '请先选择图片所属账号和会话');
-    const key = conversationKey(input.accountId, input.chatType, input.peerId);
-    const known = this.store.conversations(input.accountId).find((peer) => peer.key === key);
+    const collection = imageMemoryCollection(input.collection),
+      conversation = conversationKey(input.accountId, input.chatType, input.peerId),
+      key = collection === 'generated' ? sha([conversation, 'generated']) : conversation;
+    const known = this.store.conversations(input.accountId).find((peer) => peer.key === conversation);
     if (!known) throw fail('MEMORY_CONVERSATION_MISSING', '请先选择已授权或有历史记录的会话');
-    return { accountId: input.accountId, chatType: input.chatType, peerId: input.peerId, key };
+    return { accountId: input.accountId, chatType: input.chatType, peerId: input.peerId, key,
+      ...(collection === 'generated' ? { collection } : {}) };
   }
   directory(scope) {
-    return path.join(this.root, sha([scope.accountId]), scope.key);
+    const root = scope.collection === 'generated' ? path.join(this.store.root, 'storage/memory/generated-images') : this.root;
+    return path.join(root, sha([scope.accountId]), scope.key);
   }
   file(scope, id, preview = false, digest) {
     if (!validId(id)) throw fail('INVALID_IMAGE_MEMORY_ID', '图片记忆标识无效，请重新选择');
@@ -232,6 +243,7 @@ export class ImageMemory {
     if (
       state.version !== 1 ||
       state.ownerStoreId !== this.store.data.storeId ||
+      (state.collection ?? 'conversation') !== (scope.collection ?? 'conversation') ||
       ['key', 'accountId', 'chatType', 'peerId'].some((key) => state[key] !== scope[key]) ||
       !ordinary(state.items) ||
       !ordinary(state.deleted) ||
@@ -254,7 +266,8 @@ export class ImageMemory {
         !Number.isSafeInteger(item.capturedAt) ||
         !Number.isSafeInteger(item.bytes) ||
         item.bytes < 1 ||
-        item.bytes > 10 * 1024 * 1024 ||
+        item.bytes > imageMemoryByteLimit(scope.collection) ||
+        (scope.collection === 'generated' && !generatedImageMetadata(item.generation)) ||
         typeof item.description !== 'string' ||
         !['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(item.mediaType) ||
         !['original', 'full', 'thumbnail', 'unknown'].includes(item.quality) ||
@@ -337,7 +350,9 @@ export class ImageMemory {
     if (!state.settings.enabled || state.deleted[id] || (generation !== undefined && state.generation !== generation))
       return null;
     const startedGeneration = state.generation;
-    const { bytes, info } = imageBytes(image),
+    if (state.collection === 'generated' && !generatedImageMetadata(attachment.generation))
+      throw fail('IMAGE_MEMORY_INVALID', '生成图片缺少有效任务来源，未保存');
+    const { bytes, info } = imageBytes(image, state.collection),
       previous = state.items[id],
       quality = ['original', 'full', 'thumbnail'].includes(image.quality) ? image.quality : 'unknown';
     const ranks = { original: 3, full: 2, thumbnail: 1, unknown: 0 };
@@ -373,6 +388,7 @@ export class ImageMemory {
       digest: sha(bytes),
       hasThumbnail: false,
       expiresAt: null,
+      ...(state.collection === 'generated' ? { generation: { ...attachment.generation } } : {}),
     };
     item.expiresAt =
       state.settings.retentionDays === null ? null : item.capturedAt + state.settings.retentionDays * 86400000;
@@ -416,6 +432,25 @@ export class ImageMemory {
     if (!item || state.deleted[id]) return;
     item.description = String(description || '').slice(0, 4000);
     this.save(state);
+    this.store.describeImageReferences?.(input, item);
+  }
+  byMessage(input, messageId, { before = Infinity, senderId, includeDisabled = false } = {}) {
+    const id = referencedMessageId(messageId, input.peerId);
+    if (!id) return [];
+    const state = this.load(input);
+    if (!includeDisabled && !state.settings.enabled) return [];
+    return Object.values(state.items).filter(item => visibleTo(input, item, before) && item.type === 'image' &&
+      (item.time ?? item.capturedAt) <= before && (!senderId || senderId === input.peerId || item.senderId === senderId) &&
+      (referencedMessageId(item.messageId, input.peerId) === id ||
+        imageGenerationAt(item.generation, before)?.serverMessageIds?.some(value => referencedMessageId(value, input.peerId) === id)));
+  }
+  updateGeneration(input, id, generation) {
+    if (input.collection !== 'generated' || !generatedImageMetadata(generation))
+      throw fail('IMAGE_MEMORY_INVALID', '生成图片来源无效');
+    const state = this.load(input), item = state.items[id];
+    if (!item || state.deleted[id] || JSON.stringify(item.generation) === JSON.stringify(generation)) return;
+    item.generation = { ...generation };
+    this.save(state);
   }
   list(input, { query = '', offset = 0, limit = 20, after, before, type } = {}) {
     if (
@@ -432,7 +467,7 @@ export class ImageMemory {
     )
       throw fail('INVALID_IMAGE_MEMORY_QUERY', '请使用简短关键词、有效时间范围及分页');
     const state = this.load(input),
-      all = Object.values(state.items),
+      all = Object.values(state.items).filter(item => visibleTo(input, item, before ?? input.beforeTime ?? Infinity)),
       terms = [
         ...new Set(
           normalized(query)
@@ -443,8 +478,11 @@ export class ImageMemory {
     const items = all
       .map((item) => ({
         ...item,
+        ...(item.generation ? { generation: imageGenerationAt(item.generation, before ?? input.beforeTime ?? Infinity) } : {}),
         score: terms.filter((term) =>
-          normalized([item.description, item.sourceText, item.senderName].join(' ')).includes(term)
+          normalized([item.description, item.sourceText, item.senderName,
+            ...(state.collection === 'generated' ? [item.generation.prompt, item.generation.fileName,
+              item.generation.model, item.generation.providerName, item.generation.jobId] : [])].join(' ')).includes(term)
         ).length,
       }))
       .filter(
@@ -452,7 +490,8 @@ export class ImageMemory {
           (!type || item.type === type) &&
           (!terms.length || item.score > 0) &&
           (after == null || (item.time ?? item.capturedAt) >= after) &&
-          (before == null || (item.time ?? item.capturedAt) <= before)
+          (before == null || (item.time ?? item.capturedAt) <= before ||
+            (state.collection === 'generated' && input.currentJobId && item.generation?.jobId === input.currentJobId))
       )
       .sort(
         (a, b) => b.score - a.score || (b.time ?? b.capturedAt) - (a.time ?? a.capturedAt) || a.id.localeCompare(b.id)
@@ -474,22 +513,24 @@ export class ImageMemory {
   content(input, id, { preview = false } = {}) {
     const state = this.load(input),
       item = state.items[id];
-    if (!item || state.deleted[id]) throw fail('IMAGE_MEMORY_UNAVAILABLE', '这张图片记忆已删除、到期或不属于当前会话');
+    if (!item || state.deleted[id] || !visibleTo(input, item)) throw fail('IMAGE_MEMORY_UNAVAILABLE', '这张图片记忆已删除、到期或不属于当前会话');
     if (preview && !item.hasThumbnail)
       throw fail('IMAGE_THUMBNAIL_UNAVAILABLE', item.thumbnailError || '此图片暂无缩略图，可打开已保存图片');
     const file = this.file(state, id, preview);
     plain(file, false, false);
     const stat = fs.statSync(file);
-    if (stat.size > (preview ? 1024 * 1024 : 10 * 1024 * 1024))
+    if (stat.size > (preview ? 1024 * 1024 : imageMemoryByteLimit(state.collection)))
       throw fail('IMAGE_MEMORY_INVALID', '图片文件大小异常，未读取');
     const bytes = fs.readFileSync(file);
     if (sha(bytes) !== (preview ? item.thumbnailDigest : item.digest))
       throw fail('IMAGE_MEMORY_CHANGED', '保存的图片已被外部修改，未使用旧记录');
     return {
       ...item,
+      ...(item.generation ? { generation: imageGenerationAt(item.generation, input.beforeTime ?? Infinity) } : {}),
       mediaType: preview ? 'image/png' : item.mediaType,
       data: bytes.toString('base64'),
-      reference: { ...this.selector(input), id, digest: item.digest },
+      reference: { ...this.selector(input), ...(input.collection === 'generated' && input.senderId ? { senderId: input.senderId } : {}),
+        ...(input.beforeTime === undefined ? {} : { beforeTime: input.beforeTime }), id, digest: item.digest },
     };
   }
   assertReference(reference) {
@@ -502,7 +543,9 @@ export class ImageMemory {
   removeState(state, ids, reason = 'deleted') {
     for (const id of ids) {
       if (!validId(id)) throw fail('INVALID_IMAGE_MEMORY_ID', '图片记忆标识无效');
-      state.deleted[id] = { at: this.now(), reason };
+      const item = state.items[id];
+      state.deleted[id] = { ...state.deleted[id], at: this.now(), reason,
+        ...(item ? { messageId: item.messageId, ...(item.generation?.serverMessageIds ? { serverMessageIds: item.generation.serverMessageIds } : {}) } : {}) };
       delete state.items[id];
     }
     this.save(state); // Tombstones remain authoritative even if file cleanup fails.
@@ -543,7 +586,12 @@ export class ImageMemory {
     state.generation = randomUUID();
     for (const entry of entries)
       for (const attachment of entry.attachments || [])
-        if (entry.messageId && attachment.resourceId) ids.add(this.imageId(state, entry, attachment));
+        if (entry.messageId && attachment.resourceId) {
+          const id = this.imageId(state, entry, attachment);
+          ids.add(id);
+          state.deleted[id] = { ...state.deleted[id], messageId: entry.messageId,
+            ...(attachment.generation?.serverMessageIds ? { serverMessageIds: attachment.generation.serverMessageIds } : {}) };
+        }
     this.removeState(state, [...ids]);
     return this.list(input);
   }

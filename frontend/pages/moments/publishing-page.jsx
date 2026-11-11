@@ -1,24 +1,53 @@
+import { CleanupControl } from '../../components/cleanup-control.jsx';
 import { useEffect, useRef, useState } from 'react';
 import { Button, Empty, Tag } from '../../components/workbench-ui.jsx';
 import { formatTime } from '../../shared/conversations.mjs';
-import { MOMENTS_PLAN_DEFAULTS, MOMENTS_PUBLISH_DEFAULTS, momentsPlanSettings } from '../../../shared/moments-publishing.mjs';
+import { MOMENTS_PLAN_DEFAULTS, MOMENTS_PUBLISH_DEFAULTS, momentsPlanSettings, momentsPublishingSettings, momentsLocalInstant } from '../../../shared/moments-publishing.mjs';
 import { AudiencePicker, audiencePreview } from './audience-picker.jsx';
+import { ArrangementFields } from './arrangement-fields.jsx';
 
 const labels = { generating: 'AI 生成中', draft: '待审核草稿', sending: '等待微信确认', published: '微信已确认发布', failed: '生成或验证失败',
-  rejected: '未取得发布确认', unknown: '结果不明，未重发', skipped: '时段已过，已跳过', discarded: '已放弃' };
+  rejected: '未取得发布确认', unknown: '结果不明，未重发', 'published-unverified': '已发布，屏蔽范围待核实', deleted: '已确认删除', skipped: '本次已跳过', discarded: '已放弃' };
+const stages = { research: '正在查找公开资料', text: '正在生成正文', reviewing: '正在检查内容是否适合公开', 'content-review': '正在检查正文与配图方案', image: '正在生成配图', 'image-review': '正在核对实际配图', sending: '正在等待微信确认' };
 const times = plan => plan.schedule.type === 'once' ? plan.schedule.onceAt.replace('T', ' ') :
   (plan.schedule.type === 'weekly' ? '每周 ' + plan.schedule.weekdays.map(day => ['一', '二', '三', '四', '五', '六', '日'][day - 1]).join('、') : '每天') + ' ' + plan.schedule.times.join('、');
-const fresh = () => structuredClone(MOMENTS_PLAN_DEFAULTS);
+const fresh = () => ({ ...structuredClone(MOMENTS_PLAN_DEFAULTS), themes: [], useMaterials: true,
+  image: { ...MOMENTS_PLAN_DEFAULTS.image, mode: 'library' } });
 
 export function MomentsPublishingPage({ state, status, audience, audienceError, loadAudience }) {
   const data = state.data?.publishing, plans = data?.plans ?? [], runs = data?.runs ?? [];
+  const [selectedRuns, setSelectedRuns] = useState([]);
   const [global, setGlobal] = useState({ ...MOMENTS_PUBLISH_DEFAULTS }), [globalDirty, setGlobalDirty] = useState(false);
+  const [globalError, setGlobalError] = useState(''), [showHistory, setShowHistory] = useState(false);
   const [editor, setEditor] = useState(null), [themesText, setThemesText] = useState(''), [timesText, setTimesText] = useState(''), [error, setError] = useState('');
   const [deleteId, setDeleteId] = useState(null), [runId, setRunId] = useState(null), [draftText, setDraftText] = useState(''), [image, setImage] = useState(null);
+  const [now, setNow] = useState(Date.now), loadedDraft = useRef({ id: null, text: '' });
+  const editorRef = useRef(null);
   const operation = useRef({}), selection = audiencePreview(audience, editor?.settings.blockedLabelIds ?? [], editor?.settings.blockedUserIds ?? []);
   const run = runs.find(row => row.id === runId), busy = state.busy || !!data?.running, online = status.online;
+  const activeRun = runs.find(row => ['generating', 'sending'].includes(row.state));
+  const elapsed = Math.max(0, Math.floor((now - (data?.operationStartedAt || now)) / 1000));
+  const ended = plan => plan.settings.schedule.type === 'once' && !plan.nextRunAt && momentsLocalInstant(plan.settings.schedule.onceAt, plan.settings.schedule.timezone) <= Date.now();
+  const visiblePlans = plans.filter(plan => showHistory || !plan.automatic || !ended(plan));
+  useEffect(() => {
+    if (!data?.running) return;
+    setNow(Date.now()); const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer);
+  }, [data?.running, data?.operationStartedAt]);
+  useEffect(() => {
+    if (!run) return;
+    const previous = loadedDraft.current; loadedDraft.current = { id: run.id, text: run.text ?? '' };
+    setDraftText(value => previous.id !== run.id || value === previous.text ? run.text ?? '' : value);
+  }, [run?.id, run?.text]);
   useEffect(() => { if (data?.settings && !globalDirty) setGlobal(data.settings); }, [data, globalDirty]);
-  const open = plan => { const settings = structuredClone(plan?.settings ?? fresh()); setEditor({ id: plan?.id, settings }); setThemesText(settings.themes.join('\n')); setTimesText(settings.schedule.times.join('\n')); setError(''); };
+  useEffect(() => {
+    if (!editor) return;
+    const frame = requestAnimationFrame(() => {
+      editorRef.current?.scrollIntoView({ block: 'start', behavior: 'instant' });
+      editorRef.current?.querySelector('input')?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [!!editor, editor?.id]);
+  const open = plan => { const settings = structuredClone(plan?.settings ?? fresh()); setEditor({ id: plan?.id, automatic: plan?.automatic, settings }); setThemesText(settings.themes.join('\n')); setTimesText(settings.schedule.times.join('\n')); setError(''); };
   const update = values => setEditor({ ...editor, settings: { ...editor.settings, ...values } });
   const schedule = values => update({ schedule: { ...editor.settings.schedule, ...values } });
   const picture = values => update({ image: { ...editor.settings.image, ...values } });
@@ -29,55 +58,74 @@ export function MomentsPublishingPage({ state, status, audience, audienceError, 
   };
   const execute = async (method, payload) => {
     const signature = JSON.stringify(payload), previous = operation.current[method];
-    if (previous?.signature !== signature) operation.current[method] = { signature, requestId: 'ui-moments-' + crypto.randomUUID() };
+    const retryable = method === 'moments.plans.preview' && runs.some(row => row.requestId === previous?.requestId && ['failed', 'discarded'].includes(row.state));
+    if (previous?.signature !== signature || retryable) operation.current[method] = { signature, requestId: 'ui-moments-' + crypto.randomUUID() };
     const result = await state.execute(method, { ...payload, requestId: operation.current[method].requestId });
-    if (result) delete operation.current[method]; else await state.refresh();
+    if (result) delete operation.current[method]; else await state.refresh(true);
     return result;
   };
-  const showRun = async row => { setRunId(row.id); setDraftText(row.text ?? ''); setImage(null); if (row.hasImage) {
+  const showRun = async row => { loadedDraft.current = { id: row.id, text: row.text ?? '' }; setRunId(row.id); setDraftText(row.text ?? ''); setImage(null); if (row.hasImage) {
     const value = await state.execute('moments.drafts.image', { id: row.id }, false);
     if (value) setImage({ id: row.id, url: 'data:' + value.mediaType + ';base64,' + value.data });
   } };
+  const generatePreview = async settings => {
+    const value = await execute('moments.plans.preview', { settings });
+    if (value) { await showRun(value); state.setNotice(value.state === 'draft'
+      ? '预览已生成并保存为草稿，尚未发布。' : '已读取原预览记录：' + (labels[value.state] || '请核对状态') + '。'); }
+  };
   const imageSettings = status.imageGeneration, providers = imageSettings?.providers ?? [], selectedProvider = providers.find(row => row.id === (editor?.settings.image.providerId || imageSettings?.defaultProviderId));
   return <div className="wa-moments-publishing wa-section-stack" data-testid="moments-publishing">
-    <div className="wa-wb-card">
+    <section className="wa-moments-global">
       <div className="wa-wb-between"><h2>发布控制</h2><Tag state={data?.running ? 'running' : data?.settings.enabled ? 'ready' : 'disabled'}>{data?.running ? '正在处理' : data?.settings.enabled ? '已开启' : '已关闭'}</Tag></div>
-      <p className="wa-wb-note">按主题由 AI 决定正文。总开关和计划都开启后才定时执行；全局自动回复暂停时也暂停发布。离线过期的时段跳过，结果不明时暂停对应计划。</p>
+      <p className="wa-wb-note">主题可留空，由 AI 结合人设与可用素材选择内容。总开关和计划都开启后才执行；没有合适内容可以跳过，发布结果不明时暂停计划。</p>
       {data?.error && <p role="alert" className="wa-alert is-error">{data.error}</p>}
+      {state.refreshError && <p role="alert" className="wa-alert is-error">{state.refreshError}</p>}
+      {data?.running && <p className="wa-wb-note" role="status">{stages[activeRun?.stage] || labels[activeRun?.state] || '正在处理'} · 已等待 {Math.floor(elapsed / 60)} 分 {elapsed % 60} 秒，本次操作最多 5 分钟。</p>}
       <label className="wa-wb-check"><input aria-label="开启朋友圈自动发布" type="checkbox" disabled={state.busy} checked={global.enabled} onChange={e => { setGlobal({ ...global, enabled: e.target.checked }); setGlobalDirty(true); }} />开启朋友圈自动发布</label>
       <div className="wa-wb-generator">
         {[["maxPostsPer24Hours", "24 小时最多自动发布", 1, 24], ["minGapMinutes", "自动发布最短间隔（分钟）", 0, 1440]].map(([key, label, min, max]) => <label key={key}>{label}<input aria-label={label} type="number" min={min} max={max} value={global[key]} onChange={e => { setGlobal({ ...global, [key]: Number(e.target.value) }); setGlobalDirty(true); }} /></label>)}
       </div>
+      <ArrangementFields value={global.automatic} settings={global} data={data} onChange={automatic => { setGlobal({ ...global, automatic }); setGlobalDirty(true); }} audience={audience} audienceError={audienceError} loadAudience={loadAudience} busy={state.busy} online={online} />
+      {globalError && <p role="alert" className="wa-alert is-error">{globalError}</p>}
       <div className="wa-form-actions"><span className={globalDirty ? 'wa-dirty' : 'wa-help'}>{globalDirty ? '有尚未保存的更改' : '更改在保存后生效。'}</span><div className="wa-wb-actions">
-        <Button quiet disabled={state.busy || !globalDirty} onClick={() => { setGlobalDirty(false); setGlobal(data?.settings ?? { ...MOMENTS_PUBLISH_DEFAULTS }); }}>取消总设置更改</Button>
-        <Button disabled={state.busy || !globalDirty || !online} onClick={async () => { if (await state.execute('moments.publishing.configure', { settings: global })) { setGlobalDirty(false); state.setNotice('自动发布总设置已保存。'); } }}>保存自动发布设置</Button></div></div>
-    </div>
-    <div className="wa-wb-card">
-      <div className="wa-wb-between"><h2>发布计划</h2><Button disabled={busy || !online || plans.length >= 20} onClick={() => open()}>新增发布计划</Button></div>
-      {plans.length ? plans.map(plan => <div className="wa-wb-summary-item wa-moments-plan" key={plan.id}>
-        <div className="wa-wb-between"><strong>{plan.settings.name}</strong><Tag state={plan.settings.enabled ? 'ready' : 'disabled'}>{plan.settings.enabled ? '计划已开启' : '计划已暂停'}</Tag></div>
-        <p>{plan.settings.themes.join('、')}</p><p className="wa-wb-note">{times(plan.settings)} · {plan.settings.schedule.timezone} · {plan.settings.reviewRequired ? '先生成草稿' : '直接发布'}{plan.settings.image.mode === 'ai' ? ' · AI 配图' : ' · 纯文字'}</p>
-        <small>下一次：{plan.nextRunAt ? formatTime(plan.nextRunAt) : '未安排'}{!data?.settings.enabled && plan.settings.enabled ? '（总开关关闭）' : ''}</small>
+        <Button quiet disabled={state.busy || !globalDirty} onClick={() => { setGlobalDirty(false); setGlobalError(''); setGlobal(data?.settings ?? structuredClone(MOMENTS_PUBLISH_DEFAULTS)); }}>取消总设置更改</Button>
+        <Button disabled={state.busy || !globalDirty || !online} onClick={async () => {
+          let settings; try { settings = momentsPublishingSettings({ ...global, automatic: { ...global.automatic, content: { ...global.automatic.content, themes: global.automatic.content.themes.map(text => text.trim()).filter(Boolean) } } }); setGlobalError(''); }
+          catch (error) { setGlobalError(error.message); return; }
+          if (await state.execute('moments.publishing.configure', { settings })) { setGlobalDirty(false); state.setNotice(settings.automatic.enabled ? '自动安排已保存，已生成可用时段的发布计划。可以在下方逐条修改。' : '设置已保存，自动安排关闭时只执行已开启的手动计划。'); }
+        }}>保存自动发布设置</Button></div></div>
+    </section>
+    <section className="wa-moments-plan-list">
+      <header className="wa-section-heading"><div><h2>发布计划<span className="wa-section-count">{visiblePlans.length}</span></h2><p className="wa-wb-note">自动生成和手动添加的计划都可以修改。手动计划最多 20 个，自动安排另计。</p></div><Button aria-expanded={!!editor} aria-controls="wa-moments-plan-editor" disabled={busy || !online || plans.filter(plan => !plan.automatic).length >= 20 || !!editor} onClick={() => open()}>新增发布计划</Button></header>
+      <label className="wa-wb-check"><input type="checkbox" aria-label="显示已结束的自动计划" checked={showHistory} onChange={e => setShowHistory(e.target.checked)} />显示已结束的自动计划（最近 100 个）</label>
+      {visiblePlans.length ? visiblePlans.map(plan => <article className="wa-moments-plan" key={plan.id} data-plan-id={plan.id}>
+        <div className="wa-moments-plan-copy">
+        <div className="wa-wb-between"><strong>{plan.settings.name}</strong><Tag state={plan.settings.enabled && !ended(plan) ? 'ready' : 'disabled'}>{ended(plan) ? '本次已结束' : plan.settings.enabled ? '计划已开启' : '计划已暂停'}</Tag><span className="wa-help">{plan.automatic ? '自动生成' + (plan.automatic.edited ? ' · 已手动调整' : '') : '手动添加'}</span></div>
+        <p>{plan.settings.themes.join('、') || '到时间自主选题'}</p><p className="wa-wb-note">{times(plan.settings)} · {plan.settings.schedule.timezone} · {plan.settings.reviewRequired ? '先生成草稿' : '直接发布'}{plan.settings.image.mode === 'ai' ? ' · AI 配图' : plan.settings.image.mode === 'library' ? ' · 素材库选图' : ' · 纯文字'}</p>
+        <small>下一次：{plan.nextRunAt ? formatTime(plan.nextRunAt) : '未安排'}{!data?.settings.enabled && plan.settings.enabled ? '（总开关关闭）' : plan.automatic && !data?.settings.automatic.enabled ? '（自动安排已关闭）' : ''}</small>
         {plan.waitingReason && <p className="wa-wb-note">{plan.waitingReason}</p>}
+        </div>
         <div className="wa-wb-actions wa-moments-post-actions"><Button quiet disabled={busy || !online} onClick={() => open(plan)}>编辑计划</Button>
           <Button quiet disabled={state.busy || !online} onClick={() => state.execute('moments.plans.enable', { id: plan.id, enabled: !plan.settings.enabled })}>{plan.settings.enabled ? '暂停计划' : '开启计划'}</Button>
           <Button quiet danger disabled={state.busy || !online} onClick={() => setDeleteId(plan.id)}>删除计划</Button></div>
         {deleteId === plan.id && <div className="wa-wb-review" role="alert"><p>删除计划后停止定时执行，已有草稿与发布记录保留。</p><div className="wa-wb-actions"><Button danger disabled={state.busy} onClick={async () => { if (await state.execute('moments.plans.delete', { id: plan.id })) setDeleteId(null); }}>确认删除计划</Button><Button quiet onClick={() => setDeleteId(null)}>保留计划</Button></div></div>}
-      </div>) : <Empty title="尚无发布计划">设置主题与时间，AI 会在到期时生成内容。</Empty>}
-    </div>
-    {editor && <div className="wa-wb-card wa-moments-plan-editor" data-testid="moments-plan-editor">
-      <h2>{editor.id ? '编辑发布计划' : '新增发布计划'}</h2>
+      </article>) : !editor && <Empty title="尚无待执行计划">开启上方自动安排并保存，或手动新增发布计划。主题可以留空。</Empty>}
+    </section>
+    {editor && <div className="wa-automation-editor wa-moments-plan-editor" id="wa-moments-plan-editor" ref={editorRef} data-testid="moments-plan-editor">
+      <header className="wa-editor-heading"><h2>{editor.id ? '编辑发布计划' : '新增发布计划'}</h2><p>文案、节奏和可见范围保存后生效。</p></header>
       <fieldset disabled={busy || !online}>
         <section className="wa-form-section"><h3>主题与文案</h3>
         <label>计划名称<input aria-label="发布计划名称" maxLength={80} value={editor.settings.name} onChange={e => update({ name: e.target.value })} /></label>
-        <label>内容主题（每行一个）<textarea aria-label="发布主题" rows={3} maxLength={6030} value={themesText} onChange={e => setThemesText(e.target.value)} placeholder="日常心情\n小笑话\n科技见闻" /></label>
+        <label>内容方向（可留空，每行一个）<textarea aria-label="发布主题" rows={3} maxLength={6030} value={themesText} onChange={e => setThemesText(e.target.value)} placeholder="留空时自主选题，也可以写最近想关注的方向。" /></label>
+        <label className="wa-wb-check"><input aria-label="使用朋友圈素材库" type="checkbox" checked={!!editor.settings.useMaterials} onChange={e => update({ useMaterials: e.target.checked })} />结合朋友圈素材库里的内容与想法</label>
+        <p className="wa-wb-note">在“素材库”里添加文字和图片、设置聊天整理范围。这里只使用已保存的素材，不直接读取聊天原文。</p>
         <label>写作风格<input aria-label="发布写作风格" maxLength={1000} value={editor.settings.style} onChange={e => update({ style: e.target.value })} /></label>
         <label>内容要求<textarea aria-label="发布内容要求" maxLength={4000} rows={3} value={editor.settings.instructions} onChange={e => update({ instructions: e.target.value })} placeholder="比如：不要介绍功能，不虚构自己的真实经历。" /></label>
-        <div className="wa-wb-generator"><label>正文最多字数<input aria-label="发布正文最多字数" type="number" min={30} max={2000} value={editor.settings.maxChars} onChange={e => update({ maxChars: Number(e.target.value) })} /></label>
+        <div className="wa-wb-generator"><label>正文最多字数<input aria-label="发布正文最多字数" type="number" min={30} max={2000} value={editor.settings.maxChars} onChange={e => update({ maxChars: Number(e.target.value) })} /><small>仅限制上限；按内容自然选择长短，几个字、一句话或几段都可以。</small></label>
           <label>发布方式<select aria-label="自动发布方式" value={editor.settings.reviewRequired ? 'review' : 'direct'} onChange={e => update({ reviewRequired: e.target.value === 'review' })}><option value="direct">按时直接发布</option><option value="review">先生成草稿，由我审核发布</option></select></label></div>
         </section>
         <section className="wa-form-section"><h3>发布节奏</h3>
-        <div className="wa-wb-generator"><label>计划周期<select aria-label="发布计划周期" value={editor.settings.schedule.type} onChange={e => schedule({ type: e.target.value })}><option value="daily">每天</option><option value="weekly">每周</option><option value="once">仅一次</option></select></label>
+        <div className="wa-wb-generator"><label>计划周期<select aria-label="发布计划周期" disabled={!!editor.automatic} value={editor.settings.schedule.type} onChange={e => schedule({ type: e.target.value })}><option value="daily">每天</option><option value="weekly">每周</option><option value="once">仅一次</option></select>{editor.automatic && <small>此次修改只影响这一个自动时段；循环计划可手动新增。</small>}</label>
           <label>时区<input aria-label="发布时区" value={editor.settings.schedule.timezone} maxLength={80} onChange={e => schedule({ timezone: e.target.value })} placeholder="Asia/Shanghai" /></label></div>
         {editor.settings.schedule.type === 'once' ? <label>单次发布时间<input aria-label="单次发布时间" type="datetime-local" value={editor.settings.schedule.onceAt} onChange={e => schedule({ onceAt: e.target.value })} /></label> : <label>每天的发布时间（每行一个 HH:mm，最多 8 个）<textarea aria-label="每天发布时间" rows={2} value={timesText} maxLength={48} onChange={e => setTimesText(e.target.value)} /></label>}
         {editor.settings.schedule.type === 'weekly' && <div className="wa-row wa-moments-weekdays">{['一', '二', '三', '四', '五', '六', '日'].map((label, index) => <label className="wa-wb-check" key={label}><input type="checkbox" aria-label={'发布星期' + label} checked={editor.settings.schedule.weekdays.includes(index + 1)} onChange={e => schedule({ weekdays: e.target.checked ? [...editor.settings.schedule.weekdays, index + 1] : editor.settings.schedule.weekdays.filter(day => day !== index + 1) })} />周{label}</label>)}</div>}
@@ -87,7 +135,7 @@ export function MomentsPublishingPage({ state, status, audience, audienceError, 
         <section className="wa-form-section"><h3>取材与配图</h3>
         <label className="wa-wb-check"><input aria-label="发布联网取材" type="checkbox" checked={editor.settings.research} onChange={e => update({ research: e.target.checked })} />生成前联网取材</label>
         {editor.settings.research && <label>公开搜索主题（可选）<input aria-label="发布搜索主题" maxLength={240} value={editor.settings.researchQuery} onChange={e => update({ researchQuery: e.target.value })} /><small>留空时按内容主题搜索；未取得有效来源时不发布。</small></label>}
-        <label>配图<select aria-label="发布配图方式" value={editor.settings.image.mode} onChange={e => picture({ mode: e.target.value })}><option value="none">不配图，纯文字</option><option value="ai">由 AI 生成一张配图</option></select></label>
+        <label>配图<select aria-label="发布配图方式" value={editor.settings.image.mode} onChange={e => picture({ mode: e.target.value })}><option value="none">不配图，纯文字</option><option value="library">从素材库选图，合适时配图</option><option value="ai">由 AI 生成一张配图</option></select></label>
         {editor.settings.image.mode === 'ai' && <>
           <p className="wa-wb-note">使用已有生图设置；默认接口为 {providers.find(row => row.id === imageSettings?.defaultProviderId)?.name ?? '当前默认接口'}。图片失败时保留正文，不擅自换接口或降级为纯文字。</p>
           {!imageSettings?.enabled && <p className="wa-alert is-error">生图尚未启用，请先在模型设置中配置。</p>}
@@ -101,32 +149,37 @@ export function MomentsPublishingPage({ state, status, audience, audienceError, 
         <label className="wa-wb-check"><input aria-label="保存并开启发布计划" type="checkbox" checked={editor.settings.enabled} onChange={e => update({ enabled: e.target.checked })} />保存后开启此计划（仍受总开关控制）</label>
       </fieldset>
       {error && <p role="alert" className="wa-alert is-error">{error}</p>}
-      <div className="wa-wb-actions"><Button disabled={busy || !online || selection.missing || audienceError && (editor.settings.blockedLabelIds.length + editor.settings.blockedUserIds.length > 0)} onClick={async () => {
+      <div className="wa-wb-actions wa-editor-actions"><Button disabled={busy || !online || selection.missing || audienceError && (editor.settings.blockedLabelIds.length + editor.settings.blockedUserIds.length > 0)} onClick={async () => {
         const settings = validated(); if (!settings) return;
         if (await execute('moments.plans.save', { settings, ...(editor.id ? { id: editor.id } : {}) })) { setEditor(null); state.setNotice('发布计划已保存，按总开关和计划开关执行。'); }
       }}>保存发布计划</Button><Button quiet disabled={busy || !online} onClick={async () => { const settings = validated(); if (!settings) return;
-        const value = await execute('moments.plans.preview', { settings }); if (value) { await showRun(value); state.setNotice('预览已生成并保存为草稿，尚未发布。'); }
+        await generatePreview(settings);
       }}>生成预览（不发布）</Button><Button quiet disabled={state.busy} onClick={() => { setEditor(null); setError(''); }}>关闭编辑</Button></div>
     </div>}
-    <div className="wa-wb-card"><h2>草稿与发布记录</h2>
-      <p className="wa-wb-note">展示最近 100 条记录。生成失败不会再次自动调用 AI；未知结果只核对已保存回执。文字和配图保留在本机。</p>
-      {runs.length ? <div className="wa-wb-split"><div className="wa-wb-list">{runs.map(row => <button type="button" className={'wa-wb-list-item' + (runId === row.id ? ' is-selected' : '')} aria-current={runId === row.id ? 'true' : undefined} key={row.id} disabled={state.busy} onClick={() => showRun(row)}>
+    <section className="wa-moments-records"><header className="wa-section-heading"><h2>草稿与发布记录<span className="wa-section-count">{runs.length}</span></h2><CleanupControl key={status.account?.id} state={state} kind="moments.publishing" label="清空发布记录" onDone={() => setSelectedRuns([])} /></header>
+      {!!selectedRuns.length && <CleanupControl state={state} kind="moments.publishing" ids={selectedRuns} label={`删除选中 ${selectedRuns.length} 条`} onDone={() => setSelectedRuns([])} />}
+      <p className="wa-wb-note">展示最近 100 条记录。生成失败不会再次自动调用 AI；状态核对会读取微信动态和已保存回执，不会重新发布。文字和配图保留在本机。</p>
+      {runs.length ? <div className="wa-wb-split"><div className="wa-wb-list">{runs.map(row => <div key={row.id} style={{ display: 'grid', gridTemplateColumns: '20px minmax(0, 1fr)', alignItems: 'center', gap: 8 }}><input type="checkbox" aria-label={`选择发布记录 ${row.settings.name}`} checked={selectedRuns.includes(row.id)} onChange={event => setSelectedRuns(ids => event.target.checked ? [...ids, row.id] : ids.filter(id => id !== row.id))} /><button type="button" className={'wa-wb-list-item' + (runId === row.id ? ' is-selected' : '')} aria-current={runId === row.id ? 'true' : undefined} key={row.id} disabled={state.busy} onClick={() => showRun(row)}>
         <small>{formatTime(row.createdAt)} · {labels[row.state]}</small><strong>{row.settings.name}</strong><p>{row.text?.slice(0, 90) ?? row.error ?? '正在生成内容'}</p>
-      </button>)}</div><div className="wa-moments-draft-detail">{run ? <>
-        <Tag state={run.state}>{labels[run.state]}</Tag><p className="wa-wb-note">{run.theme ?? run.settings.themes.join('、')} · {run.origin === 'schedule' ? '定时计划' : '手动预览'}</p>
+      </button></div>)}</div><div className="wa-moments-draft-detail">{run ? <>
+        <Tag state={run.state === 'published-unverified' ? 'unknown' : run.state === 'deleted' ? 'disabled' : run.state}>{labels[run.state]}</Tag><CleanupControl state={state} kind="moments.publishing" ids={[run.id]} label="删除这条记录" onDone={() => { setRunId(null); setImage(null); setSelectedRuns(ids => ids.filter(id => id !== run.id)); }} /><p className="wa-wb-note">{run.theme ?? run.settings.themes.join('、')} · {run.origin === 'schedule' ? '定时计划' : '手动预览'}</p>
         {['draft', 'failed'].includes(run.state) ? <label>草稿正文<textarea aria-label="自动发布草稿正文" rows={7} maxLength={run.settings.maxChars} disabled={busy} value={draftText} onChange={e => setDraftText(e.target.value)} /></label> : <p style={{ whiteSpace: 'pre-wrap' }}>{run.text}</p>}
-        {image?.id === run.id && <div className="wa-moments-photos"><img src={image.url} alt="本条朋友圈的 AI 配图" /></div>}
+        {image?.id === run.id && <div className="wa-moments-photos"><img src={image.url} alt="本条朋友圈的配图" /></div>}
         {run.image && <p className="wa-wb-note">{run.image.providerName} · {run.image.model}</p>}
         {!!run.sources?.length && <details><summary>取材来源</summary>{run.sources.map(source => <p key={source.url}><a href={source.url} target="_blank" rel="noreferrer">{source.title || source.url}</a></p>)}</details>}
         {run.error && <p role="alert" className="wa-alert is-error">{run.error}</p>}
+        {!!run.selectedMaterials?.length && <p className="wa-wb-note">选用素材：{run.selectedMaterials.map(item => item.title).join('、')}</p>}
+        {run.materialsWarning && <p className="wa-alert is-error">{run.materialsWarning}</p>}
+        {run.audienceWarning && <p className="wa-wb-note">{run.audienceWarning}</p>}
         {run.postId && <p className="wa-wb-note">已确认动态编号：{run.postId}</p>}
         <div className="wa-wb-actions">
-          {['draft', 'failed'].includes(run.state) && <><Button quiet disabled={busy || !online || !draftText.trim() || draftText === run.text} onClick={async () => { if (await state.execute('moments.drafts.edit', { id: run.id, text: draftText })) state.setNotice('草稿修改已保存，尚未发布。'); }}>保存草稿修改</Button>
-            <Button disabled={busy || !online || !run.text || draftText !== run.text || run.settings.image.mode === 'ai' && !run.hasImage} onClick={async () => { if (await state.execute('moments.drafts.publish', { id: run.id })) state.setNotice('微信已确认发布这份草稿。'); else await state.refresh(); }}>发布这份草稿</Button>
+          {['draft', 'failed'].includes(run.state) && <><Button quiet disabled={busy || !online || !draftText.trim() || draftText === run.text} onClick={async () => { if (await state.execute('moments.drafts.edit', { id: run.id, text: draftText })) { setDraftText(draftText.trim()); state.setNotice('草稿修改已保存，尚未发布。'); } }}>保存草稿修改</Button>
+            <Button disabled={busy || !online || !run.text || draftText !== run.text || run.settings.image.mode === 'ai' && !run.hasImage} onClick={async () => { if (await state.execute('moments.drafts.publish', { id: run.id })) state.setNotice('微信已确认发布这份草稿。'); else await state.refresh(true); }}>发布这份草稿</Button>
             <Button quiet danger disabled={busy || !online} onClick={() => state.execute('moments.drafts.discard', { id: run.id })}>放弃这份草稿</Button></>}
-          {run.state === 'unknown' && <Button quiet disabled={busy || !online} onClick={async () => { const value = await state.execute('moments.drafts.reconcile', { id: run.id }); if (value) state.setNotice(value.confirmed ? '已找到微信成功回执。' : '仍无成功回执，未重发；请在微信核对。'); }}>只核对发布回执</Button>}
+          {['draft', 'failed', 'discarded'].includes(run.state) && <Button quiet disabled={busy || !online} onClick={() => generatePreview(run.settings)}>重新生成预览（不发布）</Button>}
+          {['unknown', 'published-unverified'].includes(run.state) && <Button quiet disabled={busy || !online} onClick={async () => { const value = await state.execute('moments.drafts.reconcile', { id: run.id }); if (value) state.setNotice(value.message || (value.confirmed ? '已完成微信回执核对。' : '当前状态仍未确认，原记录已保留。')); }}>核对微信发布状态</Button>}
         </div>
       </> : <Empty title="选择一条记录">查看正文、配图、取材来源和实际发布状态。</Empty>}</div></div> : <Empty title="尚无发布记录">可以先生成预览，或保存并开启一个发布计划。</Empty>}
-    </div>
+    </section>
   </div>;
 }

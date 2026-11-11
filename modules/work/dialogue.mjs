@@ -50,6 +50,7 @@ export async function replyToWork(channel, item, scope, signal) {
   signal.throwIfAborted(); channel.work.assertAllowed(scope, signal);
   const command = item.workCommand;
   return { text: channel.work.handle(command, scope, { defer: true,
+    quotedReferences: item.quotedReferences,
     conversationTurn: ['create', 'continue'].includes(command.action),
     onCreated: job => recordWorkCreation(channel, item, job) }) };
 }

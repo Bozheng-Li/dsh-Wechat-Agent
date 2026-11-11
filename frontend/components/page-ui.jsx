@@ -1,21 +1,21 @@
 import { stateLabels } from "../shared/labels.mjs";
 import { Glyph } from "./glyph.jsx";
 
-export function PageHead({ title, description, children, className = '' }) {
+export function PageHead({ title, description, children, icon, className = '' }) {
   return (
     <header className={'wa-page-head ' + className}>
-      <div>
-        <h1>{title}</h1>
+      <div className="wa-page-heading-copy">
+        <h1>{icon && <Glyph name={icon} />}{title}</h1>
         {description && <p className="wa-muted">{description}</p>}
       </div>
-      {children && <div className="wa-row">{children}</div>}
+      {children && <div className="wa-page-actions">{children}</div>}
     </header>
   );
 }
 
-export function Empty({ icon = 'chat', title, description, children }) {
+export function Empty({ icon = 'chat', title, description, children, className = '' }) {
   return (
-    <div className="wa-empty">
+    <div className={'wa-empty ' + className}>
       <div className="wa-empty-icon">
         <Glyph name={icon} />
       </div>
@@ -88,6 +88,7 @@ export function StateBadge({ state, label }) {
             : '';
   return (
     <span className={'wa-badge ' + (kind ? 'is-' + kind : '')}>
+      <span className="wa-badge-dot" aria-hidden="true" />
       {label || stateLabels[state] || state || '等待消息'}
     </span>
   );

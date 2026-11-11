@@ -3,6 +3,7 @@ import { identity } from "../../backend/storage/keys.mjs";
 import { memoryText } from "../memory/conversation/store.mjs";
 import { matches } from "./helpers.mjs";
 import { randomUUID } from 'node:crypto';
+import { resolvePendingMessageReferences } from '../memory/images/references.mjs';
 
 export function scheduleMemoryMaintenance(channel, selector, { force = false } = {}) {
   if (channel.closed || channel.fault) {
@@ -80,6 +81,13 @@ export async function maintainConversationMemory(channel, selector) {
     let extractionFailure;
     try {
       await channel.memory.enrich(selector, channel.runner, channel.transport, controller.signal);
+      await resolvePendingMessageReferences(channel, selector, controller.signal, () => {
+        const current = channel.transport.status();
+        if (current.account?.id !== selector.accountId) throw new ChannelError('ACCOUNT_CHANGED', '微信账号已变化，未保存旧图片引用');
+        if (!current.online || !eligible(channel.store.settings(selector.accountId), selector) ||
+          [...channel.pauses.values()].some(pause => matches(selector, pause.selector)))
+          throw new ChannelError('AUTH_CHANGED', '会话授权或连接已变化，未保存旧图片引用');
+      });
     } catch (error) {
       if (error.code === 'STATE_WRITE_FAILED' || controller.signal.aborted) throw error;
     }

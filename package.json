@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-wechat-agent",
-  "version": "0.2.0-preview.8",
+  "version": "0.2.0-preview.9",
   "description": "DeepSeek Harness 微信 Agent：统一拟人助手、自然聊天、持久记忆、按需看图、定时提醒与联网搜索",
   "keywords": [
     "dsh-plugin",
@@ -59,7 +59,13 @@
     "prompts/work/routing.md",
     "prompts/remote/messages.json",
     "prompts/moments/reply.md",
-    "prompts/moments/publish.md"
+    "prompts/moments/friend-reply.md",
+    "prompts/moments/interactions.md",
+    "prompts/moments/publish.md",
+    "prompts/moments/content-review.md",
+    "prompts/moments/image-read.md",
+    "prompts/moments/materials.md",
+    "prompts/moments/material-review.md"
   ],
   "dsh": {
     "bundle": {

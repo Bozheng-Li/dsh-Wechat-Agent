@@ -166,7 +166,7 @@ export function receiveMessage(channel, message, accountId) {
       );
       return;
     }
-    if (message.message?.some((segment) => segment.data?.resourceId)) channel.maintainMemory(record);
+    if (message.message?.some((segment) => segment.data?.resourceId || segment.type === 'reply' && segment.data?.messageType === 3)) channel.maintainMemory(record);
     if (mode === 'natural') observation.natural = channel.natural.onHuman(record, config, parsed);
     if (mode === 'natural' && !parsed.trigger) {
       const current = channel.store.progress(account.id, message.chatType, message.peerId);

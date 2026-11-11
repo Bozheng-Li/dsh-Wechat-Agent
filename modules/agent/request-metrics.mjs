@@ -31,22 +31,28 @@ export function numericUsage(value) {
   return Object.keys(result).length ? result : undefined;
 }
 
-export function observeModelRequests(ctx, { strategy = 'legacy', mode, rows, onUpdate } = {}) {
+export function observeModelRequests(ctx, { strategy = 'legacy', mode, sessionId, rows, onUpdate } = {}) {
   if (typeof ctx.on !== 'function') return;
   return ctx.on('llm/stream', (request, next) => {
+    // LLM middleware shares the host service across concurrent agents. Attribute
+    // only this native session, excluding other conversations and nested calls.
+    if (sessionId && request.sessionId !== sessionId) return next();
     const row = { index: rows.length + 1, strategy, mode, ...measureModelRequest(request), state: 'running' };
     rows.push(row);
     const started = performance.now();
     const notify = () => { try { onUpdate?.(structuredClone(rows)); } catch { /* Diagnostics cannot prevent a reply. */ } };
-    const stream = next();
     return (async function* () {
       try {
+        const stream = next();
         for await (const chunk of stream) {
           const usage = numericUsage(chunk.usage ?? (chunk.type === 'usage' ? chunk : undefined));
           if (usage) row.usage = usage;
+          // DSH converts adapter dispatch/iteration failures into terminal
+          // finish chunks, so a normally exhausted stream can still fail.
+          if (chunk.type === 'finish' && ['error', 'aborted'].includes(chunk.reason?.kind)) row.state = 'failed';
           yield chunk;
         }
-        row.state = 'completed';
+        if (row.state !== 'failed') row.state = 'completed';
       } catch (error) { row.state = 'failed'; throw error; }
       finally { row.elapsedMs = Math.round(performance.now() - started); notify(); }
     })();

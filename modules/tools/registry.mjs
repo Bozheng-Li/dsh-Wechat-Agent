@@ -14,7 +14,7 @@ export function modelToolList(definitions = []) {
 }
 
 /** DSH serializes these registered definitions into every model request.tools. */
-export function registerModelTools(ctx, definitions, { assertAllowed = () => {}, denied = '此会话只能使用本轮提供的工具', native = false, inherit = false, agent, onDispose, deferredGroups = [] } = {}) {
+export function registerModelTools(ctx, definitions, { assertAllowed = () => {}, denied = '此会话只能使用本轮提供的工具', native = false, inherit = false, agent, onDispose, onBeforeTool, deferredGroups = [] } = {}) {
   const tools = modelToolList(definitions), allowed = new Set(tools.map(tool => tool.name));
   // Validate the complete authorized inventory before making any registrations.
   modelToolList([...tools, ...deferredGroups.flatMap(group => group.tools)]);
@@ -51,5 +51,18 @@ export function registerModelTools(ctx, definitions, { assertAllowed = () => {},
       return inherit || allowed.has(execution?.name) ? undefined : denied;
     } catch (error) { return error.message; }
   }));
+  if (typeof onBeforeTool === 'function' && typeof ctx.on === 'function') {
+    // The public around-dispatch hook runs after host approval and guards.
+    // It covers deferred and inherited tools without modifying the host registry.
+    retain(ctx.on('tools/execute', async (execution, next) => {
+      if (agent && execution.agent !== agent) return next();
+      execution.signal?.throwIfAborted(); assertAllowed();
+      await onBeforeTool(execution.name, execution.arguments, execution);
+      execution.signal?.throwIfAborted(); assertAllowed();
+      return next();
+    }));
+    retain(ctx.systemPrompt?.section?.({ name: 'wechat-tool-notices', order: 90, interpolate: false,
+      text: '通道会在每次实际调用工具前自动发出简短的开始提示。提示只说明接下来的动作，不表示已经完成；你不必重复开场或另发进度工具。最终正文直接给出真实结果，失败与未知如实说明。' }));
+  }
   return tools;
 }

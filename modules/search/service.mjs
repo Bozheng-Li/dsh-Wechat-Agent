@@ -1,11 +1,21 @@
 import { ChannelError, DEFAULT_TAVILY_URL, searchBaseURL } from "../../shared/contracts.mjs";
 
+import { searchWithFallback } from './fallback.mjs';
+
 export const SEARCH_CREDENTIALS = Object.freeze({
   dsh: 'WECHAT_AGENT_DEEPSEEK_SEARCH_API_KEY',
   tavily: 'WECHAT_AGENT_TAVILY_API_KEY',
 });
 export { DEFAULT_TAVILY_URL, searchBaseURL };
 const MAX_RESPONSE_BYTES = 1024 * 1024;
+function boundedImages(values) {
+  return (Array.isArray(values) ? values : []).flatMap(value => {
+    try { const url = new URL(typeof value === 'string' ? value : value?.url);
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.href.length > 4096) return [];
+      return [{ url: url.href, description: String(value?.description || '').slice(0, 1000) }];
+    } catch { return []; }
+  }).slice(0, 8);
+}
 
 function boundedSources(values, limit) {
   if (!Array.isArray(values))
@@ -74,9 +84,10 @@ async function responseJSON(response, signal) {
 
 /** Independent search credentials; a chat credential is never copied to a new endpoint. */
 export class SearchService {
-  constructor(ctx, { fetchImpl = globalThis.fetch, loadDeepSeek } = {}) {
+  constructor(ctx, { fetchImpl = globalThis.fetch, loadDeepSeek, attemptTimeoutMs = 45000 } = {}) {
     this.ctx = ctx;
     this.fetchImpl = fetchImpl;
+    this.attemptTimeoutMs = attemptTimeoutMs;
     this.loadDeepSeek =
       loadDeepSeek ||
       (() => {
@@ -128,12 +139,13 @@ export class SearchService {
   status() {
     return { credentialStore: !!this.ctx?.credentials?.set, credentials: { ...this.credentials } };
   }
-  forConfig(config = {}) {
-    const selected = config.searchProvider ?? 'dsh',
+  forConfig(config = {}, { assertAllowed = () => {} } = {}) {
+    const selected = config.searchProvider ?? 'tavily',
       baseURL = config.tavilyBaseURL ?? DEFAULT_TAVILY_URL;
-    return { search: (request, signal) => this.search(selected, baseURL, request, signal) };
+    return { search: (request, signal) => searchWithFallback({ primary: selected, request, signal, timeoutMs: this.attemptTimeoutMs, assertAllowed,
+      search: (provider, query, abort, options) => this.search(provider, baseURL, query, abort, options) }) };
   }
-  async search(provider, baseURL, request, signal) {
+  async search(provider, baseURL, request, signal, { requireCredential = false } = {}) {
     signal?.throwIfAborted();
     const ref = SEARCH_CREDENTIALS[provider];
     if (!ref) throw new ChannelError('INVALID_SEARCH_CONFIG', '请选择 DeepSeek 原生搜索或 Tavily。');
@@ -149,12 +161,15 @@ export class SearchService {
       // Older installations keep the existing DSH search provider until a
       // dedicated DeepSeek search credential has been explicitly saved.
       if (!apiKey) {
-        if (!this.ctx?.web?.search)
+        if (requireCredential || !this.ctx?.web?.search)
           throw new ChannelError(
             'WEB_PROVIDER_CREDENTIAL_MISSING',
             'DeepSeek 搜索尚未配置密钥；请在模型设置中保存搜索 API Key。'
           );
-        return this.ctx.web.search(request, signal);
+        const result = await this.ctx.web.search(request, signal);
+        signal?.throwIfAborted();
+        return { ...result, sources: boundedSources(result.sources, request.maxResults || 5),
+          ...(request.includeImages ? { images: boundedImages(result.images) } : {}) };
       }
       let native;
       try {
@@ -200,6 +215,7 @@ export class SearchService {
           max_results: Math.min(request.maxResults || 5, 5),
           include_answer: false,
           include_raw_content: false,
+          ...(request.includeImages ? { include_images: true, include_image_descriptions: true } : {}),
         }),
       });
     } catch {
@@ -233,6 +249,7 @@ export class SearchService {
       throw new ChannelError('WEB_SEARCH_INVALID_RESULT', 'Tavily 接口没有返回有效的搜索结果，请核对服务地址。');
     return {
       sources: boundedSources(result.results, request.maxResults || 5),
+      ...(request.includeImages ? { images: boundedImages(result.images) } : {}),
       truncated: result.results.length > (request.maxResults || 5),
     };
   }

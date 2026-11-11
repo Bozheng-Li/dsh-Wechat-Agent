@@ -3,10 +3,10 @@ import { useState } from 'react';
 const names = { dsh: 'DeepSeek 原生', tavily: 'Tavily' };
 
 export function SearchControls({ draft, status, blocked, onChange, Field }) {
-  const selected = draft.searchProvider || 'tavily',
+  const selected = draft.searchProvider || 'tavily', alternate = selected === 'tavily' ? 'dsh' : 'tavily',
     last = status.lastSearch;
   return (
-    <div className="wa-stack" data-testid="search-settings">
+    <div className="wa-search-controls" data-testid="search-settings">
       <Field label="搜索服务" id="wa-search-provider">
         <select
           className="wa-select"
@@ -19,8 +19,7 @@ export function SearchControls({ draft, status, blocked, onChange, Field }) {
           <option value="tavily">Tavily 搜索</option>
         </select>
       </Field>
-      {selected === 'tavily' && (
-        <Field label="Tavily 服务地址" id="wa-tavily-url" help="填写提供搜索 API 的 HTTPS 服务地址。">
+      <Field label="Tavily 服务地址" id="wa-tavily-url" help="Tavily 作为优先或备用搜索时均使用此 HTTPS 地址。">
           <input
             className="wa-input"
             id="wa-tavily-url"
@@ -29,14 +28,13 @@ export function SearchControls({ draft, status, blocked, onChange, Field }) {
             disabled={blocked || !draft.webSearch}
             onChange={(event) => onChange({ ...draft, tavilyBaseURL: event.target.value })}
           />
-        </Field>
-      )}
+      </Field>
       <p className="wa-help">
-        只向选中的搜索服务提交本次公开查询，回复保留来源。搜索密钥单独保存，聊天可用不代表搜索已通过认证。
+        优先使用{names[selected]}；接口不可用或没有可用结果时，回退{names[alternate]}一次。备用接口需有专用搜索密钥。只查询必要的公开主题，回复保留来源。
       </p>
       {last && (
         <p className="wa-help" data-testid="search-status" role={last.ok ? 'status' : 'alert'}>
-          {names[last.provider] || '搜索服务'}最近一次查询：
+          {last.fallbackUsed ? `已从${names[last.primaryProvider] || '默认接口'}回退至${names[last.provider] || '备用接口'}：` : `${names[last.provider] || '搜索服务'}最近一次查询：`}
           {last.ok ? `已完成，取得 ${last.sourceCount} 条可引用结果。` : last.message}
         </p>
       )}
@@ -52,14 +50,14 @@ export function SearchCredentials({ status, blocked, busy, onSave, Field, Button
     if (result) setValues((current) => (current[provider] === submitted ? { ...current, [provider]: '' } : current));
   };
   return (
-    <section className="wa-card">
+    <section className="wa-settings-block wa-search-credentials">
       <details className="wa-data-details" data-testid="search-credentials">
         <summary>搜索密钥</summary>
         <p className="wa-help">密钥保存到 DSH 凭据服务；再次打开只显示配置状态。</p>
         {Object.keys(names).map((provider) => (
           <form
             key={provider}
-            className="wa-subsection"
+            className="wa-subsection wa-credential-form"
             onSubmit={(event) => {
               event.preventDefault();
               void save(provider);
@@ -72,7 +70,7 @@ export function SearchCredentials({ status, blocked, busy, onSave, Field, Button
                 status.search?.credentials?.[provider]
                   ? '已保存；填写新密钥可替换。'
                   : provider === 'dsh'
-                    ? '未保存专用密钥时沿用 DSH 已配置的搜索服务。'
+                    ? '作为优先接口时兼容 DSH 原有搜索；作为备用时必须保存专用密钥。'
                     : '尚未保存 Tavily 搜索密钥。'
               }
             >

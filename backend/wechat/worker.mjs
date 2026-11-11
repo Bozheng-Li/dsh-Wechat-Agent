@@ -6,6 +6,7 @@ import { protectStorage, projectPaths } from "./paths.ts";
 import { ChannelError } from "../../shared/contracts.mjs";
 import { loadObservedMedia } from "./protocol/media-loader.mjs";
 import { publicSendErrorMessage } from './send-errors.mjs';
+import { publicMomentPublication } from '../../shared/moments-publication.mjs';
 
 const root = path.resolve(process.argv[2]);
 const resources = process.env.NAPCAT_RESOURCE_ROOT;
@@ -34,6 +35,7 @@ function snapshot() {
     sent: diagnostics.sent, received: diagnostics.received, sendQueue: diagnostics.sendQueue,
     login: login.status(), runtimeReady, imageUploadReady: runtimeReady && !!(backend.session.value?.image_base_request ?? backend.session.value?.heartbeat_base_request),
     momentsReadReady: status.online && !!backend.session.value?.image_base_request,
+    momentsImagesReady: status.online && !!backend.session.value?.image_base_request,
     momentsWriteReady: status.online && !!backend.session.value?.image_base_request,
     momentsAudienceReady: status.online && !!backend.session.value?.image_base_request,
     ...diagnostics.lastError ? { error: '微信连接异常，请检查网络；持续离线时请重新扫码' } : {}
@@ -102,6 +104,8 @@ async function perform(id, op, args) {
       try { return await backend.readMomentsAudience(controller.signal); }
       finally { sending.delete(id); }
     }
+    case 'moments.publication':
+    case 'moments.images':
     case 'moments.read': {
       const account = backend.session.value;
       if (!account || args?.accountId !== account.wxid) throw new ChannelError('ACCOUNT_CHANGED', '微信账号已变化，未读取其他账号的朋友圈');
@@ -109,7 +113,8 @@ async function perform(id, op, args) {
         throw new ChannelError('ERR_INVALID_MOMENTS_QUERY', '朋友圈读取缺少实际发起人范围');
       const controller = new AbortController(); sending.set(id, controller);
       try {
-        const result = await backend.readMoments(args.query, args.scopeKey, controller.signal);
+        const result = await (op === 'moments.publication' ? backend.readMomentsPublication(args.query, args.scopeKey, controller.signal)
+          : op === 'moments.images' ? backend.readMomentsImages(args.query, args.scopeKey, controller.signal) : backend.readMoments(args.query, args.scopeKey, controller.signal));
         if (backend.session.value !== account && (!backend.session.value || ['uin', 'wxid', 'token', 'body_key', 's08'].some(key => backend.session.value[key] !== account[key])))
           throw new ChannelError('ACCOUNT_CHANGED', '读取期间微信账号已变化，未返回旧账号朋友圈');
         return result;
@@ -141,6 +146,7 @@ process.on('message', async message => {
   try { send({ type: 'result', id: message.id, ok: true, value: await perform(message.id, message.op, message.args) }); }
   catch (error) {
     const details = error?.details || {};
+    const publication = message.op === 'moments.write' ? publicMomentPublication(details.publication) : null;
     const parts = publicDeliveryParts(details.deliveryParts);
     send({ type: 'result', id: message.id, ok: false, error: {
       code: error?.code || 'WECHAT_FAILED',
@@ -150,7 +156,8 @@ process.on('message', async message => {
         ? error.message : message.op === 'send' ? publicSendErrorMessage(error) ?? '微信发送失败，请检查连接及回执记录' : '微信操作失败，请检查连接状态',
       details: {
           ...(message.op === 'moments.write' && ['unknown', 'not-sent', 'rejected'].includes(details.delivery) ? { snsDelivery: details.delivery } : {}),
-        ...(message.op === 'send' && Number.isSafeInteger(details.ret) && details.ret >= -0x80000000 && details.ret <= 0x7fffffff ? { ret: details.ret } : {}),
+        ...(['send', 'moments.read', 'moments.images', 'moments.publication', 'moments.write'].includes(message.op) && Number.isSafeInteger(details.ret) && details.ret >= -0x80000000 && details.ret <= 0x7fffffff ? { ret: details.ret } : {}),
+        ...(publication ? { publication } : {}),
         ...['unknown', 'partially-acknowledged', 'rejected', 'not-sent'].includes(details.delivery) ? { delivery: details.delivery } : {},
         ...Array.isArray(details.acknowledgedMessageIds) ? { acknowledgedMessageIds: details.acknowledgedMessageIds } : {},
         ...(parts ? { deliveryParts: parts } : {})

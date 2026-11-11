@@ -1,11 +1,13 @@
 import { ChannelError } from "../../shared/contracts.mjs";
 import { validateImageMemorySettings } from "./images/store.mjs";
+import { imageMemoryCollection } from '../../shared/image-memory.mjs';
 
 export const endpoints = [
   'memory.configure',
   'memory.global.edit',
   'memory.global.clear',
   'memory.global.extract',
+  'memory.role.save',
   'memory.edit',
   'memory.images.configure',
   'memory.images.delete',
@@ -22,6 +24,17 @@ export async function memoryMutation(
   signal
 ) {
   switch (endpoint) {
+    case 'memory.role.save': {
+      const scope = channel.longMemory.selector(conversation(payload));
+      const checked = store.roleCards.checkSave(scope, payload.card, payload.revision);
+      if (!checked.changed) break;
+      await paused('正在更新会话角色卡', () => {
+        assertLive(signal); currentAccount(payload);
+        store.roleCards.save(scope, checked.card, payload.revision);
+        store.resetSessions(scope);
+      }, scope, { resetProgress: false });
+      break;
+    }
     case 'memory.configure':
       channel.memory.setWindowChars(payload.windowChars);
       break;
@@ -65,7 +78,7 @@ export async function memoryMutation(
     case 'memory.images.configure':
     case 'memory.images.delete':
     case 'memory.images.clear': {
-      const scope = conversation(payload);
+      const scope = { ...conversation(payload), collection: imageMemoryCollection(payload.collection) };
       const state = channel.imageMemory.load(scope);
       const settings = endpoint === 'memory.images.configure' ? validateImageMemorySettings(payload.settings) : null;
       if (settings && JSON.stringify(state.settings) === JSON.stringify(settings))
@@ -85,7 +98,7 @@ export async function memoryMutation(
           if (endpoint === 'memory.images.configure') result = channel.imageMemory.configure(scope, settings);
           else if (endpoint === 'memory.images.delete') result = channel.imageMemory.remove(scope, [payload.imageId]);
           else
-            result = channel.imageMemory.clear(scope, [
+            result = channel.imageMemory.clear(scope, scope.collection === 'generated' ? channel.work.generatedImages.entries(scope) : [
               ...channel.memory.load(scope).entries,
               ...store.history(scope.accountId, scope.chatType, scope.peerId, 1000),
             ]);

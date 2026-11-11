@@ -44,8 +44,8 @@ export function Changelog({ connection, onBack }) {
   return (
     <>
       <Back onClick={onBack} />
-      <PageHead title="更新日志" description="查看插件的版本变化与更新记录。" />
-      <section className="wa-card wa-content-narrow wa-changelog" data-testid="changelog-content">
+      <PageHead icon="history" title="更新日志" description="查看插件的版本变化与更新记录。" />
+      <article className="wa-content-narrow wa-changelog" data-testid="changelog-content">
         {error ? (
           <div className="wa-alert is-error" role="alert">
             <p>{error}</p>
@@ -62,7 +62,7 @@ export function Changelog({ connection, onBack }) {
         ) : (
           <Empty icon="history" title="暂无更新记录" description="当前插件包暂未提供更新日志。" />
         )}
-      </section>
+      </article>
     </>
   );
 }

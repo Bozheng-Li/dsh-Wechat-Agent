@@ -175,6 +175,7 @@ export function workTools({ cwd, request = '', shell, resolvePolicy, limits, ass
     atomicBytes(destination, generated.bytes);
     const { metadata } = readWorkArtifact(cwd, actual, undefined, generated.sendAs ?? 'auto');
     return { ok: true, artifacts: [metadata], providerId: generated.providerId, providerName: generated.providerName, model: generated.model,
+      prompt: prompt.slice(0, 4000),
       message: generated.sendAs === 'file'
         ? 'API 原图已生成并保存，超过 10 MiB 图片发送上限，任务结束后作为原图文件附件回传；尚未发送'
         : 'API 图片已生成并保存，任务结束后原生回传微信；尚未发送' };

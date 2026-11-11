@@ -1,3 +1,4 @@
+import { CleanupControl } from '../../components/cleanup-control.jsx';
 import { useEffect, useRef, useState } from 'react';
 import { conversationKey, formatTime, searchText } from "../../shared/conversations.mjs";
 import { taskViews } from "../../../shared/task-history.mjs";
@@ -7,6 +8,7 @@ import { RoomPicker } from "../../components/room-picker.jsx";
 import { TaskRecipients } from "./recipients.jsx";
 import { taskStates, localDateInput, scheduleLabel, TaskBadge, TaskDetails } from "./details.jsx";
 import { PageHead } from '../../components/page-ui.jsx';
+import { Glyph } from '../../components/glyph.jsx';
 
 export function TasksPage({ rpc, status, rows, initialPeer }) {
   const peers = rows.filter((peer) => peer.authorized),
@@ -68,7 +70,7 @@ export function TasksPage({ rpc, status, rows, initialPeer }) {
       clearTimeout(timer);
     };
   }, [accountId]);
-  const act = async (endpoint, payload, success) => {
+  const act = async (endpoint, payload, success, refresh = true) => {
     if (busy) return false;
     setBusy(endpoint);
     setError('');
@@ -76,11 +78,11 @@ export function TasksPage({ rpc, status, rows, initialPeer }) {
     const controller = new AbortController();
     actionController.current = controller;
     try {
-      await rpc(endpoint, payload, controller.signal);
-      await reload(controller.signal);
+      const result = await rpc(endpoint, payload, controller.signal);
+      if (refresh) await reload(controller.signal);
       if (!mounted.current || controller.signal.aborted) return false;
-      setNotice(success);
-      return true;
+      setNotice(success || '');
+      return result || true;
     } catch (failure) {
       if (mounted.current) setError(failure.message);
       return false;
@@ -118,6 +120,7 @@ export function TasksPage({ rpc, status, rows, initialPeer }) {
       request.current = { signature: '', id: '' };
     }
   };
+  const cleanupState = { busy: !!busy, setNotice, execute: (method, payload, refresh = true) => act(method, { ...payload, accountId }, '', refresh) };
   const words = searchText(query).split(' ').filter(Boolean);
   const visible = data.tasks.filter(
     (task) =>
@@ -136,7 +139,7 @@ export function TasksPage({ rpc, status, rows, initialPeer }) {
   const rooms = [...new Map(data.tasks.map((task) => [conversationKey(task), task])).values()];
   return (
     <>
-      <PageHead title="定时任务" description="安排提醒与 Agent 任务，查看执行结果。">
+      <PageHead icon="clock" title="定时任务" description="安排提醒与 Agent 任务，查看执行结果。">
         {accountId && (
           <Button
             primary
@@ -158,6 +161,7 @@ export function TasksPage({ rpc, status, rows, initialPeer }) {
       )}
       {!accountId ? (
         <div className="wa-empty">
+          <div className="wa-empty-icon"><Glyph name="clock" /></div>
           <h3>先连接微信账号</h3>
           <p>连接并授权会话后即可安排任务。</p>
         </div>
@@ -166,11 +170,11 @@ export function TasksPage({ rpc, status, rows, initialPeer }) {
           {showCreate && (
             <form
               id="wa-task-create"
-              className="wa-card wa-task-create"
+              className="wa-task-create wa-automation-editor"
               onSubmit={create}
               data-testid="task-create-form"
             >
-              <h2>新增任务</h2>
+              <header className="wa-editor-heading"><h2>新增任务</h2><p>选择会话、填写内容，再安排执行时间。</p></header>
               <fieldset disabled={!!busy} className="wa-task-fields">
                 <section className="wa-form-section">
                 <h3>发送到哪里</h3>
@@ -276,6 +280,7 @@ export function TasksPage({ rpc, status, rows, initialPeer }) {
                 <div className="wa-form-actions">
                   <span className="wa-help">保存后按计划执行。</span>
                   <div className="wa-row">
+                  <Button quiet disabled={!!busy} onClick={() => setShowCreate(false)}>取消新增</Button>
                   <Button
                     type="submit"
                     primary
@@ -289,7 +294,7 @@ export function TasksPage({ rpc, status, rows, initialPeer }) {
               </fieldset>
             </form>
           )}
-          <section className="wa-card wa-task-workspace">
+          <section className="wa-task-workspace">
             <div className="wa-task-toolbar">
               <div className="wa-task-tabs" role="tablist" aria-label="任务视图">
                 {[
@@ -350,14 +355,16 @@ export function TasksPage({ rpc, status, rows, initialPeer }) {
               </div>
             </div>
             {!status.settings.enabled && <p className="wa-task-warning">自动回复已关闭，定时任务暂不执行。</p>}
+            <div className="wa-wb-actions">{view === 'history' && <><CleanupControl key={accountId} state={cleanupState} kind="tasks.history" label="清空任务历史" />{(query || filter !== 'all') && <CleanupControl state={cleanupState} kind="tasks.history" ids={views.history.map(entry => entry.task.id)} label="删除筛选结果" />}</>}</div>
             <div id="wa-task-panel" role="tabpanel" aria-labelledby={'wa-task-tab-' + view}>
               {view === 'current' ? (
                 <div className="wa-task-list" data-testid="task-list">
+                  {!!pageEntries.length && <div className="wa-task-list-heading" aria-hidden="true"><span>任务</span><span>执行时间</span><span>状态</span><span>操作</span></div>}
                   {pageEntries.map((task) => (
-                    <article className="wa-task" key={task.id} data-task-id={task.id}>
+                    <article className="wa-task" key={task.id} data-task-id={task.id} data-state={task.state}>
                       <div className="wa-task-main">
                         <div className="wa-task-heading">
-                          <h3>{task.content}</h3>
+                          <div className="wa-task-title-line"><Glyph name={task.kind === 'agent' ? 'spark' : 'chat'} /><h3>{task.content}</h3></div>
                           <p className="wa-help">
                             {task.name} · {task.kind === 'agent' ? 'Agent 任务' : '发送消息'} ·{' '}
                             {scheduleLabel(task.schedule)}
@@ -384,6 +391,7 @@ export function TasksPage({ rpc, status, rows, initialPeer }) {
                         <div className="wa-task-actions">
                           {task.state === 'pending' && (
                             <Button
+                              quiet
                               disabled={!!busy}
                               onClick={() => act('tasks.pause', { accountId, taskId: task.id }, '任务已暂停。')}
                             >
@@ -392,6 +400,7 @@ export function TasksPage({ rpc, status, rows, initialPeer }) {
                           )}
                           {task.state === 'paused' && !['unknown', 'partial'].includes(task.lastState) && (
                             <Button
+                              quiet
                               disabled={!!busy}
                               onClick={() => act('tasks.resume', { accountId, taskId: task.id }, '任务已恢复。')}
                             >
@@ -400,6 +409,7 @@ export function TasksPage({ rpc, status, rows, initialPeer }) {
                           )}
                           <Button
                             danger
+                            quiet
                             disabled={!!busy}
                             onClick={() =>
                               act(
@@ -460,13 +470,14 @@ export function TasksPage({ rpc, status, rows, initialPeer }) {
                           ⌄
                         </span>
                       </summary>
-                      <TaskDetails task={entry.task} runs={entry.runs} />
+                      <TaskDetails task={entry.task} runs={entry.runs} /><CleanupControl state={cleanupState} kind="tasks.history" ids={[entry.task.id]} label="删除任务历史" />
                     </details>
                   ))}
                 </div>
               )}
               {!entries.length && (
                 <div className="wa-empty wa-task-empty">
+                  <div className="wa-empty-icon"><Glyph name={view === 'current' ? 'clock' : 'history'} /></div>
                   <h3>
                     {!loaded
                       ? '正在读取任务…'

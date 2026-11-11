@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildWechatPrompt, applyFixedReplyBoundaries } from '../prompts/reply/compose.mjs';
-import { personaFromPreset } from '../prompts/personas/catalog.mjs';
-import { DEFAULT_AGENT_IDENTITY } from '../modules/agent/identity.mjs';
+import {
+  buildWechatPrompt, applyFixedReplyBoundaries, personaFromPreset, DEFAULT_AGENT_IDENTITY
+} from '../lib/testing.js';
+
+
 
 const now = new Date('2026-11-10T04:00:00Z');
 const common = () => ({ persona: personaFromPreset(), now, requestText: '今天收拾好了桌子。' });

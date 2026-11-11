@@ -5,6 +5,7 @@ import { samePeer, selector } from "../../shared/peers.mjs";
 import { Button, Alert, Field } from "../../components/automation-ui.jsx";
 import { RoomPicker } from "../../components/room-picker.jsx";
 import { PageHead } from '../../components/page-ui.jsx';
+import { Glyph } from '../../components/glyph.jsx';
 
 export function MemoryPage({ rpc, status, rows, initialPeer }) {
   const [selected, setSelected] = useState(() => initialPeer || rows[0] || null),
@@ -111,58 +112,28 @@ export function MemoryPage({ rpc, status, rows, initialPeer }) {
   };
   return (
     <>
-      <PageHead title="会话记忆" description="各会话独立保留近期上下文，达到窗口后整理为摘要。" />
+      <PageHead icon="chat" title="会话记忆" description="各会话独立保留近期上下文，达到窗口后整理为摘要。" />
       <Alert text={error} />
       {notice && (
         <p className="wa-alert is-success" role="status">
           {notice}
         </p>
       )}
-      <details className="wa-memory-preferences" data-testid="memory-preferences">
-        <summary>
-          <span>记忆窗口设置</span>
-          <span>默认 {list?.windowChars || status.memory?.windowChars || 100000} 字</span>
-        </summary>
-        <section className="wa-memory-preferences-body">
-          <h2>默认记忆窗口</h2>
-          <p className="wa-help">
-            记忆窗口按字符计算，与每轮模型的上下文额度分别管理。原文和压缩前快照独立保留。
-          </p>
-          <div className="wa-row wa-section-space wa-window-setting">
-            <input
-              className="wa-input"
-              type="number"
-              min="1000"
-              step="1"
-              aria-label="默认记忆窗口字符数"
-              value={windowChars}
-              onChange={(event) => setWindowChars(event.target.value)}
-            />
-            <span>字符</span>
-            <Button
-              disabled={!!busy || !Number.isSafeInteger(Number(windowChars)) || Number(windowChars) < 1000}
-              onClick={() => act('memory.configure', { windowChars: Number(windowChars) }, '默认记忆窗口已保存。')}
-            >
-              保存窗口
-            </Button>
-          </div>
-          <p className="wa-help">
-            至少 1000 字符；可在“会话设置”中单独覆盖。
-          </p>
-        </section>
-      </details>
       {!accountId ? (
         <div className="wa-empty">
+          <div className="wa-empty-icon"><Glyph name="memory" /></div>
           <h3>先连接微信账号</h3>
           <p>连接后可查看这个账号的会话记忆。</p>
         </div>
       ) : (
-        <section className="wa-card wa-memory-document-card">
-          <RoomPicker rows={rows} value={selected} onChange={choose} disabled={!!busy} />
+        <section className="wa-memory-document">
+          <div className="wa-memory-scope">
+            <RoomPicker rows={rows} value={selected} onChange={choose} disabled={!!busy} />
+          </div>
           {doc ? (
             <div className="wa-memory-content" data-testid="memory-document">
               <MemoryOverview document={doc} name={peerName(selected)} />
-              <div className="wa-between wa-section-space">
+              <div className="wa-document-heading">
                 <div>
                   <h2>摘要与补充</h2>
                   <p className="wa-help">修正这段会话的背景，近期原文会继续附在后面。</p>
@@ -217,18 +188,20 @@ export function MemoryPage({ rpc, status, rows, initialPeer }) {
                   )}
                 </div>
               )}
+              <div className="wa-memory-editor">
               <Field label="已保存的记忆摘要" help="需要长期保留的共同约定，可写入长期记忆。">
                 <textarea
                   className="wa-textarea"
                   aria-label="记忆摘要"
-                  rows={8}
+                  rows={6}
                   maxLength={100000}
                   value={summary}
                   disabled={!!busy}
                   onChange={(event) => setSummary(event.target.value)}
                 />
               </Field>
-              <div className="wa-row">
+              <div className="wa-document-actions">
+                <div className="wa-row">
                 <Button
                   primary
                   disabled={!!busy || summary === base?.summary}
@@ -251,6 +224,7 @@ export function MemoryPage({ rpc, status, rows, initialPeer }) {
                 >
                   撤销修改
                 </Button>
+                </div>
                 <Button
                   disabled={!!busy || doc.compacting || doc.compressionQueued || !doc.text?.trim() || !selected.authorized}
                   onClick={() => act('memory.compress', selector(status, selected), '记忆已压缩，原文快照已保留。')}
@@ -259,6 +233,8 @@ export function MemoryPage({ rpc, status, rows, initialPeer }) {
                 </Button>
               </div>
               <p className="wa-help">可提前压缩现有内容，原文快照保留。</p>
+              </div>
+              <section className="wa-memory-reference" aria-label="记忆参考与维护">
               <details className="wa-subsection">
                 <summary>查看本次会带给 Agent 的完整记忆</summary>
                 <pre className="wa-memory-preview">{doc.text || '暂时没有记忆，新的授权会话消息会自动写入。'}</pre>
@@ -297,6 +273,7 @@ export function MemoryPage({ rpc, status, rows, initialPeer }) {
                   </div>
                 )}
               </div>
+              </section>
             </div>
           ) : (
             <p className="wa-help wa-section-space">
@@ -305,6 +282,39 @@ export function MemoryPage({ rpc, status, rows, initialPeer }) {
           )}
         </section>
       )}
+      <details className="wa-memory-preferences" data-testid="memory-preferences">
+        <summary>
+          <span>记忆窗口设置</span>
+          <span>默认 {list?.windowChars || status.memory?.windowChars || 100000} 字</span>
+        </summary>
+        <section className="wa-memory-preferences-body">
+          <h2>默认记忆窗口</h2>
+          <p className="wa-help">
+            记忆窗口按字符计算，与每轮模型的上下文额度分别管理。原文和压缩前快照独立保留。
+          </p>
+          <div className="wa-row wa-section-space wa-window-setting">
+            <input
+              className="wa-input"
+              type="number"
+              min="1000"
+              step="1"
+              aria-label="默认记忆窗口字符数"
+              value={windowChars}
+              onChange={(event) => setWindowChars(event.target.value)}
+            />
+            <span>字符</span>
+            <Button
+              disabled={!!busy || !Number.isSafeInteger(Number(windowChars)) || Number(windowChars) < 1000}
+              onClick={() => act('memory.configure', { windowChars: Number(windowChars) }, '默认记忆窗口已保存。')}
+            >
+              保存窗口
+            </Button>
+          </div>
+          <p className="wa-help">
+            至少 1000 字符；可在“会话设置”中单独覆盖。
+          </p>
+        </section>
+      </details>
     </>
   );
 }

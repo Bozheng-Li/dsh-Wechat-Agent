@@ -7,7 +7,7 @@ import { DshAgentRunner, StateStore, createPluginService } from '../lib/testing.
 
 const signal = () => new AbortController().signal;
 function fixture() {
-  const calls = [], requests = [], proposals = [], sessions = new Map();
+  const calls = [], requests = [], proposals = [], registered = [], sessions = new Map();
   const state = { choice: { provider: 'fixture', model: 'first', reasoningEffort: 'low' },
     hostDefault: { provider: 'fixture', model: 'first', reasoningEffort: 'high' }, beforeResolve: null };
   const modelInfo = (_provider, model) => ({ reasoning: {
@@ -17,9 +17,9 @@ function fixture() {
   const create = async options => {
     calls.push(options);
     const hooks = [];
-    options.setup({ tools: { restrict() {}, guard() {}, register() {} },
+    options.setup({ tools: { restrict() {}, guard() {}, register(tool) { registered.push(tool.name); } },
       systemPrompt: { suppressRuntimeContext() {}, section() {} },
-      on(event, hook) { assert.equal(event, 'agent/request'); hooks.push(hook); },
+      on(event, hook) { if (event === 'llm/stream') return; assert.equal(event, 'agent/request'); hooks.push(hook); },
     });
     const id = options.sessionId ?? options.resumeSessionId;
     const previous = sessions.get(id), seed = { ...options.agentOptions };
@@ -44,8 +44,16 @@ function fixture() {
       resolveModelInfo: async (provider, model) => { await state.beforeResolve?.(); return modelInfo(provider, model); } },
     agents: { create, resume: create } };
   const runner = new DshAgentRunner(ctx, () => state.choice);
-  return { state, ctx, runner, calls, requests, proposals };
+  return { state, ctx, runner, calls, requests, proposals, registered };
 }
+
+test('material generation registers only optional search and download tools; review stays isolated', async () => {
+  const tools = ['wechat_moments_material_search', 'wechat_moments_material_download', 'wechat_moments_publish', 'run_command'].map(name => ({ name, description: name, parameters: { type: 'object', properties: {} }, execute: async () => '{}' }));
+  for (const mode of ['moments-materials', 'moments-publish', 'moments-material-review', 'memory']) {
+    const f = fixture(); await f.runner.run({ text: '内部素材任务', systemOverride: '只输出 JSON', mode, tools, signal: signal() });
+    assert.deepEqual(f.registered, ['moments-materials', 'moments-publish'].includes(mode) ? ['wechat_moments_material_search', 'wechat_moments_material_download'] : []);
+  }
+});
 
 test('same-model resume can clear an explicit effort while following the Host retains its explicit default', async () => {
   const f = fixture();

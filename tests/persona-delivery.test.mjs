@@ -34,7 +34,7 @@ function fixture(t, answers, { caption = '此刻歇一歇，也无妨。', after
     const scope = { definitions: [], hooks: [],
       tools: { restrict() {}, guard() {}, register: tool => scope.definitions.push(tool) },
       systemPrompt: { suppressRuntimeContext() {}, section: section => { scope.prompt = section.text; } },
-      on: (_event, hook) => scope.hooks.push(hook),
+      on: (event, hook) => { if (event === 'agent/request') scope.hooks.push(hook); },
     };
     scopes.push(scope); options.setup(scope);
     requests.push(await scope.hooks.reduceRight((next, hook) => () => hook({}, next), async () => options.agentOptions)());

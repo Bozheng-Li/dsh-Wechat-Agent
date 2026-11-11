@@ -1,7 +1,7 @@
 import { TasksPage } from "./pages/tasks/page.jsx";
 import { WorkPage } from './pages/work/page.jsx';
 import { MomentsPage } from './pages/moments/page.jsx';
-import { MediaLibraryPage } from "./pages/media/library-page.jsx";
+import { MediaWorkspace } from "./pages/media/workspace.jsx";
 import { DiagnosticsPage } from "./pages/diagnostics/page.jsx";
 import { RecoveryPage } from "./pages/recovery/page.jsx";
 import { DigestsPage } from "./pages/digests/page.jsx";
@@ -73,6 +73,7 @@ export function PanelContent({ connection, catalog, state }) {
     openRecords,
     saveSettings,
     grant,
+    grantMany,
     blocked,
     navPage,
     warning,
@@ -120,6 +121,7 @@ export function PanelContent({ connection, catalog, state }) {
         notice={notice}
         onAction={action}
         onGrant={grant}
+        onGrantMany={grantMany}
         onDetail={openDetail}
         onToggle={(enabled) =>
           saveSettings(
@@ -172,6 +174,7 @@ export function PanelContent({ connection, catalog, state }) {
             'model.configure',
             {
               modelConfig: {
+                promptStrategy: draftsRef.current.model.promptStrategy ?? 'legacy',
                 vision: draftsRef.current.model.vision,
                 visionModel: draftsRef.current.model.visionModel,
                 webSearch: draftsRef.current.model.webSearch,
@@ -350,7 +353,7 @@ export function PanelContent({ connection, catalog, state }) {
     );
   else if (page === 'assets')
     content = (
-      <MediaLibraryPage
+      <MediaWorkspace
         key={status.account?.id || 'offline'}
         rpc={(endpoint, payload, signal) =>
           call(

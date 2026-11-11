@@ -10,8 +10,8 @@ def main():
 
         Image.MAX_IMAGE_PIXELS = 40_000_000
         warnings.simplefilter("error", Image.DecompressionBombWarning)
-        data = sys.stdin.buffer.read(10 * 1024 * 1024 + 1)
-        if not data or len(data) > 10 * 1024 * 1024:
+        data = sys.stdin.buffer.read(100 * 1024 * 1024 + 1)
+        if not data or len(data) > 100 * 1024 * 1024:
             raise ValueError("input size")
         with Image.open(io.BytesIO(data)) as image:
             if image.format not in {"PNG", "JPEG", "GIF", "WEBP"}:

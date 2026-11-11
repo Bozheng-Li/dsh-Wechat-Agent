@@ -1,3 +1,4 @@
+import { factualSearchInstructions } from '../../prompts/agent/factual-search.mjs';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { ChannelError } from '../../shared/contracts.mjs';
@@ -12,6 +13,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { observeWorkProgress } from './progress.mjs';
 import { workPresentationPrompt } from './presentation.mjs';
 import { publicLanguageInstructions } from '../../prompts/reply/language.mjs';
+import { planProgressiveTools } from '../tools/progressive.mjs';
+import { observeModelRequests } from '../agent/request-metrics.mjs';
 
 async function waitForIdle(agent, signal) {
   signal.throwIfAborted();
@@ -27,17 +30,21 @@ async function waitForIdle(agent, signal) {
 /** Native DSH agent, scoped separately from the chat runner and its sessions. */
 export class DshWorkRunner {
   constructor(chatRunner) { this.chatRunner = chatRunner; this.ctx = chatRunner.ctx; }
-  async run({ request, cwd, workspaceRoot, sessionId, signal, limits, connectionAccess = false, queryStatus, imageGeneration, imageRequest, sessionManagement, moments, assertAllowed, onSession, onSessionHistory, onOperation, onProgress, presentation }) {
+  async run({ request, cwd, workspaceRoot, sessionId, signal, limits, connectionAccess = false, queryStatus, imageGeneration, imageRequest, imageMemoryTools, memoryTools, sessionManagement, moments, assertAllowed, onSession, onSessionHistory, onOperation, onProgress, onBeforeTool, presentation }) {
     const sessionCwd = path.resolve(workspaceRoot ?? cwd);
     // Work is a native DSH submission. Chat model, persona and output controls
     // belong to the chat API and must not replace the desktop's work preset.
     const agentOptions = structuredClone(this.ctx.agentDefaultModel?.currentSelection?.() ?? this.chatRunner.defaultSelection());
+    const modelConfig = structuredClone(this.chatRunner.getRuntimeSettings?.()?.modelConfig ?? {});
+    const promptStrategy = modelConfig.promptStrategy ?? 'legacy';
+    const requestMetrics = [];
     let handle, borrowed = false;
     const toolDisposers = [];
     const operations = [], recordOperation = async operation => { operations.push(structuredClone(operation)); await onOperation(operation); };
     const presets = this.ctx.get?.('agentPresets') ?? this.ctx.agentPresets;
     const setup = async (ctx, agent) => {
-      const style = publicLanguageInstructions() + '\n\n' + workPresentationPrompt(presentation);
+      const style = publicLanguageInstructions() + '\n\n' + workPresentationPrompt(presentation) + (memoryTools?.length
+        ? '\n任务要求根据微信聊天、对方偏好或彼此印象制作成果时，先用 wechat_memory 按需核对聊天依据；原生工作历史不等于微信聊天。按指定画风画人时区分画风与原作角色；没有外貌依据的画像是创作想象，不能声称还原了对方真实长相。' : '');
       if (style && ctx.systemPrompt?.section) {
         const dispose = ctx.systemPrompt.section({ name:'wechat-work-presentation',order:100,interpolate:false,
           text: style+'\n人设仅约束本次与你对话的文字、操作说明与进度回报，不改变工具权限和执行判断。文档、代码及其他成果按用户任务要求制作，不加入角色表演或虚构事实。' });
@@ -54,11 +61,35 @@ export class DshWorkRunner {
         if (!policy?.resolve) throw new ChannelError('WORK_PERMISSION_UNAVAILABLE', 'DSH 会话权限策略不可用，未执行文件或命令操作');
         return policy.resolve({ session: agent.session });
       };
-      const definitions = workModelTools({ surface: 'native', cwd, request, shell: presets?.serviceFor?.(agent, 'shell') ?? ctx.get?.('shell') ?? ctx.shell, resolvePolicy, limits, assertAllowed, onOperation: recordOperation, imageGeneration, imageRequest, sessionManagement,
+      const definitions = workModelTools({ surface: 'native', cwd, request, shell: presets?.serviceFor?.(agent, 'shell') ?? ctx.get?.('shell') ?? ctx.shell, resolvePolicy, limits, assertAllowed, onOperation: recordOperation, imageGeneration, imageRequest, imageMemoryTools, memoryTools, sessionManagement,
         queryStatus: connectionAccess ? queryStatus : undefined, moments: connectionAccess ? moments : undefined,
         connections: connectionAccess ? createWorkConnections({ cwd, request, assertAllowed, commandTimeoutMs: limits.commandTimeoutSeconds * 1000 }) : undefined });
-      registerModelTools(ctx, definitions, { assertAllowed, native: true, inherit: true, agent,
+      if (modelConfig.webSearch && !imageRequest && typeof this.chatRunner.searchTool === 'function') {
+        // Keep the desktop's single-provider search from bypassing this turn's
+        // explicit plugin routing. This restriction is local and disposed below.
+        if (ctx.tools.get?.('web_search')) {
+          const stopHostSearch = ctx.tools.restrict?.({ deny: ['web_search'] });
+          if (typeof stopHostSearch === 'function') toolDisposers.push(stopHostSearch);
+        }
+        // Preset-local tools cannot be hidden with a global-tool restriction.
+        const guardHostSearch = ctx.tools.guard?.(execution => execution.name === 'web_search'
+          ? '此微信工作任务请使用 wechat_web_search，它按插件设置检索并在失败时回退。' : undefined);
+        if (typeof guardHostSearch === 'function') toolDisposers.push(guardHostSearch);
+        const search = this.chatRunner.searchTool(modelConfig, { assertAllowed });
+        definitions.push({ ...search, execute: async (args, execution) => {
+          const value = await search.execute(args, execution);
+          await recordOperation({ tool: search.name, result: JSON.parse(value) });
+          return value;
+        } });
+        const dispose = ctx.systemPrompt?.section?.({ name: 'wechat-factual-search', order: 80, interpolate: false,
+          text: factualSearchInstructions(true, true) });
+        if (typeof dispose === 'function') toolDisposers.push(dispose);
+      }
+      const plan = promptStrategy === 'progressive-v1' ? planProgressiveTools(definitions, request) : { initial: definitions, deferredGroups: [] };
+      registerModelTools(ctx, plan.initial, { deferredGroups: plan.deferredGroups, assertAllowed, onBeforeTool, native: true, inherit: true, agent,
         onDispose: disposer => toolDisposers.push(disposer) });
+      const stopMetrics = observeModelRequests(ctx, { strategy: promptStrategy, mode: 'work', rows: requestMetrics });
+      if (typeof stopMetrics === 'function') toolDisposers.push(stopMetrics);
     };
     const id = sessionId || randomUUID();
     try {
@@ -137,7 +168,7 @@ export class DshWorkRunner {
         await agent.whenIdle(); signal.throwIfAborted(); assertAllowed();
         const text = completedText(agent.session.snapshotEvents(from));
         const artifacts = workArtifacts(operations).length ? [] : nativeWorkArtifacts(cwd, text, beforeFiles);
-        return { text, sessionId: id, native: true, artifacts };
+        return { text, sessionId: id, native: true, artifacts, requestMetrics };
       } finally { stopProgress?.(); signal.removeEventListener('abort', cancel); }
     } catch (error) {
       if (signal.aborted) throw signal.reason;

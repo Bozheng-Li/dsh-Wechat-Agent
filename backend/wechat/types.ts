@@ -14,7 +14,7 @@ export type Segment =
   | { type: 'face'; data: MediaData }
   | { type: 'file'; data: MediaData & { name: string } }
   | { type: 'at'; data: { qq: string; name?: string } }
-  | { type: 'reply'; data: { id?: string; messageType?: number; senderId?: string; senderName?: string; content?: string } };
+  | { type: 'reply'; data: { id?: string; messageType?: number; senderId?: string; senderName?: string; content?: string; image?: { resourceId: string } } };
 
 export interface Contact { id: string; nickname: string; remark?: string; avatar?: string; alias?: string }
 export interface Group { id: string; name: string; memberCount: number; maxMemberCount?: number }

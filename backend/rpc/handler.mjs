@@ -1,5 +1,8 @@
 import { ChannelError, publicError } from "../../shared/contracts.mjs";
 import { WORKBENCH_ENDPOINTS } from "../../modules/workbench/service.mjs";
+import { MATERIAL_ENDPOINTS } from '../../shared/moments-materials.mjs';
+import { MOMENTS_LIKE_ENDPOINTS } from '../../shared/moments-likes.mjs';
+import { MOMENTS_INTERACTION_ENDPOINTS } from '../../shared/moments-interactions.mjs';
 
 export function rpcHandler(service, isDisposed = () => false) {
   return async (endpoint, payload, signal, peer) => {
@@ -11,6 +14,8 @@ export function rpcHandler(service, isDisposed = () => false) {
       if (
         ![
           'status',
+          'cleanup.preview',
+          'cleanup.delete',
           'administrators.configure',
           'administrators.candidates',
           'changelog',
@@ -31,6 +36,7 @@ export function rpcHandler(service, isDisposed = () => false) {
           'contacts',
           'members',
           'moments.read',
+          'moments.images',
           'moments.audience',
           'moments.list',
           'moments.discover',
@@ -59,6 +65,8 @@ export function rpcHandler(service, isDisposed = () => false) {
           'memory.compress',
           'memory.retryImages',
           'memory.global.get',
+          'memory.role.get',
+          'memory.role.save',
           'memory.global.edit',
           'memory.global.clear',
           'memory.global.extract',
@@ -92,12 +100,18 @@ export function rpcHandler(service, isDisposed = () => false) {
           'tasks.pause',
           'tasks.resume',
           ...WORKBENCH_ENDPOINTS,
+          ...MATERIAL_ENDPOINTS,
+          ...MOMENTS_LIKE_ENDPOINTS,
+          ...MOMENTS_INTERACTION_ENDPOINTS,
         ].includes(endpoint)
       )
         throw new ChannelError('UNKNOWN_OPERATION', '不支持的微信插件操作');
       return { ok: true, value: await service.call(endpoint, payload ?? {}, signal) };
     } catch (error) {
-      return { ok: false, error: publicError(error) };
+      const failure = publicError(error);
+      if (endpoint === 'moments.write' && payload?.action === 'like' && error instanceof ChannelError &&
+          ['not-sent', 'rejected'].includes(error.details?.snsDelivery)) failure.delivery = error.details.snsDelivery;
+      return { ok: false, error: failure };
     }
   };
 }

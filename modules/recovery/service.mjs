@@ -56,7 +56,7 @@ export function recoverySnapshot(workbench, accountId, data = workbench.disk.loa
     .flatMap((peer) =>
       (workbench.store.views.get(peer.key)?.records || [])
         .filter(
-          (record) => recoveryStates.includes(record.state) && !workbench.recoveryDeleted(deleted, record, record.key)
+          (record) => !record.toolProgress && recoveryStates.includes(record.state) && !workbench.recoveryDeleted(deleted, record, record.key)
         )
         .map((record) => ({
           ...record,
@@ -192,6 +192,7 @@ export function deleteRecovery(workbench, input) {
 }
 
 export function recoveryAllowed(workbench, original, mode, acknowledgedMissing = false) {
+  if (original.toolProgress) fail('RECOVERY_NOT_ALLOWED', '开始提示只适用于当时的操作，不补发过期提示。');
   if (!['failed', 'unknown', 'partial', 'cancelled'].includes(original.state))
     fail('RECOVERY_ALREADY_SENT', '这条回复不需要恢复，已确认的消息不会重发');
   const kinds = mode === 'image' ? ['image'] : mode === 'text' || mode === 'regenerate' ? ['text'] : ['text', 'image'];

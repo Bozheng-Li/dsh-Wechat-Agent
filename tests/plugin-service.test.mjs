@@ -117,7 +117,7 @@ test('new configuration and records endpoints remain owner-only', async t => {
     const response = await f.rpc(endpoint, {}, undefined, agent);
     assert.equal(response.ok, false); assert.equal(response.error.code, 'OWNER_REQUIRED');
   }
-  assert.deepEqual(f.store.modelConfig(), { maxTokens: null, temperature: null, vision: true, visionModel: null, webSearch: false, searchProvider: 'tavily', tavilyBaseURL: 'https://api.tavily.com' });
+  assert.deepEqual(f.store.modelConfig(), { maxTokens: null, temperature: null, promptStrategy: 'legacy', vision: true, visionModel: null, webSearch: false, searchProvider: 'tavily', tavilyBaseURL: 'https://api.tavily.com' });
   assert.equal(f.store.persona().name, '微信助手');
   assert.equal(f.workerCalls.length, 0);
   const owner = { principal: { kind: 'owner' } };
@@ -192,13 +192,13 @@ test('model parameters persist without cancelling an inference that already capt
   const f = fixture(t), block = blockRunner(f);
   f.receive(f.message()); await block.started.promise;
   const result = await f.service.call('model.configure', { modelConfig: { maxTokens: 2048, temperature: 0 } });
-  assert.deepEqual(result.modelConfig, { maxTokens: 2048, temperature: 0, vision: true, visionModel: null, webSearch: false, searchProvider: 'tavily', tavilyBaseURL: 'https://api.tavily.com' });
+  assert.deepEqual(result.modelConfig, { maxTokens: 2048, temperature: 0, promptStrategy: 'legacy', vision: true, visionModel: null, webSearch: false, searchProvider: 'tavily', tavilyBaseURL: 'https://api.tavily.com' });
   assert.equal(f.calls[0].signal.aborted, false);
   block.released.resolve(); await f.channel.whenIdle();
   assert.equal(f.sent.length, 1);
-  assert.deepEqual(new StateStore(f.root).modelConfig(), { maxTokens: 2048, temperature: 0, vision: true, visionModel: null, webSearch: false, searchProvider: 'tavily', tavilyBaseURL: 'https://api.tavily.com' });
+  assert.deepEqual(new StateStore(f.root).modelConfig(), { maxTokens: 2048, temperature: 0, promptStrategy: 'legacy', vision: true, visionModel: null, webSearch: false, searchProvider: 'tavily', tavilyBaseURL: 'https://api.tavily.com' });
   await assert.rejects(f.service.call('model.configure', { modelConfig: { maxTokens: 1, temperature: 5 } }), isCode('INVALID_MODEL_CONFIG'));
-  assert.deepEqual(f.store.modelConfig(), { maxTokens: 2048, temperature: 0, vision: true, visionModel: null, webSearch: false, searchProvider: 'tavily', tavilyBaseURL: 'https://api.tavily.com' });
+  assert.deepEqual(f.store.modelConfig(), { maxTokens: 2048, temperature: 0, promptStrategy: 'legacy', vision: true, visionModel: null, webSearch: false, searchProvider: 'tavily', tavilyBaseURL: 'https://api.tavily.com' });
 });
 
 test('cancelling follow-default selection before or during validation preserves the saved model', async t => {

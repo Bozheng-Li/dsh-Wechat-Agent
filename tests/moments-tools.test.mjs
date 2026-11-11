@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { StateStore, WorkStore, WechatChannel, MomentsService, momentsTool, momentsCommentsTool, momentsWriteTools, momentsAudienceTool, resolveMomentsAudience, workMomentsMedia, chatMomentsMedia, createPluginService, rpcHandler, ChannelError, identity } from '../lib/testing.js';
 import { createHash } from 'node:crypto';
+import { fixtureWorkRouteDecision } from './fixtures/work-dialogue.mjs';
 const accountId = 'moments-bot', room = 'moments-room@chatroom';
 const scope = { accountId, chatType: 'private', peerId: 'alice', senderId: 'alice' };
 function fixture(t, { beforeRead, beforeWrite } = {}) {
@@ -26,7 +27,7 @@ function fixture(t, { beforeRead, beforeWrite } = {}) {
       ...(args.query.action === 'delete' ? { deleted: true } : {}) };
   }, send: async payload => { sent.push(payload); return { delivery: 'server-ack', serverMessageIds: ['moments-ack-' + sent.length] }; } };
   const runner = { run: async input => {
-    if (input.mode === 'work-routing') return { text: JSON.stringify({ action: 'new' }) };
+    if (input.mode === 'work-routing') return { text: JSON.stringify(fixtureWorkRouteDecision(JSON.parse(input.text), { action: 'new' })) };
     if (input.mode === 'work-result') return { text: JSON.parse(input.text).result };
     models.push(input); const tool = input.tools.find(tool => tool.name === 'wechat_moments_read');
     if (tool && input.text.includes('朋友圈')) {
@@ -103,6 +104,7 @@ test('members, fake sender identity, disabled access and unready components rece
   const f = fixture(t), member = { chatType: 'group', peerId: room, sender: { id: 'bob', nickname: '管理员' } };
   f.receive('小胖，看看朋友圈', member); await f.channel.whenIdle();
   assert(!f.models[0].tools.some(tool => tool.name === 'wechat_moments_read')); assert.equal(f.reads.length, 0);
+  assert(!f.models[0].tools.some(tool => tool.name === 'wechat_moments_interact'));
   assert.equal(f.channel.moments.available({ ...scope, peerId: 'bob' }), false);
   const config = f.store.conversationSettings(accountId, 'private', 'alice');
   f.store.setConversationSettings(accountId, 'private', 'alice', { ...config, remoteEnabled: false });
@@ -122,6 +124,7 @@ test('work receives the same read capability with the scoped requester', async t
   f.store.setConversationSettings(accountId, 'private', 'alice', { ...config, executionMode: 'work' });
   f.receive('读取朋友圈并整理'); await f.channel.whenIdle();
   assert.equal(f.works.length, 1); assert.equal(f.reads.length, 1); assert.equal(f.models.length, 0);
+  assert.equal(typeof f.works[0].moments.manageInteractions, 'function');
   assert.equal(f.reads[0].scopeKey, identity([accountId, 'private', 'alice', 'alice']));
   assert.equal(f.channel.work.list(scope).jobs[0].state, 'succeeded');
   const reloaded = new WorkStore(f.store).list(scope)[0];
@@ -136,9 +139,10 @@ test('owner RPC reads live data without granting another principal or account ac
   const result = await rpc('moments.read', { accountId, action: 'timeline', limit: 3 }, undefined, { principal: { kind: 'owner' } });
   assert.equal(result.ok, true); assert.equal(result.value.items.length, 1); assert.equal(f.reads[0].scopeKey, 'owner:' + accountId);
 });
-test('self resolves to the logged account, sender resolves to requester and ambiguous names never guess a homepage', async t => {
+test('explicit subjects resolve to their actual roles while vague pronouns and ambiguous names never guess a homepage', async t => {
   const f = fixture(t), signal = new AbortController().signal;
-  await f.channel.moments.read({ action: 'user', user: '我' }, scope, signal);
+  await assert.rejects(f.channel.moments.read({ action: 'user', user: '我' }, scope, signal), error => error.code === 'MOMENTS_SUBJECT_REQUIRED');
+  await f.channel.moments.read({ action: 'user', subject: 'account' }, scope, signal);
   assert.equal(f.reads[0].query.userId, accountId);
   for (const user of ['sender', '发起人']) {
     await f.channel.moments.read({ action: 'user', user }, scope, signal); assert.equal(f.reads.at(-1).query.userId, 'alice');
@@ -162,7 +166,7 @@ test('read failure stays a failure; cancellation suppresses tool output', async 
 test('chat exposes mutations only in direct administrator turns and performs no spontaneous writes', async t => {
   const f = fixture(t); f.receive('你好'); await f.channel.whenIdle();
   assert.equal(f.writes.length, 0);
-  for (const name of ['wechat_moments_read', 'wechat_moments_comments', 'wechat_moments_like', 'wechat_moments_comment', 'wechat_moments_reply', 'wechat_moments_publish', 'wechat_moments_delete']) assert(f.models[0].tools.some(tool => tool.name === name));
+  for (const name of ['wechat_moments_read', 'wechat_moments_comments', 'wechat_moments_like', 'wechat_moments_comment', 'wechat_moments_reply', 'wechat_moments_publish', 'wechat_moments_delete', 'wechat_moments_interact']) assert(f.models[0].tools.some(tool => tool.name === name));
   f.receive('小胖，看看朋友圈', { chatType: 'group', peerId: room, sender: { id: 'bob' } }); await f.channel.whenIdle();
   assert(!f.models.at(-1).tools.some(tool => tool.name.startsWith('wechat_moments_')));
 });
@@ -235,7 +239,8 @@ test('write tools do not discard images, fabricate success or accept video as a 
   assert.equal(calls[0].images.length, 1);
   assert.equal(JSON.parse(await publish.execute({ text: '正文', video: 'clip.mp4' }, exec)).ok, false); assert.equal(calls.length, 1);
   const bad = momentsWriteTools({ write: async () => { throw new ChannelError('ERR_MOMENTS_WRITE_REJECTED', '微信拒绝操作'); } })[0];
-  assert.equal(JSON.parse(await bad.execute({ postId: '1' }, exec)).ok, false);
+  const rejected = JSON.parse(await bad.execute({ postId: '1', subject: 'speaker' }, exec));
+  assert.equal(rejected.ok, false); assert.equal(rejected.code, 'ERR_MOMENTS_WRITE_REJECTED');
 });
 
 test('native photo publishing rejects links, escaped task paths and video files before any upload', async t => {

@@ -10,10 +10,12 @@ import { validWorkImageRequest } from '../../shared/work-image-request.mjs';
 const deliveryStates = new Set(['not-ready', 'pending', 'sending', 'sent', 'failed', 'unknown', 'partial', 'suppressed']);
 const id = value => typeof value === 'string' && /^[a-f0-9]{12}$/.test(value);
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
+// Recognizing historical operation records never grants permission to execute a tool.
 const tools = new Set(['wechat_work_read', 'wechat_work_write', 'wechat_work_list', 'wechat_work_exec', 'wechat_work_ssh_connect', 'wechat_work_ssh_exec', 'wechat_work_vscode_connect', 'wechat_work_status', 'wechat_work_output', 'wechat_work_generate_image',
   'wechat_work_tasks', 'wechat_work_task', 'wechat_work_history', 'wechat_work_start', 'wechat_work_parallel', 'wechat_work_continue', 'wechat_work_cancel',
   'wechat_moments_read', 'wechat_moments_comments', 'wechat_moments_audience', 'wechat_moments_like', 'wechat_moments_comment', 'wechat_moments_reply', 'wechat_moments_publish', 'wechat_moments_delete',
-  'wechat_moments_plan', 'wechat_moments_draft', 'wechat_moments_reply_schedule']);
+  'wechat_moments_plan', 'wechat_moments_draft', 'wechat_moments_reply_schedule',
+  'wechat_web_search', 'wechat_moments_images', 'wechat_moments_like_recent', 'wechat_moments_interact']);
 const retryStates = new Set(['pending', 'sending', 'sent', 'partial', 'unknown', 'failed', 'cancelled', 'suppressed']);
 const validIds = values => Array.isArray(values) && values.every(value => typeof value === 'string' && value && value !== '0');
 const validRetry = (value, job) => object(value) && id(value.id) && value.recordKey === `work-result-${job.id}-retry-${value.id}` &&

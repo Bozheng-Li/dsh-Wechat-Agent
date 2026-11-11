@@ -10,11 +10,12 @@ import { LonglinkTransport } from "./transport.js";
 import { downloadImageChunk } from "./image-download.js";
 import { imageMime, observedImage } from "./media.js";
 import { quotedMessage } from "./reference.js";
+import { unavailableMessage } from '../../../shared/message-references.mjs';
 import { FILE_CHUNK_BYTES, fileUploadRequest, fileUploadResponse, fileMessageRequest, fileMessageResponse, requestFileCgi, type FileUpload, type FileMessage } from './file-upload.js';
 import { MomentsReader } from './moments.js';
 import { MomentsWriter, validateSnsWrite } from './moments-write.js';
 import { MomentsAudienceReader } from './moments-audience.js';
-import { resolveMomentsAudience } from '../../../shared/moments-audience.mjs';
+import { resolveMomentsAudience, validateAudienceSelection } from '../../../shared/moments-audience.mjs';
 
 export interface ProtocolOptions {
   sessionFile: string; cacheDir: string; syncIntervalMs: number; heartbeatIntervalMs: number;
@@ -221,7 +222,10 @@ export class ProtocolBackend implements Backend {
     const id = (num(fs, 12) || num(fs, 1))?.toString();
     if (!id || id === '0') throw new BridgeError('ERR_PROTOCOL', 'AddMsg has no message ID');
     const contact = sender === self.wxid ? { id: self.wxid, nickname: self.nickname } : this.cache.contacts.find(c => c.id === sender) ?? { id: sender, nickname: sender };
-    const quoted = type === 49 ? quotedMessage(content, peer) : undefined;
+    const quoted = type === 49 ? quotedMessage(content, peer, xml => {
+      const image = observedImage([], xml, path.join(this.options.cacheDir, 'media', String(self.uin)), `${peer}:${id}`);
+      return (image as { data: { resourceId: string } }).data.resourceId;
+    }) : undefined;
     const mentions: BridgeMessage['message'] = [];
     if (group && (type === 1 || type === 3 || type === 47 || quoted)) {
       const source = unstring(bytes(fs, 10));
@@ -237,7 +241,8 @@ export class ProtocolBackend implements Backend {
     const labels: Record<number, string> = { 3: '[图片]', 34: '[语音]', 43: '[视频]', 47: '[表情]', 49: '[链接或文件]', 10000: '[系统消息]' };
     return { id: `wx:${peer}:${id}`, serverMessageId: id, time: Number(num(fs, 9) ?? 0n), chatType: group ? 'group' : 'private', peerId: peer, sender: contact,
       message: [...mentions, ...(quoted ?? (type === 3 || type === 47 ? [observedImage(fs, content, path.join(this.options.cacheDir, 'media', String(self.uin)), `${peer}:${id}`)] : [{ type: 'text' as const, data: { text: type === 1 ? content : labels[type] ?? `[消息类型 ${type}]` } }]))], messageType: type,
-      direction: outgoing ? 'outgoing' : 'incoming', source: 'longlink:NewSync', delivery: 'observed', observedAt: Date.now(), partial: type !== 1 && type !== 3 && type !== 47 && !quoted };
+      direction: outgoing ? 'outgoing' : 'incoming', source: 'longlink:NewSync', delivery: 'observed', observedAt: Date.now(),
+      partial: type !== 1 && type !== 3 && type !== 47 && !quoted || type === 1 && unavailableMessage({ message: [{ type: 'text', data: { text: content } }] }) };
   }
   private remember(m: BridgeMessage) { this.messages.set(m.id, m); while (this.messages.size > 5000) this.messages.delete(this.messages.keys().next().value!); }
   recentMessages(peerId?: string, limit = 100) { return structuredClone([...this.messages.values()].filter(m => !peerId || m.peerId === peerId).slice(-limit)); }
@@ -263,7 +268,9 @@ export class ProtocolBackend implements Backend {
       const announced = compressType === 1 ? input.originalBytes : input.fullBytes;
       if (announced && announced > MAX_DOWNLOAD_IMAGE_BYTES) { lastError = new BridgeError('ERR_IMAGE_TOO_LARGE', '高清图片超过 10 MiB'); continue; }
       const image: ImageDownload = { messageId: input.messageId, from: input.peerId, to: account.wxid,
-        total: Number.isSafeInteger(announced) && announced! > 0 ? announced! : 0,
+        // XML describes the advertised rendition, which can differ from the
+        // server's cached download. Discover and then lock the actual total.
+        total: 0,
         baseRequest: Buffer.from(imageBase, 'hex'), compressType };
       const chunks: Buffer[] = []; let start = 0;
       try {
@@ -293,6 +300,13 @@ export class ProtocolBackend implements Backend {
       throw new BridgeError('ERR_MOMENTS_ACCOUNT_CHANGED', '读取期间微信连接已变化，未返回旧连接朋友圈');
     return result;
   }
+  async readMomentsImages(query: unknown, scopeKey: string, signal: AbortSignal) {
+    const transport = this.transport;
+    const result = await this.momentsReader.readImages(query, scopeKey, AbortSignal.any([signal, AbortSignal.timeout(90000)]));
+    if (!transport?.connected || this.transport !== transport || !this.status().online)
+      throw new BridgeError('ERR_MOMENTS_ACCOUNT_CHANGED', '读取图片期间微信连接变化，未返回旧连接图片');
+    return result;
+  }
   async readMomentsAudience(signal: AbortSignal) {
     const account = this.session.value, transport = this.transport;
     const identity = account && ['uin', 'wxid', 'token', 'body_key', 's08'].map(key => (account as any)[key]);
@@ -307,8 +321,23 @@ export class ProtocolBackend implements Backend {
       AbortSignal.any([requestSignal, AbortSignal.timeout(this.options.requestTimeoutMs)])));
     return reader.read(account!, signal, check);
   }
+  async readMomentsPublication(raw: unknown, _scopeKey: string, signal: AbortSignal) {
+    const account = this.session.value, transport = this.transport;
+    const keys = ['uin', 'wxid', 'token', 'body_key', 's08'], identity = keys.map(key => (account as any)?.[key]);
+    const check = () => {
+      signal.throwIfAborted();
+      if (!account || keys.some((key, index) => (this.session.value as any)?.[key] !== identity[index]) ||
+          !transport?.connected || this.transport !== transport || !this.status().online)
+        throw new BridgeError('ERR_MOMENTS_ACCOUNT_CHANGED', '核对发布期间微信账号或连接变化，未使用旧回执');
+    };
+    check();
+    const reader = new MomentsWriter((account, cmd, route, makeBody, requestSignal) => this.momentsWriter.request(account, cmd, route, makeBody,
+      AbortSignal.any([requestSignal, AbortSignal.timeout(this.options.requestTimeoutMs)])));
+    return reader.readPublication(account!, raw, signal, check);
+  }
   async writeMoments(raw: unknown, clientId: string, signal: AbortSignal) {
     let query = validateSnsWrite(raw), audience;
+    const selection = validateAudienceSelection(query);
     const account = this.session.value, transport = this.transport;
     const credentialKeys = ['uin', 'wxid', 'token', 'body_key', 's08'], identity = credentialKeys.map(key => (account as any)?.[key]);
     const assertCurrent = () => {
@@ -334,8 +363,17 @@ export class ProtocolBackend implements Backend {
     // overall lifetime. A long upload must not be cancelled after ten seconds.
     const writer = new MomentsWriter((account, cmd, route, makeBody, requestSignal) => this.momentsWriter.request(account, cmd, route, makeBody,
       AbortSignal.any([requestSignal, AbortSignal.timeout(this.options.requestTimeoutMs)])));
-    const result = await writer.write(account!, query, clientId, signal, assertCurrent);
-    return { ...result, ...(audience ?? {}) };
+    try {
+      const result = await writer.write(account!, query, clientId, signal, assertCurrent);
+      return { ...result, ...(audience ?? {}) };
+    } catch (error) {
+      if (error instanceof BridgeError && error.details.publication) error.details.publication = {
+        ...(error.details.publication as object), audienceSelection: selection,
+        audienceSource: audience?.audienceSource ?? 'submitted-identifiers',
+        ...(audience ? { audienceFetchedAt: audience.audienceFetchedAt } : {}),
+      };
+      throw error;
+    }
   }
   async call<A extends ActionName>(action: A, raw: Params<A>): Promise<Result<A>> {
     const p = validateParams(action, raw); let result: unknown;

@@ -29,7 +29,7 @@ export function scheduleLabel(schedule) {
 }
 
 export function TaskBadge({ state }) {
-  return <span className={'wa-task-badge is-' + state}>{taskStates[state] || state}</span>;
+  return <span className={'wa-task-badge is-' + state}><span className="wa-state-mark" aria-hidden="true" />{taskStates[state] || state}</span>;
 }
 
 export function TaskDetails({ task, runs = [] }) {

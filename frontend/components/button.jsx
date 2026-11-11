@@ -1,9 +1,11 @@
 import { Glyph } from "./glyph.jsx";
 
-export function Button({ children, icon, primary, quiet, danger, className = '', type = 'button', ...props }) {
+export function Button({ children, icon, primary, quiet, danger, size, loading, className = '', type = 'button', ...props }) {
   return (
     <button
       type={type}
+      data-size={size}
+      aria-busy={loading || undefined}
       className={
         'wa-button ' +
         (primary ? 'wa-primary ' : '') +
@@ -13,7 +15,7 @@ export function Button({ children, icon, primary, quiet, danger, className = '',
       }
       {...props}
     >
-      {icon && <Glyph name={icon} className="wa-icon-small" />}
+      {loading ? <span className="wa-button-spinner" aria-hidden="true" /> : icon && <Glyph name={icon} className="wa-icon-small" />}
       {children}
     </button>
   );

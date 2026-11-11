@@ -129,9 +129,9 @@ function decodeBodyFrame(frame: Buffer, key?: Buffer, s08?: Buffer, expectedRequ
   // original request. Bind that echo to the authenticated request; it is not
   // a checksum of the response plaintext. Longlink validation stays separate.
   if (expectedRequest?.responseChecksum) {
-    // PC SNS replies omit both checksum flags, rather than echoing the file
+    // PC SNS/GetMsgImg replies can omit both checksum flags, rather than echoing the file
     // request's checksum. If a content checksum is present it must validate.
-    // Only this explicit SNS mode accepts the observed zero/zero format;
+    // Only this explicit response mode accepts the observed zero/zero format;
     // account/CGI, encrypted body, padding and declared lengths stay checked.
     if (b[0] !== 0xbf || sum === 0n && requestCheck !== 0n ||
         sum !== 0n && Number(sum) !== checksum(body, uin, selected.checksumMaterial)) fail('Shortlink response content checksum mismatch');

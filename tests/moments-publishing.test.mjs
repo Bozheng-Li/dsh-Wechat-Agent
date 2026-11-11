@@ -6,10 +6,11 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { StateStore, MomentsAutomation, MomentsService, MomentsPublishing, momentsPlanSettings, momentsPublishingSettings, momentsLocalInstant,
   nextMomentsOccurrence, similarMomentsText, momentsPublishingTools, createPluginService, rpcHandler, ChannelError } from '../lib/testing.js';
+import { ownerPublicationRecord } from '../modules/moments/publication-recovery.mjs';
 const accountId = 'publishing-bot', scope = { accountId, chatType: 'private', peerId: 'alice', senderId: 'alice' };
 const utc = value => Date.parse(value + 'Z'), signal = () => new AbortController().signal;
 function fixture(t) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-moments-publishing-')), store = new StateStore(root), models = [], writes = [], searches = [], images = [];
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-moments-publishing-')), store = new StateStore(root), models = [], reviews = [], writes = [], searches = [], images = [];
   store.configure(accountId, { enabled: true, privatePeers: ['alice', 'bob'], groups: [], prompt: '' });
   const config = store.config.snapshot(store.data); config.remote = { globalAdminIds: ['alice'] }; store.config.commit(config);
   for (const peerId of ['alice', 'bob']) store.setConversationSettings(accountId, 'private', peerId, { ...store.conversationSettings(accountId, 'private', peerId), remoteEnabled: true });
@@ -23,7 +24,9 @@ function fixture(t) {
     writeMoments: async args => { writes.push(args); return { accountId, action: 'publish', postId: String(++serial), text: args.query.text, imageCount: args.query.images?.length ?? 0, delivery: 'server-ack',
       ...(args.query.blockedLabelIds?.length || args.query.blockedUserIds?.length ? { audienceConfirmed: true, audienceSource: audience.source, audienceFetchedAt: audience.fetchedAt,
         audienceSelection: { blockedLabelIds: args.query.blockedLabelIds, blockedUserIds: args.query.blockedUserIds }, blockedLabelIds: args.query.blockedLabelIds, blockedUserIds: ['alice'] } : {}) }; } },
-    runner: { run: async input => { models.push(input); const data = JSON.parse(input.text); return { text: JSON.stringify({ theme: data.themes[0], text: '今天的小笑话编号' + models.length + '：冰箱里为什么不热闹？因为大家都很冷静。', imagePrompt: data.image ? '一只开心的卡通小狗，无文字' : '' }) }; },
+    runner: { run: async input => {
+      if (input.mode === 'moments-content-review') { reviews.push(input); return { text: '{"ok":true,"reason":""}' }; }
+      models.push(input); const data = JSON.parse(input.text); return { text: JSON.stringify({ theme: data.themes[0] || '日常小观察', text: '今天的小笑话编号' + models.length + '：冰箱里为什么不热闹？因为大家都很冷静。', imagePrompt: data.image ? '一只开心的卡通小狗，无文字' : '' }) }; },
       search: { forConfig: () => ({ search: async args => { searches.push(args); return { content: '公开搜索材料', sources: [{ title: '公开资料', url: 'https://example.com/fact', snippet: '有来源的事实' }] }; } }) } },
     work: { imageGeneration: { catalog: () => ({ enabled: true, defaultProviderId: '0809', providers: [{ providerId: '0809', defaultModel: 'image-default' }] }),
       generate: async input => { images.push(input); return { bytes: png, extension: '.png', providerName: '0809', model: input.model }; } } } };
@@ -33,13 +36,90 @@ function fixture(t) {
   const plan = async settings => { await manager.savePlan(accountId, { enabled: true, ...settings }, undefined, 'plan-' + ++serial, signal()); return manager.list(accountId).plans.at(-1); };
   t.after(async () => { await manager.close(); const resolved = fs.realpathSync(root); assert.equal(path.dirname(resolved), fs.realpathSync(os.tmpdir()));
     assert.match(path.basename(resolved), /^wechat-moments-publishing-/); fs.rmSync(resolved, { recursive: true, force: true }); });
-  return { root, store, channel, manager, status, models, writes, searches, images, configure, plan, advance, now: () => clock };
+  return { root, store, channel, manager, status, models, reviews, writes, searches, images, configure, plan, advance, now: () => clock };
 }
+
+function timedFixture(t) {
+  const f = fixture(t), deadlines = [], advance = f.advance;
+  // AbortSignal.timeout uses native timers, so drive its deadlines explicitly.
+  t.mock.method(AbortSignal, 'timeout', milliseconds => {
+    const controller = new AbortController(); deadlines.push({ controller, at: f.now() + milliseconds }); return controller.signal;
+  });
+  f.advance = milliseconds => {
+    advance(milliseconds);
+    for (const { controller, at } of deadlines) if (at <= f.now() && !controller.signal.aborted)
+      controller.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError'));
+  };
+  return f;
+}
+
+test('proposal review rejects mismatched content before image generation and preserves the draft', async t => {
+  const f = fixture(t), original = f.channel.runner.run;
+  f.channel.runner.run = async input => input.mode === 'moments-content-review'
+    ? { text: '{"ok":false,"reason":"机器人计费与湖景无具体关联，正文还混入配图制作说明"}' } : original(input);
+  await assert.rejects(f.manager.preview(accountId, { image: { mode: 'ai' } }, 'bad-proposal', signal()), { code: 'MOMENTS_CONTENT_MISMATCH' });
+  const draft = f.manager.list(accountId).runs[0]; assert(draft.text); assert.equal(draft.state, 'failed');
+  assert.equal(f.models.length, 1); assert.equal(f.images.length, 0); assert.equal(f.writes.length, 0);
+  await f.manager.preview(accountId, { image: { mode: 'ai' } }, 'bad-proposal', signal()); assert.equal(f.models.length, 1);
+});
+
+test('the final review inspects actual image bytes and blocks a mismatched rendered image', async t => {
+  const f = fixture(t), original = f.channel.runner.run;
+  f.channel.runner.run = async input => {
+    if (input.mode === 'moments-content-review' && JSON.parse(input.text).phase === 'image') {
+      assert.equal(input.images.length, 1); assert(input.images[0].data); assert.deepEqual(input.tools, []);
+      return { text: '{"ok":false,"reason":"实际图片没有正文所述内容"}' };
+    }
+    return original(input);
+  };
+  await assert.rejects(f.manager.preview(accountId, { image: { mode: 'ai' } }, 'bad-render', signal()), { code: 'MOMENTS_CONTENT_MISMATCH' });
+  assert.equal(f.images.length, 1); assert.equal(f.writes.length, 0); assert.equal(f.manager.list(accountId).runs[0].hasImage, true);
+});
+
+test('a successful image review is reused only for the same text and exact saved image', async t => {
+  const f = fixture(t), draft = await f.manager.preview(accountId, { image: { mode: 'ai' } }, 'reviewed', signal());
+  assert.equal(f.reviews.length, 2); assert.deepEqual(f.reviews.map(row => JSON.parse(row.text).phase), ['proposal', 'image']);
+  await f.manager.publishDraft(accountId, draft.id, signal()); assert.equal(f.reviews.length, 2); assert.equal(f.writes.length, 1);
+});
+
+test('editing a draft invalidates review approval and cannot publish a rejected edit', async t => {
+  const f = fixture(t), draft = await f.manager.preview(accountId, {}, 'edit-review', signal());
+  f.manager.editDraft(accountId, draft.id, '配图让 AI 画一张：林间湖水。');
+  const original = f.channel.runner.run; let checked = 0;
+  f.channel.runner.run = async input => {
+    if (input.mode === 'moments-content-review') { checked++; assert(JSON.parse(input.text).text.includes('配图让 AI'));
+      return { text: '{"ok":false,"reason":"制作说明混入正文"}' }; }
+    return original(input);
+  };
+  await assert.rejects(f.manager.publishDraft(accountId, draft.id, signal()), { code: 'MOMENTS_CONTENT_MISMATCH' });
+  assert.equal(checked, 1); assert.equal(f.writes.length, 0);
+});
+
+test('legacy drafts and failed review responses cannot bypass the new publication gate', async t => {
+  for (const answer of ['{"ok":false,"reason":"图文主题无关"}', 'invalid-json']) {
+    const f = fixture(t), draft = await f.manager.preview(accountId, {}, 'legacy', signal());
+    delete f.manager.data.runs[draft.id].contentReviews; f.manager.save();
+    const restarted = new MomentsPublishing(f.channel); f.channel.runner.run = async () => ({ text: answer });
+    await assert.rejects(restarted.publishDraft(accountId, draft.id, signal()), error => ['MOMENTS_CONTENT_MISMATCH', 'MOMENTS_CONTENT_REVIEW_FAILED'].includes(error.code));
+    assert.equal(f.writes.length, 0); assert.equal(restarted.list(accountId).runs[0].state, 'failed');
+  }
+});
+
+test('content reviews share the existing five-minute operation deadline', async t => {
+  const f = timedFixture(t), original = f.channel.runner.run;
+  f.channel.runner.run = async input => {
+    if (input.mode === 'moments-content-review') { f.advance(300000); input.signal.throwIfAborted(); }
+    return original(input);
+  };
+  await assert.rejects(f.manager.preview(accountId, { image: { mode: 'ai' } }, 'review-timeout', signal()), { code: 'MOMENTS_PUBLISH_TIMEOUT' });
+  assert.equal(f.images.length, 0); assert.equal(f.writes.length, 0);
+});
 
 test('calendar validates dates, hours, limits, timezone and duplicate slots', () => {
   assert.equal(momentsPublishingSettings().enabled, false);
   for (const value of [{ maxPostsPer24Hours: 0 }, { minGapMinutes: -1 }, { enabled: 'true' }, { unknown: true }]) assert.throws(() => momentsPublishingSettings(value));
-  for (const value of [{ themes: [] }, { maxChars: 29 }, { graceMinutes: 0 }, { schedule: { timezone: 'invalid-zone' } }, { schedule: { times: ['25:00'] } },
+  assert.deepEqual(momentsPlanSettings({ themes: [] }).themes, []);
+  for (const value of [{ themes: [''] }, { maxChars: 29 }, { graceMinutes: 0 }, { schedule: { timezone: 'invalid-zone' } }, { schedule: { times: ['25:00'] } },
     { schedule: { type: 'once', onceAt: '2026-02-30T09:00' } }, { schedule: { type: 'weekly', weekdays: [] } }, { image: { mode: 'video' } }, { extra: true }]) assert.throws(() => momentsPlanSettings(value));
   const plan = momentsPlanSettings({ themes: [' A ', 'A'], schedule: { times: ['18:00', '09:00', '09:00'] } });
   assert.deepEqual(plan.themes, ['A']); assert.deepEqual(plan.schedule.times, ['09:00', '18:00']);
@@ -70,6 +150,99 @@ test('concurrent ticks and restart reuse the consumed occurrence, with one AI ca
   assert.equal(f.writes.length, 1); assert.equal(f.models.length, 1); assert.equal(f.manager.list(accountId).runs[0].state, 'published');
   const restart = new MomentsPublishing(f.channel); restart.stopped = false; await restart.tick(); assert.equal(f.writes.length, 1);
   assert.equal(f.manager.list('other').runs.length, 0); assert.equal(f.manager.list('other').plans.length, 0);
+});
+
+for (const origin of ['preview', 'schedule']) test(`${origin} can spend nearly five minutes on research, text and images without an earlier publishing timeout`, async t => {
+  const f = timedFixture(t), settings = { research: true, image: { mode: 'ai' } };
+  const search = f.channel.runner.search.forConfig().search, run = f.channel.runner.run, image = f.channel.work.imageGeneration.generate;
+  f.channel.runner.search.forConfig = () => ({ search: async (request, abort) => {
+    f.advance(35000); abort.throwIfAborted(); return search(request, abort);
+  } });
+  f.channel.runner.run = async input => { f.advance(input.mode === 'moments-publish' ? 220000 : 10000); input.signal.throwIfAborted(); return run(input); };
+  f.channel.work.imageGeneration.generate = async (input, abort) => { f.advance(24999); abort.throwIfAborted(); return image(input, abort); };
+  if (origin === 'schedule') { f.configure(); await f.plan(settings); f.advance(60000); await f.manager.tick(); }
+  else await f.manager.preview(accountId, settings, 'slow-preview', signal());
+  const result = f.manager.list(accountId).runs[0];
+  assert.equal(result.state, origin === 'schedule' ? 'published' : 'draft'); assert.equal(result.hasImage, true);
+  assert.equal(f.searches.length, 1); assert.equal(f.models.length, 1); assert.equal(f.images.length, 1);
+  assert.equal(f.writes.length, origin === 'schedule' ? 1 : 0);
+});
+
+test('generation aborts at five minutes, records failure and never retries or publishes that occurrence', async t => {
+  const f = timedFixture(t), entered = Promise.withResolvers(); f.configure(); await f.plan(); f.advance(60000);
+  f.channel.runner.run = input => {
+    f.models.push(input); entered.resolve(input.signal);
+    return new Promise((resolve, reject) => input.signal.addEventListener('abort', () => reject(input.signal.reason), { once: true }));
+  };
+  const pending = f.manager.tick(), abort = await entered.promise;
+  f.advance(299999); assert.equal(abort.aborted, false); assert.equal(f.writes.length, 0);
+  f.advance(1); assert.equal(abort.aborted, true); assert.equal(abort.reason.name, 'TimeoutError'); await pending;
+  assert.equal(f.manager.list(accountId).runs[0].state, 'failed'); assert.equal(f.writes.length, 0);
+  assert.equal(f.manager.list(accountId).runs[0].errorCode, 'MOMENTS_PUBLISH_TIMEOUT');
+  assert.match(f.manager.list(accountId).runs[0].error, /5 分钟/);
+  await f.manager.tick(); assert.equal(f.models.length, 1); assert.equal(f.writes.length, 0);
+});
+
+test('image timeout preserves text and reports its stage; only an explicit new preview calls AI again', async t => {
+  const f = timedFixture(t), entered = Promise.withResolvers(), image = f.channel.work.imageGeneration.generate;
+  f.channel.work.imageGeneration.generate = (input, abort) => {
+    entered.resolve(); return new Promise((resolve, reject) => abort.addEventListener('abort', () => reject(abort.reason), { once: true }));
+  };
+  const pending = f.manager.preview(accountId, { image: { mode: 'ai' } }, 'slow-image', signal());
+  const rejected = assert.rejects(pending, error => error.code === 'MOMENTS_PUBLISH_TIMEOUT' && error.message.includes('5 分钟'));
+  await entered.promise;
+  const running = f.manager.list(accountId); assert.equal(running.runs[0].stage, 'image'); assert(running.runs[0].text);
+  assert.equal(running.operationStartedAt, f.now()); assert.equal(f.manager.list('another-account').operationStartedAt, null);
+  f.advance(300000); await rejected;
+  const existing = await f.manager.preview(accountId, { image: { mode: 'ai' } }, 'slow-image', signal());
+  assert.equal(existing.state, 'failed'); assert(existing.text); assert.equal(f.models.length, 1); assert.equal(f.writes.length, 0);
+  f.channel.work.imageGeneration.generate = image;
+  const retry = await f.manager.preview(accountId, { image: { mode: 'ai' } }, 'explicit-image-retry', signal());
+  assert.equal(retry.state, 'draft'); assert.notEqual(retry.id, existing.id); assert.equal(f.models.length, 2);
+  assert.equal(f.manager.list(accountId).runs.length, 2); assert.equal(f.writes.length, 0);
+});
+
+test('a provider timeout before the overall deadline does not falsely report five minutes elapsed', async t => {
+  const f = fixture(t);
+  f.channel.runner.run = async () => { throw new DOMException('private provider details', 'TimeoutError'); };
+  await assert.rejects(f.manager.preview(accountId, {}, 'provider-timeout', signal()), { code: 'MOMENTS_REQUEST_TIMEOUT' });
+  const run = f.manager.list(accountId).runs[0]; assert.equal(run.state, 'failed');
+  assert(!run.error.includes('达到 5 分钟')); assert(!run.error.includes('private provider')); assert.equal(f.writes.length, 0);
+});
+
+test('late receipt timeout stays unknown and pauses the plan instead of reporting a generation failure', async t => {
+  const f = timedFixture(t); f.configure(); const plan = await f.plan(); f.advance(60000);
+  f.channel.transport.writeMoments = async args => { f.writes.push(args); f.advance(300000); throw new DOMException('private provider details', 'TimeoutError'); };
+  await f.manager.tick(); const run = f.manager.list(accountId).runs[0];
+  assert.equal(run.state, 'unknown'); assert.match(run.error, /结果不明/); assert(!run.error.includes('private provider'));
+  assert.equal(f.manager.plan(accountId, plan.id).settings.enabled, false); await f.manager.tick(); assert.equal(f.writes.length, 1);
+});
+
+test('recent context deduplicates local receipts and fetched posts and excludes deleted content', async t => {
+  const f = fixture(t); f.configure(); await f.plan(); f.advance(60000); await f.manager.tick();
+  const run = f.manager.list(accountId).runs[0];
+  assert.deepEqual(f.manager.recent(accountId), [run.text]);
+  f.channel.momentsAutomation.remember(accountId, [{ id: run.postId, author: { userId: accountId }, text: run.text, createdAt: f.now() / 1000, deleted: true }]);
+  assert.deepEqual(f.manager.recent(accountId), []);
+});
+
+test('emoji and short or long paragraphs remain valid while invisible text and duplicate symbols cannot publish', async t => {
+  const f = fixture(t), theme = momentsPlanSettings().themes[0];
+  const review = f.channel.runner.run;
+  assert(similarMomentsText('🌤️', '🌤')); assert(!similarMomentsText('🙂', '🙃')); assert(similarMomentsText('……', '……'));
+  for (const [i, text] of ['🌤️', '嗯。', '这段文字保留完整的想法。'.repeat(12) + '\n\n最后一句。'].entries()) {
+    f.channel.runner.run = async input => input.mode === 'moments-content-review' ? review(input) : ({ text: JSON.stringify({ theme, text, imagePrompt: '' }) });
+    assert.equal((await f.manager.preview(accountId, {}, 'length-' + i, signal())).text, text);
+  }
+  for (const [i, text] of ['\u200b\u200d', '\u0301', '\u0000正文'].entries()) {
+    f.channel.runner.run = async input => input.mode === 'moments-content-review' ? review(input) : ({ text: JSON.stringify({ theme, text, imagePrompt: '' }) });
+    await assert.rejects(f.manager.preview(accountId, {}, 'invisible-' + i, signal()), { code: 'MOMENTS_CONTENT_INVALID' });
+  }
+  const draft = f.manager.list(accountId).runs.find(row => row.state === 'draft');
+  assert.throws(() => f.manager.editDraft(accountId, draft.id, '\u200b'), { code: 'MOMENTS_DRAFT_INVALID' });
+  f.manager.editDraft(accountId, draft.id, '   🌤️   '); assert.equal(f.manager.run(accountId, draft.id).text, '🌤️');
+  f.channel.momentsAutomation.remember(accountId, [{ id: '777', author: { userId: accountId }, text: '🌤', createdAt: f.now() / 1000 }]);
+  await assert.rejects(f.manager.publishDraft(accountId, draft.id, signal()), { code: 'MOMENTS_CONTENT_DUPLICATE' }); assert.equal(f.writes.length, 0);
 });
 test('offline expiration is recorded as skipped and recovery never catches up multiple old slots', async t => {
   const f = fixture(t); f.configure(); await f.plan({ schedule: { times: ['09:00', '10:00'] }, graceMinutes: 10 });
@@ -126,7 +299,7 @@ test('unknown and rejected submissions do not retry; an unknown scheduled post p
     await f.manager.tick(); const run = f.manager.list(accountId).runs[0]; assert.equal(run.state, delivery); assert.equal(f.writes.length, 1);
     await assert.rejects(f.manager.publishDraft(accountId, run.id, signal()));
     const restart = new MomentsPublishing(f.channel); restart.stopped = false; await restart.tick(); assert.equal(f.writes.length, 1);
-    if (delivery === 'unknown') { assert.equal(restart.plan(accountId, plan.id).settings.enabled, false); assert.equal(restart.reconcile(accountId, run.id).confirmed, false); }
+    if (delivery === 'unknown') { assert.equal(restart.plan(accountId, plan.id).settings.enabled, false); assert.equal((await restart.reconcile(accountId, run.id)).confirmed, false); }
   }
 });
 test('saved successful ACK survives cancellation and a sending record is recovered by read-only reconciliation', async t => {
@@ -136,8 +309,92 @@ test('saved successful ACK survives cancellation and a sending record is recover
   assert.equal(f.manager.list(accountId).runs[0].state, 'published'); assert.equal(f.writes.length, 1);
   const run = f.manager.run(accountId, draft.id), query = f.writes[0].query; run.state = 'sending'; run.query = query; f.manager.save();
   const restart = new MomentsPublishing(f.channel); assert.equal(restart.run(accountId, run.id).state, 'unknown');
-  assert.equal(restart.reconcile(accountId, run.id).confirmed, true); assert.equal(f.writes.length, 1);
+  assert.equal((await restart.reconcile(accountId, run.id)).confirmed, true); assert.equal(f.writes.length, 1);
   assert.throws(() => f.channel.moments.lookupOwnerReceipt({ ...query, text: '篡改正文' }, accountId, run.requestId));
+});
+
+async function uncertainPublication(t, { evidence = true, labels = true } = {}) {
+  const f = fixture(t), settings = { blockedLabelIds: labels ? ['1'] : [], blockedUserIds: labels ? [] : ['alice'] };
+  const draft = await f.manager.preview(accountId, settings, 'uncertain-privacy', signal());
+  const post = { accountId, postId: '91001', createdAt: Math.floor(f.now() / 1000), text: draft.text,
+    imageCount: 0, contentAvailable: true, deleted: false, audienceComplete: true, blockedUserIds: ['alice'] };
+  f.channel.transport.writeMoments = async args => {
+    f.writes.push(args);
+    throw new ChannelError('ERR_MOMENTS_WRITE_PROTOCOL', '微信已返回动态，屏蔽范围未确认', { snsDelivery: 'unknown', ...(evidence ? { publication: {
+      accountId, postId: post.postId, createdAt: post.createdAt, textHash: createHash('sha256').update(draft.text).digest('hex'), imageCount: 0,
+      submittedBlockedUserIds: ['alice'], returnedBlockedUserIds: [], audienceSelection: settings,
+      audienceSource: 'wechat-contacts-live', audienceFetchedAt: new Date(f.now()).toISOString(),
+    } } : {}) });
+  };
+  await assert.rejects(f.manager.publishDraft(accountId, draft.id, signal()));
+  const reads = [];
+  f.channel.transport.readMomentsPublication = async args => { reads.push(args); return structuredClone(post); };
+  return { ...f, draft, post, reads, run: f.manager.run(accountId, draft.id) };
+}
+
+test('a matching publication with uncertain privacy retains its exact snapshot and reconciles through reads without republishing', async t => {
+  const f = await uncertainPublication(t), models = f.models.length;
+  assert.equal(f.run.state, 'published-unverified'); assert.equal(f.run.postId, f.post.postId);
+  const saved = ownerPublicationRecord(f.channel, f.run.query, accountId, f.run.requestId);
+  assert.deepEqual(saved.record.publication.submittedBlockedUserIds, ['alice']);
+  f.channel.transport.readMomentsAudience = async () => { throw Error('Current label members must not replace the original snapshot'); };
+  const result = await f.manager.reconcile(accountId, f.run.id, signal());
+  assert.equal(result.confirmed, true); assert.equal(result.outcome, 'published'); assert.equal(f.run.state, 'published');
+  assert.deepEqual(f.reads[0].query, { postId: f.post.postId }); assert.equal(f.writes.length, 1); assert.equal(f.models.length, models);
+  const restart = new MomentsPublishing(f.channel); assert.equal(restart.error, undefined); assert.equal(restart.run(accountId, f.run.id).state, 'published');
+  await restart.reconcile(accountId, f.run.id, signal()); assert.equal(f.reads.length, 1); assert.equal(f.writes.length, 1);
+});
+
+test('a legacy uncertain post is resolved as deleted only with the matching saved WeChat deletion receipt', async t => {
+  const f = await uncertainPublication(t, { evidence: false });
+  f.channel.momentsAutomation.remember(accountId, [{ ...f.post, id: f.post.postId, author: { userId: accountId } }]);
+  f.advance(1000);
+  f.channel.transport.writeMoments = async args => { f.writes.push(args); return { accountId, action: 'delete', postId: args.query.postId, deleted: true, delivery: 'server-ack' }; };
+  await f.channel.moments.writeOwner({ action: 'delete', postId: f.post.postId }, accountId, 'explicit-delete', signal());
+  const count = f.writes.length;
+  f.channel.transport.readMomentsPublication = async () => { throw Error('Saved acknowledged deletion is sufficient'); };
+  const result = await f.manager.reconcile(accountId, f.run.id, signal());
+  assert.equal(result.outcome, 'deleted'); assert.equal(result.confirmed, true); assert.equal(f.run.state, 'deleted');
+  assert.equal(f.run.error, null); assert.match(f.run.audienceWarning, /屏蔽范围未确认/); assert.equal(f.writes.length, count);
+  const restart = new MomentsPublishing(f.channel); assert.equal(restart.error, undefined); assert.equal(restart.run(accountId, f.run.id).state, 'deleted');
+  await assert.rejects(restart.publishDraft(accountId, f.run.id, signal())); assert.equal(f.writes.length, count);
+});
+
+test('ret -2 during publication verification never becomes proof of deletion or a new publication', async t => {
+  const f = await uncertainPublication(t);
+  f.channel.transport.readMomentsPublication = async () => { throw new ChannelError('ERR_MOMENTS_REJECTED', 'unavailable', { ret: -2 }); };
+  const result = await f.manager.reconcile(accountId, f.run.id, signal());
+  assert.equal(result.confirmed, false); assert.equal(f.run.state, 'published-unverified'); assert.equal(f.run.deletion, undefined);
+  assert.equal(f.writes.length, 1); assert.match(result.message, /尚不能确认/);
+});
+
+test('legacy labels cannot be reconstructed from present-day membership while explicit saved user exclusions can be checked', async t => {
+  for (const labels of [true, false]) {
+    const f = await uncertainPublication(t, { evidence: false, labels });
+    f.channel.momentsAutomation.remember(accountId, [{ ...f.post, id: f.post.postId, author: { userId: accountId } }]);
+    f.channel.transport.readMomentsAudience = async () => { throw Error('Do not reconstruct an old label with new members'); };
+    const result = await f.manager.reconcile(accountId, f.run.id, signal());
+    assert.equal(result.confirmed, !labels); assert.equal(f.run.state, labels ? 'published-unverified' : 'published'); assert.equal(f.writes.length, 1);
+  }
+});
+
+test('ambiguous legacy matches and changed account or journal never confirm a different publication', async t => {
+  const ambiguous = await uncertainPublication(t, { evidence: false });
+  ambiguous.channel.momentsAutomation.remember(accountId, ['91001', '91002'].map(id => ({ ...ambiguous.post, id, author: { userId: accountId } })));
+  assert.equal((await ambiguous.manager.reconcile(accountId, ambiguous.run.id, signal())).confirmed, false);
+  assert.equal(ambiguous.reads.length, 0); assert.equal(ambiguous.run.state, 'unknown');
+  for (const mode of ['account', 'journal']) {
+    const f = await uncertainPublication(t), stored = ownerPublicationRecord(f.channel, f.run.query, accountId, f.run.requestId);
+    f.channel.transport.readMomentsPublication = async () => {
+      if (mode === 'account') f.status.account.id = 'another-account';
+      else fs.writeFileSync(stored.file, JSON.stringify({ ...stored.record, concurrentChange: true }));
+      return structuredClone(f.post);
+    };
+    await assert.rejects(f.manager.reconcile(accountId, f.run.id, signal()));
+    assert.equal(f.run.state, 'published-unverified'); assert.equal(f.writes.length, 1);
+    if (mode === 'account') assert(fs.readFileSync(stored.file).equals(stored.bytes));
+    else assert.equal(JSON.parse(fs.readFileSync(stored.file, 'utf8')).concurrentChange, true);
+  }
 });
 test('24h cap and minimum gap wait without calling AI and expired waiting slots are skipped', async t => {
   const f = fixture(t); f.configure(); await f.plan({ schedule: { times: ['09:00', '09:01', '09:02'] }, graceMinutes: 2 }); f.advance(60000); await f.manager.tick();

@@ -4,7 +4,13 @@ import { modelToolList } from './registry.mjs';
 import { momentsTool, momentsCommentsTool, momentsWriteTools, momentsAudienceTool } from './moments.mjs';
 import { workMomentsMedia } from '../moments/media.mjs';
 import { momentsPublishingTools } from './moments-publishing.mjs';
+import { momentsLikeRequestTool } from './moments-likes.mjs';
+import { momentsInteractionTool } from './moments-interactions.mjs';
+import { momentsImagesTool } from './moments-images.mjs';
+export { momentsImagesTool } from './moments-images.mjs';
+export { momentsInteractionTool } from './moments-interactions.mjs';
 export { momentsPublishingTools } from './moments-publishing.mjs';
+export { momentsLikeRequestTool, isMomentsLikeRequest } from './moments-likes.mjs';
 
 export { modelToolList, registerModelTools } from './registry.mjs';
 export { momentsTool, momentsCommentsTool, momentsWriteTools, momentsAudienceTool } from './moments.mjs';
@@ -17,15 +23,24 @@ export function workModelTools({ surface, ...context }) {
   if (surface === 'dialogue') return modelToolList(workSessionTools(context));
   if (surface === 'task') return modelToolList(workTools(context));
   if (surface === 'native') {
-    const { sessionManagement, moments, ...execution } = context;
-    const definitions = workTools(execution), names = new Set(definitions.map(tool => tool.name));
-    if (moments) { definitions.push(momentsTool({ read: moments.read, assertAllowed: execution.assertAllowed, onOperation: execution.onOperation })); names.add('wechat_moments_read'); }
+    const { sessionManagement, moments, imageMemoryTools = [], memoryTools = [], ...execution } = context;
+    const definitions = [...workTools(execution), ...imageMemoryTools, ...memoryTools], names = new Set(definitions.map(tool => tool.name));
+    if (moments) { definitions.push(momentsTool({ read: moments.read, subjects: moments.subjects, assertAllowed: execution.assertAllowed, onOperation: execution.onOperation })); names.add('wechat_moments_read'); }
     if (moments) { definitions.push(momentsCommentsTool({ read: moments.read, assertAllowed: execution.assertAllowed, onOperation: execution.onOperation })); names.add('wechat_moments_comments'); }
+    if (moments?.readImages) { definitions.push(momentsImagesTool({ readImages: moments.readImages, assertAllowed: execution.assertAllowed, onOperation: execution.onOperation })); names.add('wechat_moments_images'); }
     if (moments?.audience) { definitions.push(momentsAudienceTool({ audience: moments.audience, assertAllowed: execution.assertAllowed, onOperation: execution.onOperation })); names.add('wechat_moments_audience'); }
-    if (moments?.write) for (const tool of momentsWriteTools({ write: moments.write, media: workMomentsMedia(execution.cwd), assertAllowed: execution.assertAllowed, onOperation: execution.onOperation })) {
+    if (moments?.write) for (const tool of momentsWriteTools({ write: moments.write, subjects: moments.subjects, media: workMomentsMedia(execution.cwd), assertAllowed: execution.assertAllowed, onOperation: execution.onOperation })) {
+      definitions.push(tool); names.add(tool.name);
+    }
+    if (moments?.likeRecent) {
+      const tool = momentsLikeRequestTool({ like: moments.likeRecent, subjects: moments.subjects, assertAllowed: execution.assertAllowed, onOperation: execution.onOperation });
       definitions.push(tool); names.add(tool.name);
     }
     if (moments?.manage) for (const tool of momentsPublishingTools({ manage: moments.manage, assertAllowed: execution.assertAllowed, onOperation: execution.onOperation })) { definitions.push(tool); names.add(tool.name); }
+    if (moments?.manageInteractions) {
+      const tool = momentsInteractionTool({ manage: moments.manageInteractions, subjects: moments.subjects, assertAllowed: execution.assertAllowed, onOperation: execution.onOperation });
+      definitions.push(tool); names.add(tool.name);
+    }
     if (sessionManagement) for (const definition of workSessionTools(sessionManagement)) {
       if (names.has(definition.name)) continue;
       definitions.push({ ...definition, execute: async (args, exec) => {

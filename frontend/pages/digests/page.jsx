@@ -1,3 +1,4 @@
+import { CleanupControl } from '../../components/cleanup-control.jsx';
 import { useState } from 'react';
 import { formatTime } from "../../shared/conversations.mjs";
 import { localDate } from "../../shared/local-date.mjs";
@@ -38,11 +39,11 @@ export function DigestsPage({ rpc, status }) {
       text: todoText[todo.id] ?? todo.text,
     });
   const items = (values, title) => (
-    <div className="wa-wb-digest-section">
+    <section className="wa-wb-digest-section">
       <h3>{title}</h3>
       {values.length ? (
         values.map((item) => (
-          <div className="wa-wb-summary-item" key={item.id}>
+          <div className="wa-wb-summary-item wa-digest-conclusion" key={item.id}>
             <p>{item.text}</p>
             <small>依据 {item.sources.join('、')}</small>
           </div>
@@ -50,18 +51,18 @@ export function DigestsPage({ rpc, status }) {
       ) : (
         <p className="wa-wb-note">这次整理没有提取到有明确依据的条目。</p>
       )}
-    </div>
+    </section>
   );
   return (
     <section className="wa-wb-page" data-testid="digests-page">
-      <PageHead title="群聊简报" description="整理讨论、核对结论，确认需要跟进的待办。">
+      <PageHead icon="digest" title="群聊简报" description="整理讨论、核对结论，确认需要跟进的待办。">
         <Button quiet disabled={state.busy} onClick={state.refresh}>
           重新读取
         </Button>
       </PageHead>
       <Feedback state={state} />
       <Offline status={status}>
-        <div className="wa-wb-card wa-wb-generator">
+        <div className="wa-digest-generator wa-wb-generator">
           <label>
             授权群聊
             <select
@@ -102,8 +103,10 @@ export function DigestsPage({ rpc, status }) {
             {state.busy ? '正在处理…' : '生成简报草稿'}
           </Button>
         </div>
-        <div className={'wa-wb-split' + (!summaries.length ? ' is-empty' : '')}>
-          <div className="wa-wb-list">
+        <div className={'wa-wb-split wa-digest-workspace' + (!summaries.length ? ' is-empty' : '')}>
+          <div className="wa-wb-list wa-digest-index">
+            {!!summaries.length && <div className="wa-index-heading"><h2>历史简报</h2><span>{summaries.length}</span></div>}
+            <CleanupControl key={status.account?.id} state={state} kind="digests" label="清空历史简报" />
             {summaries.map((row) => (
               <button
                 type="button"
@@ -125,9 +128,9 @@ export function DigestsPage({ rpc, status }) {
           </div>
           <div>
             {summary ? (
-              <article className="wa-wb-card wa-wb-digest">
-                <h2>{summary.title}</h2>
-                <p className="wa-wb-note">
+              <article className="wa-wb-digest">
+                <header className="wa-digest-document-heading"><span>{groups.find((group) => group.peerId === summary.peerId)?.name || '历史群聊'} · 群聊简报</span><h2>{summary.title}</h2></header>
+                <p className="wa-wb-note wa-digest-coverage">
                   {formatTime(summary.from)} — {formatTime(summary.to)} · 本机保存 {summary.coverage.storedMessages}{' '}
                   条，本次纳入 {summary.coverage.included} 条
                   {summary.coverage.truncated ? '（范围过大，仅含部分消息；请缩小时间段）' : ''}
@@ -139,7 +142,7 @@ export function DigestsPage({ rpc, status }) {
                   <h3>待办 · 确认后生效</h3>
                   {!summary.todos.length && <p className="wa-wb-note">没有明确待办。</p>}
                   {summary.todos.map((todo) => (
-                    <div className="wa-wb-todo" key={todo.id}>
+                    <div className={'wa-wb-todo is-' + todo.state} key={todo.id}>
                       <div className="wa-wb-between">
                         <span>
                           {todo.owner || '负责人待核对'} · 依据 {todo.sources.join('、')}
@@ -152,7 +155,7 @@ export function DigestsPage({ rpc, status }) {
                         disabled={state.busy}
                         onChange={(event) => setTodoText({ ...todoText, [todo.id]: event.target.value })}
                       /> : <p className="wa-wb-todo-text">{todo.text}</p>}
-                      <div className="wa-wb-actions">
+                      <div className="wa-wb-actions wa-todo-actions">
                         {todo.state === 'draft' && (
                           <>
                             <Button disabled={state.busy} onClick={() => changeTodo(todo, 'confirmed')}>

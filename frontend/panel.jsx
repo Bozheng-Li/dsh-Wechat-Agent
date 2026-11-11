@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react';
 import { css } from "./styles/base.mjs";
 import { pageLabels } from "./shared/labels.mjs";
 import { Glyph } from "./components/glyph.jsx";
@@ -7,6 +8,20 @@ import { PanelContent } from "./page-content.jsx";
 
 export function WechatPanel({ connection, catalog }) {
   const state = usePanel(connection);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const navRef = useRef(null), menuButton = useRef(null);
+  useEffect(() => {
+    if (!menuOpen) return;
+    navRef.current?.querySelector('[aria-current=page]')?.focus();
+    const dismiss = event => {
+      if (event.type === 'keydown' && event.key === 'Escape') {
+        setMenuOpen(false); menuButton.current?.focus();
+      } else if (event.type === 'pointerdown' && !navRef.current?.contains(event.target)) setMenuOpen(false);
+    };
+    document.addEventListener('keydown', dismiss);
+    document.addEventListener('pointerdown', dismiss);
+    return () => { document.removeEventListener('keydown', dismiss); document.removeEventListener('pointerdown', dismiss); };
+  }, [menuOpen]);
   const { motion, status, page, memoryTab, busy, workspaceRef, action, navigate, navPage, warning } = state;
   const sectionLabel = ['overview', 'authorization', 'records', 'moments'].includes(navPage) ? '日常'
     : ['tasks', 'work', 'digests'].includes(navPage) ? '自动化' : '管理';
@@ -15,16 +30,21 @@ export function WechatPanel({ connection, catalog }) {
     <div className="wa-panel" data-motion={motion.enabled ? 'on' : 'off'} data-page={page}>
       <style>{css}</style>
       <div className="wa-shell">
-        <aside className="wa-nav" aria-label="微信 Agent 导航">
+        <aside className="wa-nav" aria-label="微信 Agent 导航" ref={navRef} data-expanded={menuOpen ? 'true' : undefined}>
           <div className="wa-brand">
             <div className="wa-brand-mark">
               <Glyph name="chat" />
             </div>
             <div>
               <strong>微信 Agent</strong>
+              <small>消息 · 记忆 · 工作</small>
             </div>
           </div>
-          <nav className="wa-nav-list">
+          <button type="button" className="wa-nav-mobile" data-testid="mobile-navigation" ref={menuButton}
+            aria-label="切换页面" aria-controls="wa-main-navigation" aria-expanded={menuOpen} onClick={() => setMenuOpen(!menuOpen)}>
+            <span>{pageLabels[navPage]}</span><Glyph name={menuOpen ? 'close' : 'menu'} />
+          </button>
+          <nav className="wa-nav-list" id="wa-main-navigation">
             {[
               [
                 '日常',
@@ -63,7 +83,10 @@ export function WechatPanel({ connection, catalog }) {
                     aria-current={navPage === id ? 'page' : undefined}
                     aria-label={pageLabels[id]}
                     title={pageLabels[id]}
-                    onClick={() => navigate(id)}
+                    onClick={() => {
+                      navigate(id); setMenuOpen(false);
+                      if (window.matchMedia('(max-width: 800px)').matches) menuButton.current?.focus();
+                    }}
                   >
                     <Glyph name={icon} />
                     <span>{label}</span>
@@ -97,6 +120,10 @@ export function WechatPanel({ connection, catalog }) {
               {page !== navPage && page !== 'recovery' && <>
                 <span className="wa-breadcrumb-divider" aria-hidden="true">/</span>
                 <span>{pageLabels[page] || '工作台'}</span>
+              </>}
+              {page === navPage && <>
+                <span className="wa-breadcrumb-divider" aria-hidden="true">/</span>
+                <span>{pageLabels[page]}</span>
               </>}
               {page === 'memory' && memoryTab === 'review' && (
                 <>

@@ -7,13 +7,13 @@ export function Overview({ status, busy, blocked, onAction, onNavigate }) {
   const settings = status.settings || {}, processing = status.processing || {};
   const groups = settings.groups?.length || 0, privates = settings.privatePeers?.length || 0;
   return <>
-    <PageHead title="工作台" description="连接微信，让消息与工作有序流转。">
+    <PageHead icon="grid" title="工作台" description="查看当前账号、消息处理状态与工作配置。">
       <Button primary icon="people" onClick={() => onNavigate('authorization')}>管理会话</Button>
     </PageHead>
     <div className="wa-stack wa-overview-stack">
-      <div className="wa-overview-lead">
-        <AccountCard status={status} busy={busy} blocked={blocked} onAction={onAction} />
-        <section className="wa-card wa-overview-status" aria-label="自动回复状态">
+      <AccountCard status={status} busy={busy} blocked={blocked} onAction={onAction} />
+      <div className="wa-overview-body">
+        <section className="wa-overview-status" aria-label="自动回复状态">
           <div className="wa-card-heading">
             <h2>自动回复</h2>
             <span className={'wa-badge ' + (settings.enabled ? 'is-success' : '')}>
@@ -43,7 +43,6 @@ export function Overview({ status, busy, blocked, onAction, onNavigate }) {
             <Button quiet icon="arrow" onClick={() => onNavigate('records')}>查看回复记录</Button>
           </div>
         </section>
-      </div>
       <section className="wa-overview-summary" aria-labelledby="wa-overview-config-title">
         <div className="wa-card-heading"><h2 id="wa-overview-config-title">当前配置</h2></div>
         <div className="wa-overview-config-grid">
@@ -57,11 +56,22 @@ export function Overview({ status, busy, blocked, onAction, onNavigate }) {
           <div>
             <p className="wa-help">{item.title}</p>
             <div className={'wa-summary-value' + (item.path ? ' wa-path wa-mono' : '')}>{item.value}</div>
-            <p className="wa-help">{item.help}</p>
           </div>
           <Glyph name="arrow" className="wa-summary-arrow" />
         </button>)}
         </div>
+      </section>
+      </div>
+      <section className="wa-overview-destinations" aria-label="常用工作区">
+        {[
+          { page: 'memory', icon: 'memory', title: '记忆库', description: '查看会话记忆与共同约定' },
+          { page: 'tasks', icon: 'clock', title: '定时任务', description: '管理提醒与执行回执' },
+          { page: 'work', icon: 'work', title: '工作任务', description: '跟进进度，查看交付成果' },
+        ].map(item => <button type="button" className="wa-destination" key={item.page} onClick={() => onNavigate(item.page)}>
+          <span className="wa-card-icon"><Glyph name={item.icon} /></span>
+          <span><strong>{item.title}</strong><small>{item.description}</small></span>
+          <Glyph name="arrow" className="wa-icon-small" />
+        </button>)}
       </section>
     </div>
   </>;

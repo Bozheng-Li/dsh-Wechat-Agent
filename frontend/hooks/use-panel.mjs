@@ -308,23 +308,31 @@ export function usePanel(connection) {
   ]);
   const saveSettings = (settings, options = {}) =>
     action('settings', { accountId: statusRef.current.account.id, settings }, options);
-  const grant = async (peer, enabled) => {
-    if (!statusRef.current?.account) return null;
-    const settings = statusRef.current.settings,
-      field = peerType(peer) === 'group' ? 'groups' : 'privatePeers';
-    return saveSettings(
-      {
-        ...settings,
-        [field]: enabled
-          ? [...new Set([...settings[field], peerId(peer)])]
-          : settings[field].filter((id) => id !== peerId(peer)),
-      },
-      {
-        area: page === 'conversation' ? 'conversation' : 'authorization',
-        text: enabled ? '会话已授权，可进入设置选择回复模式。' : '已撤销此会话授权，已有记录继续保留。',
-      }
-    );
+  const grantMany = async (peers, enabled, options = {}) => {
+    if (!statusRef.current?.account || busyRef.current || !peers.length) return null;
+    const settings = { ...statusRef.current.settings };
+    let changed = 0;
+    for (const [field, chatType] of [['groups', 'group'], ['privatePeers', 'private']]) {
+      const ids = new Set(peers.filter((peer) => peerType(peer) === chatType).map(peerId).filter(Boolean)),
+        before = settings[field];
+      settings[field] = enabled
+        ? [...new Set([...before, ...ids])]
+        : before.filter((id) => !ids.has(id));
+      changed += Math.abs(settings[field].length - before.length);
+    }
+    if (!changed) return statusRef.current;
+    return saveSettings(settings, {
+      area: 'authorization',
+      text: enabled
+        ? `已授权 ${changed} 个会话，可分别进入设置选择回复模式。`
+        : `已取消 ${changed} 个会话的授权，已有记录继续保留。`,
+      ...options,
+    });
   };
+  const grant = (peer, enabled) => grantMany([peer], enabled, {
+    area: page === 'conversation' ? 'conversation' : 'authorization',
+    text: enabled ? '会话已授权，可进入设置选择回复模式。' : '已撤销此会话授权，已有记录继续保留。',
+  });
   const blocked = !!busy || !!status?.startupError;
   const navPage = ['model', 'identity', 'persona', 'storage', 'changelog', 'administrators', 'image-generation', 'diagnostics'].includes(page)
     ? 'settings'
@@ -383,6 +391,7 @@ export function usePanel(connection) {
     openRecords,
     saveSettings,
     grant,
+    grantMany,
     blocked,
     navPage,
     warning,

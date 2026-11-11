@@ -25,6 +25,7 @@ import { registerModelTools } from '../tools/registry.mjs';
 import { planProgressiveTools } from '../tools/progressive.mjs';
 import { observeModelRequests } from './request-metrics.mjs';
 import { polishWorkResult } from '../work/polish.mjs';
+import { reviewMemoryDraft } from '../memory/roles/reflection.mjs';
 
 export class DshAgentRunner {
   constructor(ctx, getModelChoice = () => null, getRuntimeSettings = () => ({})) {
@@ -37,6 +38,12 @@ export class DshAgentRunner {
   searchStatus() {
     return this.lastSearch ? { ...this.lastSearch } : null;
   }
+  searchTool(config = {}, options) {
+    const settings = structuredClone(config);
+    return webSearchTool(() => this.search.forConfig(settings, options), result => {
+      this.lastSearch = { ...result, provider: Object.hasOwn(result, 'provider') ? result.provider : settings.searchProvider ?? 'tavily' };
+    }, options);
+  }
   defaultSelection() {
     const selection = this.ctx.agentDefaultModel.currentSelection();
     if (!selection?.provider || !selection?.model)
@@ -48,6 +55,9 @@ export class DshAgentRunner {
   }
   extractLongTermMemory(request) {
     return this.run(request);
+  }
+  reviewMemoryReply(input, draft, options) {
+    return reviewMemoryDraft(this, input, draft, options);
   }
   async polishReport(text,request,signal,presentation) {
     return (await polishWorkResult(this,text,request,signal,presentation)).text;
@@ -145,6 +155,8 @@ export class DshAgentRunner {
     scheduledTask,
     workContext,
     onRequestMetrics,
+    onBeforeTool,
+    assertAllowed = () => {},
   }) {
     signal.throwIfAborted();
     if (images.some((image) => image.type === 'face' || image.kind === 'sticker'))
@@ -176,20 +188,16 @@ export class DshAgentRunner {
     // These modes and their output contracts are supplied by backend helpers,
     // never parsed from chat text. Internal isolation also applies without an override.
     const internalOutput = INTERNAL_OUTPUT_MODES.has(mode);
+    const materialTools = ['moments-materials', 'moments-publish'].includes(mode);
     const natural = mode === 'natural' && naturalDecision;
     const definitions =
-      workDialogue ? [...tools] : internalOutput || systemOverride || natural
+      workDialogue ? [...tools] : materialTools ? tools.filter(tool => ['wechat_moments_material_search', 'wechat_moments_material_download', 'wechat_moments_material_generate'].includes(tool.name)) : internalOutput || systemOverride || natural
         ? []
         : [
             ...tools,
             ...(runtime.modelConfig?.webSearch
               ? [
-                  webSearchTool(
-                    () => this.search.forConfig(runtime.modelConfig),
-                    (result) => {
-                      this.lastSearch = { ...result, provider: runtime.modelConfig.searchProvider ?? 'dsh' };
-                    }
-                  ),
+                  this.searchTool(runtime.modelConfig, { assertAllowed }),
                 ]
               : []),
           ];
@@ -203,12 +211,13 @@ export class DshAgentRunner {
     }));
     const userMessageId = randomUUID();
     let resumedContextPending = !!sessionId;
-    const setup = (ctx) => {
+    const setup = (ctx, agent) => {
       // Do not load the desktop/coding preset or grant host tools to WeChat.
       const plan = promptStrategy === 'progressive-v1' ? planProgressiveTools(capabilities, text) : { initial: capabilities, deferredGroups: [] };
-      const visibleCapabilities = registerModelTools(ctx, plan.initial, { deferredGroups: plan.deferredGroups,
-        native: promptStrategy === 'progressive-v1' || workDialogue || ['work-result','work-progress','work-routing'].includes(mode), denied: '微信会话只能使用管理员开放的会话工具' });
-      observeModelRequests(ctx, { strategy: promptStrategy, mode, rows: requestMetrics, onUpdate: onRequestMetrics });
+      const visibleCapabilities = registerModelTools(ctx, plan.initial, { deferredGroups: plan.deferredGroups, assertAllowed, agent,
+        onBeforeTool: internalOutput && !workDialogue ? undefined : onBeforeTool,
+        native: promptStrategy === 'progressive-v1' || workDialogue || materialTools || ['work-result','work-progress','work-routing'].includes(mode), denied: '微信会话只能使用管理员开放的会话工具' });
+      observeModelRequests(ctx, { strategy: promptStrategy, mode, sessionId: id, rows: requestMetrics, onUpdate: onRequestMetrics });
       ctx.systemPrompt.suppressRuntimeContext();
       // The host's working-directory fact is otherwise marked required and
       // appended as a second user message even without filesystem tools.
@@ -249,6 +258,8 @@ export class DshAgentRunner {
           modelConfig: runtime.modelConfig,
           promptStrategy,
           capabilities: visibleCapabilities,
+          searchAvailable: capabilities.some(tool => tool.name === 'wechat_web_search'),
+          memoryAvailable: capabilities.some(tool => tool.name === 'wechat_memory'),
           systemOverride,
           naturalDecision,
           requestText: text,

@@ -28,11 +28,11 @@ export function StorageSettings({
   return (
     <>
       <Back label={backLabel} onClick={onBack} />
-      <PageHead title="全局工作目录" description="只需设置一个目录，插件会自动管理各类数据的保存位置。" />
+      <PageHead icon="folder" title="全局工作目录" description="只需设置一个目录，插件会自动管理各类数据的保存位置。" />
       <Notice notice={notice} area="storage" />
-      <div className="wa-stack wa-content-narrow">
+      <div className="wa-settings-stack wa-content-narrow wa-storage-settings">
         <form
-          className="wa-card"
+          className="wa-settings-block"
           onSubmit={(event) => {
             event.preventDefault();
             onSave();
@@ -84,7 +84,7 @@ export function StorageSettings({
             label="保存目录并应用"
           />
         </form>
-        <details className="wa-card wa-data-details">
+        <details className="wa-settings-block wa-data-details">
           <summary>数据来源与保存方式</summary>
           <div className="wa-note-box">
             <p>

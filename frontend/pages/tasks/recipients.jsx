@@ -56,10 +56,10 @@ export function TaskRecipients({ rpc, accountId, peer, value, onChange, disabled
     );
   const missing = loaded && value.some((target) => !members.some((member) => member.id === target.id));
   return (
-    <div className="wa-field wa-automation-field" data-testid="task-recipients">
+    <div className="wa-field wa-automation-field wa-task-recipient-picker" data-testid="task-recipients">
       <div className="wa-between">
         <span className="wa-label">提醒对象（可选，可多选）</span>
-        <Button disabled={disabled || loading} onClick={() => setRevision(revision + 1)}>
+        <Button quiet disabled={disabled || loading} onClick={() => setRevision(revision + 1)}>
           {loading ? '正在读取…' : '刷新成员'}
         </Button>
       </div>
@@ -80,7 +80,7 @@ export function TaskRecipients({ rpc, accountId, peer, value, onChange, disabled
           const name = member.name || member.id,
             checked = value.some((target) => target.id === member.id);
           return (
-            <label className="wa-row" key={member.id} data-member-id={member.id}>
+            <label className={'wa-recipient-row' + (checked ? ' is-selected' : '')} key={member.id} data-member-id={member.id}>
               <input
                 type="checkbox"
                 checked={checked}
@@ -105,9 +105,10 @@ export function TaskRecipients({ rpc, accountId, peer, value, onChange, disabled
       <div aria-live="polite">
         <p className="wa-help">已选提醒对象：{value.length ? `${value.length} / 20 位` : '未选择'}</p>
         {value.length > 0 && (
-          <div className="wa-row">
+          <div className="wa-recipient-selection">
             {value.map((target) => (
               <Button
+                quiet
                 key={target.id}
                 disabled={disabled}
                 aria-label={'移除提醒对象 ' + target.name}

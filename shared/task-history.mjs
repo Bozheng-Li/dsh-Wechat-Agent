@@ -1,6 +1,7 @@
 const activeStates = new Set(['pending', 'running', 'paused']);
 const finishedStates = new Set(['sent', 'failed', 'cancelled', 'expired', 'unknown', 'partial']);
 const runTime = (run) => run.finishedAt || run.startedAt || run.scheduledAt || 0;
+export const taskHistoryVersion = task => JSON.stringify([task.revision, task.updatedAt, task.state, task.lastState, task.runId]);
 
 /** One history row per task; individual executions remain available in its details. */
 export function taskViews(tasks, runs) {
@@ -9,10 +10,11 @@ export function taskViews(tasks, runs) {
   const current = [],
     history = [];
   for (const task of tasks) {
-    const records = grouped.get(task.id).sort((a, b) => runTime(b) - runTime(a));
+    const records = grouped.get(task.id).filter(run => !run.historyDeleted).sort((a, b) => runTime(b) - runTime(a));
     const latest = records.find((run) => finishedStates.has(run.state));
     const inFlight = records.find((run) => run.id === task.runId && !finishedStates.has(run.state));
     if (activeStates.has(task.state)) current.push(task);
+    if (task.historyClearedVersion === taskHistoryVersion(task, runs)) continue;
     if (activeStates.has(task.state) && !latest && !task.lastState) continue;
     const settling = task.state === 'cancelled' && !!inFlight;
     const result = settling ? 'settling' : task.lastState || latest?.state;

@@ -3,10 +3,19 @@ const questions = new Set(['你好', '解释一下这段代码', '示例：写�
   '不要打开 vscode 连接 scut2', '“用ssh方式链vscode中的scut2服务器”', '怎么用 SSH 连接 vscode', '能不能并行启动',
   '能不能并行多开 DSH？', '不要生成图片，只解释怎么调用', '“帮我运行代码”是什么意思']);
 // Explicit synthetic decisions; this fixture is never used by production.
+export function fixtureWorkRouteDecision(data, decision) {
+  const taskId = decision.taskId ?? null;
+  return { ...decision, taskId, review: decision.review ?? {
+    intent: decision.action === 'new' ? 'execute' : decision.action,
+    evidence: Array.from(data.message ?? '').slice(0, 240).join(''),
+    target: taskId ? 'unique' : 'none',
+  } };
+}
+
 export function fixtureWorkRoute(input) {
   const data = JSON.parse(input.text);
   const action = questions.has(data.message) ? 'chat' : data.currentTaskId ? 'continue' : 'new';
-  return { text: JSON.stringify({ action, taskId: action === 'continue' ? data.currentTaskId : null }) };
+  return { text: JSON.stringify(fixtureWorkRouteDecision(data, { action, taskId: action === 'continue' ? data.currentTaskId : null })) };
 }
 export async function fixtureWorkDialogue(input, plan) {
   if (input.mode !== 'work-dialogue') throw Error('ordinary chat/memory runner entered work fixture');

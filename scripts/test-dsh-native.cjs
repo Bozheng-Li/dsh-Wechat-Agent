@@ -11,10 +11,12 @@ const { syncBuiltinESMExports } = require('node:module');
 const repo = path.resolve(__dirname, '..');
 const installation = process.argv[2] || process.env.DSH_INSTALLATION;
 if (!installation) throw new Error('Pass the DeepSeek Harness installation directory as an argument or DSH_INSTALLATION');
+const suiteTimeoutMs = Number(process.env.WECHAT_NATIVE_TEST_TIMEOUT_MS || 45000);
+if (!Number.isSafeInteger(suiteTimeoutMs) || suiteTimeoutMs < 1) throw new Error('WECHAT_NATIVE_TEST_TIMEOUT_MS must be a positive integer');
 for (const name of ['tmp', 'logs']) fs.mkdirSync(path.join(repo, 'storage', name), { recursive: true });
 if (!process.versions.electron) {
   const run = spawnSync(path.join(installation, 'DeepSeek Harness.exe'), ['--expose-internals', __filename, installation], {
-    windowsHide: true, encoding: 'utf8', timeout: 45000,
+    windowsHide: true, encoding: 'utf8', timeout: suiteTimeoutMs,
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
   });
   process.stdout.write(run.stdout || ''); process.stderr.write(run.stderr || '');
@@ -26,7 +28,10 @@ const { Context } = hostRequire('@deepseek-ai/cordis');
 const { LlmAdapter } = hostRequire('@deepseek-ai/dsh-llm');
 const { buildModelCatalog } = hostRequire('@deepseek-ai/dsh-api-session-controller');
 const { DshAgentRunner, WechatChannel, StateStore, TaskScheduler, AgentIdentity, conversationMemoryTool, imageMemoryTool, conversationImageTool, completedText, conversationTaskTool, webSearchTool, ChannelError, selectModel, readModelInfo, emptyNaturalSettings, REPLY_STYLE_REVIEW_NOTE } = require(path.join(repo, 'lib/testing.js'));
-const root = fs.mkdtempSync(path.join(repo, 'storage/tmp/dsh-native-'));
+const { momentsLikeRequestTool, momentsInteractionTool, momentsImagesTool, momentsPublishingTools, resolveMessageReferences, referenceText } = require(path.join(repo, 'lib/testing.js'));
+const fixtureParent = path.resolve(process.env.WECHAT_NATIVE_TEST_TMPDIR || path.join(repo, 'storage/tmp'));
+fs.mkdirSync(fixtureParent, { recursive: true });
+const root = fs.mkdtempSync(path.join(fixtureParent, 'dsh-native-'));
 process.env.DSH_HOME = path.join(root, 'home');
 process.env.DSH_AGENTS_HOME = path.join(root, 'agents');
 const ctx = new Context();
@@ -46,16 +51,71 @@ class FixtureAdapter extends LlmAdapter {
   async *stream(options) {
     requests.push(options);
     const incomingImages = options.messages.flatMap(message => message.content || []).filter(block => block.type === 'image');
-    const expectedTools = mode === 'image-request-tool' && !incomingImages.length ? ['wechat_read_image'] : mode === 'image-memory-tool' && !incomingImages.length ? ['wechat_image_memory'] : mode === 'task-tool' || mode === 'task-denied' ? ['wechat_task'] : mode === 'search-tool' ? ['wechat_web_search'] : ['memory-tool', 'memory-all-tool', 'channel', 'empty-after-tool'].includes(mode) ? ['wechat_memory'] : [];
+    const expectedTools = mode === 'moments-reply-schedule-tool' ? ['wechat_moments_reply_schedule'] : mode === 'moments-images-tool' && !incomingImages.length ? ['wechat_moments_images'] : ['moments-interaction-tool', 'moments-interaction-auto-tool'].includes(mode) ? ['wechat_moments_interact'] : mode === 'moments-like-tool' ? ['wechat_moments_like_recent'] : mode === 'image-request-tool' && !incomingImages.length ? ['wechat_read_image'] : mode === 'generated-image-memory-tool' && !incomingImages.length ? ['wechat_generated_image_memory'] : mode === 'image-memory-tool' && !incomingImages.length ? ['wechat_image_memory'] : mode === 'task-tool' || mode === 'task-denied' ? ['wechat_task'] : mode === 'search-tool' ? ['wechat_web_search'] : ['memory-tool', 'memory-all-tool', 'channel', 'empty-after-tool'].includes(mode) ? ['wechat_memory'] : [];
     assert.deepEqual((options.tools || []).map(tool => tool.name), expectedTools, 'only current-conversation tools are available; host tools never leak');
     const systems = options.messages.filter(m => m.role === 'system').flatMap(m => m.content).map(b => b.text || '').join('\n');
     assert(systems.includes('微信') || systems.includes('这是内部资料处理任务'));
     assert(!systems.includes('HOST_SECRET_PERSONA'));
+    if (mode === 'moments-reply-schedule-tool') {
+      const results = options.messages.filter(message => message.role === 'tool').flatMap(message => message.content || []).filter(block => block.type === 'text').map(block => JSON.parse(block.text));
+      const latest = results.at(-1); if (latest) assert(latest.ok, JSON.stringify(latest));
+      const args = results.length === 0 ? { action: 'list' } : results.length === 1
+        ? { action: 'configure', settings: { friendRepliesEnabled: true, maxFriendRepliesPerRun: 3, intervalMinutes: 27 } }
+        : results.length === 2 ? { action: 'configure', settings: { friendRepliesEnabled: false } } : null;
+      if (results.length === 2) { assert.equal(latest.settings.friendRepliesEnabled, true); assert.equal(latest.settings.enabled, true); }
+      if (args) {
+        const block = { type: 'tool-call', id: 'native-reply-schedule-' + results.length, name: 'wechat_moments_reply_schedule', arguments: JSON.stringify(args) };
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' }; yield { type: 'tool-call-delta', index: 0, id: block.id, name: block.name, argumentsDelta: block.arguments };
+        yield { type: 'block-end', index: 0, block }; yield { type: 'finish', reason: { kind: 'tool-calls' } }; return;
+      }
+      assert.equal(latest.settings.enabled, true); assert.equal(latest.settings.friendRepliesEnabled, false);
+      assert.equal(latest.settings.maxFriendRepliesPerRun, 3); assert.equal(latest.settings.intervalMinutes, 27);
+    }
+    if (mode === 'moments-images-tool') {
+      if (incomingImages.length) {
+        assert.equal(incomingImages.length, 1); const text = '{"images":[{"index":1,"readable":true,"description":"真实附件中的合成图案"}]}';
+        yield { type: 'block-start', index: 0, blockType: 'text' }; yield { type: 'text-delta', index: 0, text };
+        yield { type: 'block-end', index: 0, block: { type: 'text', text } }; yield { type: 'finish', reason: { kind: 'stop' } }; return;
+      }
+      const result = options.messages.filter(message => message.role === 'tool').flatMap(message => message.content || []).filter(block => block.type === 'text').map(block => JSON.parse(block.text)).at(-1);
+      if (!result) {
+        const block = { type: 'tool-call', id: 'native-moments-images', name: 'wechat_moments_images', arguments: '{"postId":"601"}' };
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' }; yield { type: 'tool-call-delta', index: 0, id: block.id, name: block.name, argumentsDelta: block.arguments };
+        yield { type: 'block-end', index: 0, block }; yield { type: 'finish', reason: { kind: 'tool-calls' } }; return;
+      }
+      assert(result.ok); assert.equal(result.complete, true); assert.equal(result.images.length, 1); assert.equal(result.images[0].description, '真实附件中的合成图案');
+    }
+    if (mode === 'moments-interaction-auto-tool') {
+      const results = options.messages.filter(message => message.role === 'tool').flatMap(message => message.content || []).filter(block => block.type === 'text').map(block => JSON.parse(block.text));
+      const latest = results.at(-1);
+      if (latest) assert(latest.ok, JSON.stringify(latest));
+      const args = results.length === 0 ? { action: 'list' } : results.length === 1
+        ? { action: 'configure_auto', revision: latest.automation.revision, settings: { enabled: true, intervalMinutes: 30, lookbackDays: 2, likeCount: 2, commentCount: 1, skipLiked: true, skipCommented: true } }
+        : results.length === 2 ? { action: 'stop_auto' } : results.length === 3 ? { action: 'configure_auto', revision: latest.revision, settings: { enabled: false } } : null;
+      if (args) {
+        const block = { type: 'tool-call', id: 'native-auto-' + results.length, name: 'wechat_moments_interact', arguments: JSON.stringify(args) };
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' }; yield { type: 'tool-call-delta', index: 0, id: block.id, name: block.name, argumentsDelta: block.arguments };
+        yield { type: 'block-end', index: 0, block }; yield { type: 'finish', reason: { kind: 'tool-calls' } }; return;
+      }
+      assert.equal(latest.settings.enabled, false); assert.equal(latest.settings.intervalMinutes, 30); assert.equal(latest.settings.likeCount, 2); assert.equal(latest.settings.commentCount, 1);
+    }
+    if (mode === 'moments-interaction-tool') {
+      const result = options.messages.filter(message => message.role === 'tool').flatMap(message => message.content || []).filter(block => block.type === 'text').map(block => JSON.parse(block.text)).at(-1);
+      if (!result || result.state === 'draft') {
+        const args = result ? { action: 'run', id: result.id, revision: result.revision }
+          : { action: 'preview', options: { action: 'both', mode: 'random', count: 2, poolSize: 2, intervalSeconds: 0, commentMode: 'fixed', commentText: '合成原生评论' } };
+        if (result) { assert.equal(result.counts.liked, 0); assert.equal(result.counts.commented, 0); }
+        const block = { type: 'tool-call', id: 'native-interact-' + args.action, name: 'wechat_moments_interact', arguments: JSON.stringify(args) };
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' }; yield { type: 'tool-call-delta', index: 0, id: block.id, name: block.name, argumentsDelta: block.arguments };
+        yield { type: 'block-end', index: 0, block }; yield { type: 'finish', reason: { kind: 'tool-calls' } }; return;
+      }
+      assert(result.ok); assert.equal(result.state, 'completed'); assert.equal(result.counts.liked, 2); assert.equal(result.counts.commented, 2);
+    }
     if (mode === 'cancel') {
       await new Promise((resolve, reject) => { options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }); });
       return;
     }
-    if (mode === 'image-memory-tool' || mode === 'image-request-tool') {
+    if (['image-memory-tool', 'generated-image-memory-tool', 'image-request-tool'].includes(mode)) {
       if (incomingImages.length) {
         assert.equal(incomingImages.length, 1); assert.equal(incomingImages[0].attachment.width, 2400); assert.equal(incomingImages[0].attachment.height, 1600);
         assert.equal(options.tools?.length || 0, 0, 'saved-image vision cannot inherit tools');
@@ -75,16 +135,16 @@ class FixtureAdapter extends LlmAdapter {
         }
         const search = results.find(result => result.images?.length);
         const args = search ? { action: 'read', imageId: search.images[0].imageId, question: '核对画面细节' } : { action: 'search', query: '网格' };
-        const id = search ? 'native-image-read' : 'native-image-search', name = 'wechat_image_memory', argumentsText = JSON.stringify(args);
+        const id = search ? 'native-image-read' : 'native-image-search', name = mode === 'generated-image-memory-tool' ? 'wechat_generated_image_memory' : 'wechat_image_memory', argumentsText = JSON.stringify(args);
         yield { type: 'block-start', index: 0, blockType: 'tool-call' }; yield { type: 'tool-call-delta', index: 0, id, name, argumentsDelta: argumentsText };
         yield { type: 'block-end', index: 0, block: { type: 'tool-call', id, name, arguments: argumentsText } };
         yield { type: 'finish', reason: { kind: 'tool-calls' } }; return;
       }
       assert(results.some(result => result.ok && typeof result.observation === 'string' && result.observation.includes('黑白网格')));
     }
-    if (['task-tool', 'task-denied', 'search-tool', 'memory-tool', 'memory-all-tool', 'empty-after-tool'].includes(mode) && !options.messages.some(message => message.role === 'tool')) {
-      const name = mode === 'search-tool' ? 'wechat_web_search' : mode.startsWith('memory-') || mode === 'empty-after-tool' ? 'wechat_memory' : 'wechat_task';
-      const args = name === 'wechat_task' ? { action: 'create', kind: 'message', content: '该喝水啦。', delaySeconds: 300 } : name === 'wechat_memory' ? mode === 'memory-all-tool' ? { section: 'all', query: null, offset: 0, revision: '' } : { section: 'conversation', query: '隔离链路' } : { query: '上海天气' };
+    if (['moments-like-tool', 'task-tool', 'task-denied', 'search-tool', 'memory-tool', 'memory-all-tool', 'empty-after-tool'].includes(mode) && !options.messages.some(message => message.role === 'tool')) {
+      const name = mode === 'moments-like-tool' ? 'wechat_moments_like_recent' : mode === 'search-tool' ? 'wechat_web_search' : mode.startsWith('memory-') || mode === 'empty-after-tool' ? 'wechat_memory' : 'wechat_task';
+      const args = name === 'wechat_moments_like_recent' ? { subject: 'speaker' } : name === 'wechat_task' ? { action: 'create', kind: 'message', content: '该喝水啦。', delaySeconds: 300 } : name === 'wechat_memory' ? mode === 'memory-all-tool' ? { section: 'all', query: null, offset: 0, revision: '' } : { section: 'conversation', query: '隔离链路' } : { query: '上海天气' };
       const block = { type: 'tool-call', id: 'native-fixture-tool-call', name, arguments: JSON.stringify(args) };
       yield { type: 'block-start', index: 0, blockType: 'tool-call' };
       yield { type: 'tool-call-delta', index: 0, id: block.id, name, argumentsDelta: block.arguments };
@@ -380,6 +440,77 @@ async function verifyPluginLifecycle(hostContext) {
   mode = 'task-denied';
   await runner.run({ text: '请翻译“五分钟后提醒我喝水”', signal: controller.signal, tools: [conversationTaskTool(scheduler, { ...scope, requestKey: 'quoted-example' }, () => {}, '请翻译“五分钟后提醒我喝水”')] });
   assert.equal(scheduler.list('fake-owner').tasks.length, 1, 'model tool calls cannot turn quoted examples into schedules');
+  mode = 'moments-like-tool';
+  const likeStore = new StateStore(path.join(root, 'moments-likes')), likeReads = [], likeWrites = [];
+  likeStore.configure('fake-owner', { enabled: true, privatePeers: ['fake-friend'], groups: [], prompt: '' });
+  let uncertainLike = false;
+  const likeChannel = new WechatChannel({ store: likeStore, runner, transport: {
+    status: () => ({ online: true, account: { id: 'fake-owner' }, momentsReadReady: true, momentsWriteReady: true }),
+    readMoments: async request => { likeReads.push(request); return { accountId: 'fake-owner', action: 'user', items: [
+      { id: '301', author: { userId: 'fake-friend', nickname: '合成好友' }, createdAt: 1700000301, text: '原生工具隔离测试', likedByCurrentAccount: false, deleted: false },
+    ], nextCursor: null }; },
+    writeMoments: async request => { likeWrites.push(request); if (uncertainLike) throw new ChannelError('MOMENTS_RESULT_UNKNOWN', '合成回执未知');
+      return { accountId: 'fake-owner', action: 'like', postId: request.query.postId, liked: true, delivery: 'server-ack' }; },
+  } });
+  try {
+    const tool = requestId => momentsLikeRequestTool({ like: (args, signal) => likeChannel.moments.likeRecent(args, scope, requestId, '帮我朋友圈点个赞', signal) });
+    const nativeResult = () => requests.at(-1).messages.filter(message => message.role === 'tool').flatMap(message => message.content || [])
+      .filter(block => block.type === 'text').map(block => JSON.parse(block.text)).find(value => value.requestedCount === 1);
+    await runner.run({ text: '帮我朋友圈点个赞', signal: controller.signal, tools: [tool('native-like-request')] });
+    assert.equal(likeReads[0].query.userId, 'fake-friend'); assert.equal(likeWrites[0].query.postId, '301');
+    assert.equal(nativeResult().liked, 1); assert.equal(nativeResult().results[0].delivery, 'server-ack');
+    await runner.run({ text: '帮我朋友圈点个赞', signal: controller.signal, tools: [tool('native-like-request')] });
+    assert.equal(nativeResult().reusedRequest, true); assert.equal(likeReads.length, 1); assert.equal(likeWrites.length, 1);
+    uncertainLike = true;
+    await runner.run({ text: '帮我朋友圈点个赞', signal: controller.signal, tools: [tool('native-like-unknown')] });
+    assert.equal(nativeResult().ok, false); assert.equal(nativeResult().liked, 0); assert.equal(nativeResult().results[0].state, 'unknown');
+    assert.equal(likeWrites.length, 2);
+  } finally { await likeChannel.close(); }
+  mode = 'moments-interaction-tool';
+  const interactionStore = new StateStore(path.join(root, 'moments-interactions')), interactionWrites = [];
+  interactionStore.configure('fake-owner', { enabled: true, privatePeers: ['fake-friend'], groups: [], prompt: '' });
+  interactionStore.setConversationSettings('fake-owner', 'private', 'fake-friend', { ...interactionStore.conversationSettings('fake-owner', 'private', 'fake-friend'), remoteEnabled: true, adminIds: ['fake-friend'] });
+  const interactionPosts = ['601', '602'].map((id, index) => ({ id, author: { userId: 'synthetic-friend-' + index, nickname: '合成好友 ' + index },
+    text: '合成真实读取来源 ' + index, createdAt: Math.floor(Date.now() / 1000) - index, imageCount: 0, deleted: false, contentAvailable: true, likedByCurrentAccount: false, visibleCommentEntries: 0, comments: [] }));
+  const interactionChannel = new WechatChannel({ store: interactionStore, runner, transport: {
+    status: () => ({ online: true, account: { id: 'fake-owner' }, momentsReadReady: true, momentsWriteReady: true }),
+    readMoments: async request => ({ accountId: 'fake-owner', action: request.query.action, source: 'wechat-sns-live', nextCursor: null,
+      items: structuredClone(request.query.action === 'detail' ? interactionPosts.filter(post => post.id === request.query.postId) : interactionPosts) }),
+    writeMoments: async request => { interactionWrites.push(request); return { accountId: 'fake-owner', action: request.query.action, postId: request.query.postId,
+      ...(request.query.action === 'like' ? { liked: true } : { text: request.query.text, commentId: String(900 + interactionWrites.length) }), delivery: 'server-ack' }; },
+  } });
+  try {
+    const tool = momentsInteractionTool({ manage: (args, signal) => interactionChannel.moments.manageInteractions(args, scope, 'native-interaction-request', signal) });
+    await runner.run({ text: '给朋友圈随机点赞评论两条，评论写合成原生评论', signal: controller.signal, tools: [tool] });
+    assert.equal(interactionWrites.length, 4);
+    await runner.run({ text: '核对同一轮朋友圈互动', signal: controller.signal, tools: [tool] });
+    assert.equal(interactionWrites.length, 4, 'native repeats must return the same finished round');
+    mode = 'moments-interaction-auto-tool';
+    await runner.run({ text: '合成测试：设置每30分钟检查最近2天，点赞2条评论1条，跳过已赞已评，然后停止本轮并关闭自动互动', signal: controller.signal, tools: [tool] });
+    const automatic = interactionChannel.momentsAutomation.interactions.automation.list('fake-owner');
+    assert.equal(automatic.settings.enabled, false); assert.equal(automatic.nextRunAt, 0); assert.equal(automatic.settings.intervalMinutes, 30);
+    assert.equal(automatic.settings.commentCount, 1); assert.equal(interactionWrites.length, 4, 'configuring a future schedule never sends an immediate interaction');
+    mode = 'moments-reply-schedule-tool';
+    interactionChannel.momentsAutomation.configure('fake-owner', { enabled: true, intervalMinutes: 17 });
+    const replyTool = momentsPublishingTools({ manage: (args, signal) => interactionChannel.moments.managePublishing(args, scope, 'native-reply-schedule-request', signal) })
+      .find(tool => tool.name === 'wechat_moments_reply_schedule');
+    await runner.run({ text: '合成测试：查询定时回复，开启好友朋友圈接续回复，每27分钟最多3条，然后只关闭好友接续，保留自己的回复设置', signal: controller.signal, tools: [replyTool] });
+    const replySettings = interactionChannel.momentsAutomation.rule('fake-owner').settings;
+    assert.equal(replySettings.friendRepliesEnabled, false); assert.equal(replySettings.enabled, true);
+    assert.equal(replySettings.maxFriendRepliesPerRun, 3); assert.equal(replySettings.intervalMinutes, 27); assert.equal(interactionWrites.length, 4);
+    interactionChannel.momentsAutomation.configure('fake-owner', { enabled: false });
+    mode = 'moments-images-tool';
+    const imageBytes = fs.readFileSync(path.join(repo, 'assets/stickers', fs.readdirSync(path.join(repo, 'assets/stickers'), { recursive: true }).find(file => file.endsWith('.png'))));
+    const imagePost = { ...interactionPosts[0], imageCount: 1, media: [{ id: 'native-photo', type: 'image' }] }; let imageReads = 0;
+    interactionChannel.transport.readMomentsImages = async request => {
+      imageReads++; assert.equal(request.query.postId, imagePost.id);
+      return { accountId: 'fake-owner', postId: imagePost.id, post: imagePost, source: 'wechat-sns-images-live', complete: true, imageCount: 1,
+        items: [{ index: 1, mediaId: 'native-photo', data: imageBytes.toString('base64'), bytes: imageBytes.length, mediaType: 'image/png', sha256: require('node:crypto').createHash('sha256').update(imageBytes).digest('hex') }] };
+    };
+    const imageTool = momentsImagesTool({ readImages: (args, signal) => interactionChannel.moments.readImages(args, scope, signal) });
+    await runner.run({ text: '读取这条朋友圈图片，补充评论信息', signal: controller.signal, tools: [imageTool] });
+    assert.equal(imageReads, 1); assert.equal(interactionWrites.length, 4, 'reading images cannot send a social write');
+  } finally { await interactionChannel.close(); }
   mode = 'search-tool'; const searches = [];
   await runner.run({ text: '上海天气怎么样', sessionId: first.sessionId, signal: controller.signal, tools: [webSearchTool(() => ({ search: async request => { searches.push(request); return { content: '合成测试天气', sources: [{ title: '测试来源', url: 'https://example.com/weather' }] }; } }))] });
   assert.deepEqual(requests.at(-1).messages.map(message => message.role), ['system', 'user', 'assistant', 'tool'], 'a resumed tool turn must retain its own call/result without old turns');
@@ -418,6 +549,32 @@ async function verifyPluginLifecycle(hostContext) {
   const imageRequests = requests.slice(imageRequestsBefore);
   assert(imageRequests.some(request => request.messages.some(message => message.content?.some(block => block.type === 'image'))));
   assert(requests.at(-1).messages.filter(message => message.role === 'tool').some(message => JSON.stringify(message).includes('重新读取原图')));
+  const generatedScope = { ...scope, collection: 'generated', senderId: 'fake-friend' },
+    generatedSource = { ...savedSource, messageId: 'native-generated-grid', direction: 'outgoing', senderId: scope.accountId, text: '请求生成网格' },
+    generatedAttachment = { type: 'image', resourceId: 'native-generated-grid', generation: {
+      jobId: 'abcdef012345', fileName: 'grid.png', requesterId: 'fake-friend', deliveryState: 'sent', serverMessageIds: ['9007199254740999'], prompt: '生成网格' } };
+  const generated = await channel.imageMemory.capture(generatedScope, generatedSource, generatedAttachment, original, controller.signal);
+  assert.equal(channel.imageMemory.content(generatedScope, generated.id).data, original.data);
+  const quoteKey = 'native-generated-image-quote', quoteTime = Date.now(), quoteMessage = {
+    id: quoteKey, time: quoteTime, chatType: scope.chatType, peerId: scope.peerId, sender: { id: scope.senderId },
+    message: [{ type: 'text', data: { text: '引用这张生成图，实际是什么样？' } },
+      { type: 'reply', data: { id: `wx:${scope.peerId}:9007199254740999`, messageType: 3, senderId: scope.accountId, senderName: 'Agent' } }],
+  };
+  store.remember(quoteKey, quoteTime, { ...scope, key: quoteKey, createdAt: quoteTime, state: 'skipped', question: '引用这张生成图，实际是什么样？' }, { accountId: scope.accountId, message: quoteMessage });
+  const quoted = await resolveMessageReferences(channel, scope,
+    store.history(scope.accountId, scope.chatType, scope.peerId).find(entry => entry.key === quoteKey), controller.signal);
+  assert.equal(quoted[0].images[0].id, generated.id);
+  mode = 'generated-image-memory-tool'; const generatedBefore = requests.length;
+  await runner.run({ text: '你刚才生成的网格是什么样？微信引用显示版本不支持，没有图片。\n\n' + referenceText(quoted), signal: controller.signal,
+    tools: [imageMemoryTool(channel.imageMemory, runner, generatedScope, () => {})] });
+  const generatedRequests = requests.slice(generatedBefore);
+  assert.equal(generatedRequests.length, 4, 'native search, read, isolated vision and final reply');
+  assert.equal(generatedRequests.filter(request => request.messages.some(message => message.content?.some(block => block.type === 'image'))).length, 1);
+  assert(generatedRequests.at(-1).messages.filter(message => message.role === 'tool').some(message => JSON.stringify(message).includes('重新读取原图')));
+  assert(JSON.stringify(generatedRequests[0].messages).includes(`image-memory://generated/${generated.id}`));
+  assert(store.history(scope.accountId, scope.chatType, scope.peerId).find(entry => entry.key === quoteKey).text.includes('重新读取原图'));
+  assert(channel.memory.view(scope).text.includes('重新读取原图'));
+  assert.equal(channel.imageMemory.list(scope).storedCount, 1, 'native generated memory must not overwrite received memory');
   channel.memory.append(scope, savedSource);
   const requestTransport = { media: async input => { assert.equal(input.resourceId, 'native-grid'); return original; } };
   const beforeArchiveOnly = requests.length;
@@ -516,6 +673,7 @@ async function verifyPluginLifecycle(hostContext) {
   report.assertions.push('native DSH preserves a 2400x1600 original within its admission budget', 'per-image thumbnail limits reach the native vision prompt');
   report.assertions.push('retired document retrieval and answering are absent from the native workbench');
   report.assertions.push('independent image memory keeps original bytes and generates a bounded thumbnail', 'native saved-image search and read supply the stored 2400x1600 original to isolated vision and return its observation');
+  report.assertions.push('native generated-image search and read retain the actual 2400x1600 pixels, bind the exact quoted message and persist visual observations into quotation history and memory');
   report.assertions.push('native natural-chat timer runs through the shared channel and real ACK boundary', 'natural decision and public reply use one native model request', 'natural skip produces no WeChat message or signature', 'natural chat inherits no search, task or host tools even with search enabled');
   report.assertions.push('native boilerplate reply keeps all formulas and returns a local review note with one model request');
   report.assertions.push('native complete replies beyond 12000 characters preserve all content and the ending with one model request');
@@ -527,6 +685,13 @@ async function verifyPluginLifecycle(hostContext) {
   report.assertions.push('native whitespace completion recovers once with the same model and reasoning effort',
     'repeated native emptiness stops after two requests without exposing reasoning', 'native executed tools are never replayed after an empty final answer',
     'native long-memory requests use bounded batches and a final ordered consolidation');
+  report.assertions.push('native DSH registers and executes wechat_moments_like_recent with actual-sender lookup and synthetic server acknowledgement',
+    'native repeated like requests reuse the durable selection without another read or write',
+    'native tool results preserve an unknown acknowledgement without claiming a successful like');
+  report.assertions.push('native DSH validates and executes random interaction preview then run with per-post synthetic like and comment receipts',
+    'native repeated interaction calls retain the chosen posts and do not resubmit',
+    'native DSH can list, configure, stop and disable revision-bound automatic interaction settings without sending immediate social actions');
+  report.assertions.push('native DSH registers the existing reply-schedule tool with independent friend continuation and own-comment switches, preserving settings through partial updates without immediate writes');
   fs.writeFileSync(path.join(repo, 'storage/logs/dsh-plugin-native-test.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
   for (const fork of forks.reverse()) await fork.dispose();

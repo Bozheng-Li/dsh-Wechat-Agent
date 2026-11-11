@@ -58,7 +58,7 @@ test('Tavily submits only the selected public query to its saved endpoint with i
   assert.equal(result.sources.length, 1); assert.equal(result.sources[0].snippet, '公开摘要');
 });
 
-test('a missing Tavily credential does not silently query another service or send a chat credential', async () => {
+test('missing dedicated credentials never route fallback through the host or a chat credential', async () => {
   let calls = 0;
   const service = new SearchService({ credentials: credentials({ DEEPSEEK_API_KEY: 'fixture-chat-key' }), web: { search: () => { calls++; } } }, { fetchImpl: () => { calls++; } });
   await assert.rejects(service.forConfig({ searchProvider: 'tavily' }).search({ query: '公开问题' }), error => error.code === 'WEB_PROVIDER_CREDENTIAL_MISSING');
@@ -83,6 +83,16 @@ test('legacy DSH searches retain the existing host route until a dedicated nativ
   const seen = [], service = new SearchService({ web: { search: async request => { seen.push(request); return { sources: [] }; } } });
   await service.forConfig({ searchProvider: 'dsh' }).search({ query: '公开问题', maxResults: 5 });
   assert.deepEqual(seen, [{ query: '公开问题', maxResults: 5 }]);
+});
+
+test('optional Tavily image search exposes actual image links without changing ordinary search requests', async () => {
+  const requests = [], service = new SearchService({ credentials: credentials({ [SEARCH_CREDENTIALS.tavily]: 'fixture-key' }) }, {
+    fetchImpl: async (_url, options) => { requests.push(JSON.parse(options.body)); return Response.json({ results: [], images: [{ url: 'https://example.com/a.png', description: '公开作品' }, { url: 'file:///secret' }] }); },
+  });
+  const result = await service.forConfig({ searchProvider: 'tavily' }).search({ query: '公开作品', includeImages: true }, execution().signal);
+  assert.equal(requests[0].include_images, true); assert.equal(result.images.length, 1);
+  await service.forConfig({ searchProvider: 'tavily' }).search({ query: '普通查询' }, execution().signal);
+  assert.equal(Object.hasOwn(requests[1], 'include_images'), false);
 });
 
 test('Tavily HTTP errors and invalid or oversized responses are safe and actionable', async () => {

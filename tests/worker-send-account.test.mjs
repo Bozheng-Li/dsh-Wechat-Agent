@@ -29,8 +29,16 @@ const mocks = {
     }
     async writeMoments(query, clientId) {
       if (query.action === 'rejected') throw Object.assign(new Error('微信拒绝朋友圈操作（ret=-2）'), { code: 'ERR_MOMENTS_WRITE_REJECTED', details: { delivery: 'rejected', rawPacket: 'PRIVATE_PACKET' } });
+      if (query.action === 'publish') throw Object.assign(new Error('微信已返回动态，屏蔽范围未确认'), { code: 'ERR_MOMENTS_WRITE_PROTOCOL', details: { delivery: 'unknown', rawPacket: 'PRIVATE_PACKET', publication: {
+        accountId: this.session.value.wxid, postId: query.text === 'malformed' ? 1 : '9007199254740999', createdAt: 1700000000,
+        textHash: 'f'.repeat(64), imageCount: 0, submittedBlockedUserIds: ['friend'], returnedBlockedUserIds: [],
+        audienceSelection: { blockedUserIds: ['friend'], blockedLabelIds: [] }, audienceSource: 'submitted-identifiers',
+        rawPacket: 'PRIVATE_PACKET', url: 'https://private.invalid/?token=PRIVATE_TOKEN'
+      } } });
       return { accountId: this.session.value.wxid, action: query.action, clientId, postId: query.postId, delivery: 'server-ack' };
     }
+    async readMoments() { throw Object.assign(new Error('这条动态暂不可读取（ret=-2）'), { code: 'ERR_MOMENTS_REJECTED', details: { ret: -2, rawPacket: 'PRIVATE_PACKET' } }); }
+    async readMomentsPublication(query) { return { accountId: this.session.value.wxid, postId: query.postId, readOnly: true }; }
     async close() {}
   }`,
   './protocol/login.ts': `export class QrLoginManager { status() { return { state: 'idle' }; } async close() {} }`,
@@ -119,6 +127,28 @@ test('unexpected protocol text and nonnumeric status remain private at the worke
   const response = await f.call('send', { accountId: 'worker-current-account', ...message, peerId: 'unsafe-protocol@chatroom' });
   assert.match(response.error.message, /协议校验未通过/); assert.equal(response.error.details.ret, undefined);
   assert(!JSON.stringify(response).includes('PRIVATE_')); assert(!JSON.stringify(response).includes('raw packet'));
+});
+
+test('SNS read IPC retains a numeric rejection and verifies own-publication read scope without any send', async t => {
+  const f = await workerFixture(t), accountId = 'worker-current-account', scopeKey = 'owner:worker-current-account';
+  const result = await f.call('moments.read', { accountId, scopeKey, query: { action: 'comments', postId: '9007199254740999' } });
+  assert.equal(result.ok, false); assert.equal(result.error.details.ret, -2); assert(!JSON.stringify(result).includes('PRIVATE_PACKET'));
+  const read = await f.call('moments.publication', { accountId, scopeKey, query: { postId: '9007199254740999' } });
+  assert.equal(read.ok, true); assert.equal(read.value.readOnly, true);
+  assert.equal((await f.call('moments.publication', { accountId: 'other', scopeKey, query: { postId: '1' } })).error.code, 'ACCOUNT_CHANGED');
+  assert.equal((await f.call('moments.publication', { accountId, query: { postId: '1' } })).error.code, 'ERR_INVALID_MOMENTS_QUERY');
+  assert.equal((await f.call('status')).value.sent, 0);
+});
+
+test('SNS publication uncertainty crosses IPC only as validated metadata and never includes raw response credentials', async t => {
+  const f = await workerFixture(t), args = { accountId: 'worker-current-account', clientId: 'sns_' + 'b'.repeat(64), query: { action: 'publish', text: 'valid' } };
+  const result = await f.call('moments.write', args);
+  assert.equal(result.ok, false); assert.equal(result.error.details.snsDelivery, 'unknown');
+  assert.equal(result.error.details.publication.postId, '9007199254740999');
+  assert.deepEqual(result.error.details.publication.submittedBlockedUserIds, ['friend']);
+  assert(!JSON.stringify(result).includes('PRIVATE_')); assert(!JSON.stringify(result).includes('private.invalid'));
+  const invalid = await f.call('moments.write', { ...args, query: { action: 'publish', text: 'malformed' } });
+  assert.equal(invalid.error.details.publication, undefined); assert.equal(invalid.error.details.snsDelivery, 'unknown');
 });
 
 test('SNS write IPC refuses stale accounts and invalid request IDs, and preserves only safe rejection metadata', async t => {

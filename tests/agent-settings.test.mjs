@@ -15,7 +15,7 @@ function fixture({ hostTemperature, listModels, responseText } = {}) {
     const hooks = [], scope = { hooks, rules: [], prompt: null,
       tools: { restrict: rule => scope.rules.push(rule), guard: guard => { scope.guard = guard; } },
       systemPrompt: { suppressRuntimeContext: () => { scope.suppressed = true; }, section: section => { scope.prompt = section; } },
-      on: (event, hook) => { assert.equal(event, 'agent/request'); hooks.push(hook); }
+      on: (event, hook) => { if (event === 'llm/stream') return; assert.equal(event, 'agent/request'); hooks.push(hook); }
     };
     scopes.push(scope); options.setup(scope);
     const base = { ...options.agentOptions, ...(hostTemperature === undefined ? {} : { temperature: hostTemperature }) };

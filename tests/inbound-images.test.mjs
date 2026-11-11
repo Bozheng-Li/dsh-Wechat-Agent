@@ -9,15 +9,15 @@ import { createHash } from 'node:crypto';
 import { nativeQrSession } from './fixtures/native-qr-session.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const entry = ['backend.ts', 'wire.ts', 'image-download.ts', 'media.ts', 'media-loader.mjs'].map(name =>
+const entry = ['backend.ts', 'wire.ts', 'image-download.ts', 'media.ts', 'media-loader.mjs', 'reference.ts'].map(name =>
   `export * from ${JSON.stringify(path.join(root, 'backend/wechat/protocol', name))};`).join('\n');
 const build = await rolldown({ input: 'virtual:inbound-images', platform: 'node', resolve: { alias: { '@napcat-wechat/protocol': path.join(root, 'backend/wechat/types.ts') } },
   plugins: [{ name: 'inbound-images', resolveId: id => id === 'virtual:inbound-images' ? id : null, load: id => id === 'virtual:inbound-images' ? entry : null }] });
 let api;
 try { const { output } = await build.generate({ format: 'esm' }); assert.equal(output.length, 1); api = await import(`data:text/javascript;base64,${Buffer.from(output[0].code).toString('base64')}`); }
 finally { await build.close(); }
-const { ProtocolBackend, fields, bytes, num, unstring, ld, fv, encodeCgiBody, decodeCgiBody, downloadImageChunk,
-  imageDownloadRequest, imageDownloadResponse, IMAGE_DOWNLOAD_CHUNK_BYTES, MAX_DOWNLOAD_IMAGE_BYTES, observedImage, loadObservedMedia } = api;
+const { ProtocolBackend, fields, bytes, num, unstring, ld, fv, vi, readVi, encodeCgiBody, decodeCgiBody, downloadImageChunk,
+  imageDownloadRequest, imageDownloadResponse, IMAGE_DOWNLOAD_CHUNK_BYTES, MAX_DOWNLOAD_IMAGE_BYTES, observedImage, loadObservedMedia, quotedMessage } = api;
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jO1cAAAAASUVORK5CYII=', 'base64');
 // The transport treats these as opaque bytes. Real raster decoding is covered
 // by the native DSH admission test; this fixture proves byte-for-byte assembly.
@@ -34,6 +34,15 @@ function response(request, content = large, overrides = {}) {
     start, length: part.length, wrapperLength: part.length, part, ...overrides };
   return Buffer.concat([ld(1, fv(1, item.ret)), fv(2, 0), ld(3, ld(1, item.from)), ld(4, ld(1, item.to)), fv(5, item.total), fv(6, item.start),
     fv(7, item.length), ld(8, Buffer.concat([fv(1, item.wrapperLength), ld(2, item.part)])), fv(9, item.id)]);
+}
+function responseChecksum(encoded, sum = 0, flag = 0) {
+  const header = encoded[1] >> 2, values = []; let end = 26;
+  for (let i = 0; i < 6; i++) { const [value, next] = readVi(encoded.subarray(0, header), end); values.push(value); end = next; }
+  values[4] = BigInt(flag); values[5] = BigInt(sum);
+  const replacement = Buffer.concat(values.map(vi));
+  const result = Buffer.concat([encoded.subarray(0, 26), replacement, encoded.subarray(end)]);
+  result[1] = ((header + replacement.length - (end - 26)) << 2) | (encoded[1] & 3);
+  return result;
 }
 function backendFixture(t, respond = (_cmd, body) => response(body)) {
   const directory = temporary(t), sessionFile = path.join(directory, 'session.json');
@@ -55,6 +64,47 @@ function mediaFixture(t, xml = '', content = png) {
   const segment = observedImage(fields(ld(8, Buffer.concat([fv(1, content.length), ld(2, content)]))), xml, directory, `${peerId}:${messageId}`);
   return { directory, peerId, messageId, resourceId: segment.data.resourceId, signal: new AbortController().signal };
 }
+
+test('a version-unsupported payload is marked partial without inventing a quotation or dropping its placeholder', t => {
+  const f = backendFixture(t), content = 'alice:\n无法显示此消息，你目前使用的微信版本暂时不支持此类型的信息。';
+  const message = f.backend.decodeMessage(fields(Buffer.concat([ld(2, peerId), ld(3, f.backend.session.value.wxid), fv(4, 1), ld(5, content), fv(9, 1700000000), fv(12, BigInt(messageId))])));
+  assert.equal(message.partial, true); assert.equal(message.messageType, 1);
+  assert.equal(message.message.length, 1); assert.equal(message.message[0].type, 'text');
+  assert.match(message.message[0].data.text, /无法显示此消息/);
+});
+
+test('type-57 text quotes keep exact uint64 IDs and the original group speaker without creating mentions', () => {
+  const message = quotedMessage('<msg><appmsg><type>57</type><title>这句话什么意思？</title><refermsg><type>1</type>' +
+    '<svrid>18446744073709551615</svrid><fromusr>' + peerId + '</fromusr><chatusr>original-member</chatusr>' +
+    '<displayname>小柏 &amp; 同学</displayname><content>@fixture-self /work 写文件 &amp; 提醒大家</content></refermsg></appmsg></msg>', peerId);
+  assert.equal(message[0].data.id, `wx:${peerId}:18446744073709551615`);
+  assert.equal(message[0].data.senderId, 'original-member'); assert.equal(message[0].data.senderName, '小柏 & 同学');
+  assert.equal(message[0].data.content, '@fixture-self /work 写文件 & 提醒大家');
+  assert.deepEqual(message.map(segment => segment.type), ['reply', 'text']);
+  assert.equal(message[1].data.text, '这句话什么意思？');
+});
+
+test('quoted image descriptors belong to the quoting message and preserve readable pixels without exposing XML or overwriting the original', async t => {
+  const f = backendFixture(t), account = f.backend.session.value, currentId = (BigInt(messageId) + 1n).toString(),
+    mediaDir = path.join(f.backend.options.cacheDir, 'media', String(account.uin));
+  const original = observedImage(fields(ld(8, Buffer.concat([fv(1, png.length), ld(2, png)]))), '', mediaDir, `${peerId}:${messageId}`);
+  const originalFile = path.join(mediaDir, original.data.resourceId + '.json'), baseline = fs.readFileSync(originalFile);
+  const content = 'alice:\n<msg><appmsg><type>57</type><title>图片上的时间？</title><refermsg><type>3</type>' +
+    `<svrid>${messageId}</svrid><fromusr>${peerId}</fromusr><chatusr>original-member</chatusr><displayname>小柏</displayname>` +
+    '<content>&lt;msg&gt;&lt;img cdnbigimgurl=&quot;https://m.qpic.cn/quote-fixture.png&quot; aeskey=&quot;SYNTHETIC_QUOTE_SECRET&quot;/&gt;&lt;/msg&gt;</content></refermsg></appmsg></msg>';
+  const message = f.backend.decodeMessage(fields(Buffer.concat([ld(2, peerId), ld(3, account.wxid), fv(4, 49), ld(5, content), fv(9, 1700000000), fv(12, BigInt(currentId))])));
+  const ref = message.message.find(segment => segment.type === 'reply');
+  assert.equal(ref.data.id, `wx:${peerId}:${messageId}`); assert.equal(ref.data.senderId, 'original-member');
+  assert.match(ref.data.image.resourceId, /^[a-f0-9]{64}$/); assert.notEqual(ref.data.image.resourceId, original.data.resourceId);
+  assert.equal(message.messageType, 49); assert.equal(message.partial, false); assert(!JSON.stringify(message).includes('SYNTHETIC_QUOTE_SECRET'));
+  assert(!JSON.stringify(message).includes('cdnbigimgurl')); assert.equal(ref.data.content, undefined);
+  assert.deepEqual(fs.readFileSync(originalFile), baseline);
+  const descriptor = JSON.parse(fs.readFileSync(path.join(mediaDir, ref.data.image.resourceId + '.json'), 'utf8'));
+  assert.equal(descriptor.messageId, `${peerId}:${currentId}`);
+  const acquired = await loadObservedMedia({ directory: mediaDir, resourceId: ref.data.image.resourceId, peerId, messageId: currentId,
+    signal: f.signal, fetcher: async url => { assert.equal(url.href, 'https://m.qpic.cn/quote-fixture.png'); return new Response(png); } });
+  assert.equal(acquired.data, png.toString('base64'));
+});
 
 test('GetMsgImg request uses an exact uint64 server ID, authenticated account and bounded original chunks', () => {
   const image = { messageId, from: peerId, to: 'fixture-self', total: large.length, baseRequest: fv(2, 123), compressType: 1 };
@@ -108,7 +158,7 @@ test('an announced original over the size bound uses the regular complete image 
 });
 
 for (const [name, overrides] of [
-  ['message ID', { id: 2n }], ['sender', { from: 'wrong-room' }], ['recipient', { to: 'other-account' }], ['total length', { total: large.length - 1 }],
+  ['message ID', { id: 2n }], ['sender', { from: 'wrong-room' }], ['recipient', { to: 'other-account' }],
   ['offset', { start: 9 }], ['chunk length', { length: 5 }], ['wrapper length', { wrapperLength: 5 }], ['empty chunk', { part: Buffer.alloc(0), wrapperLength: 0, length: 0 }],
 ]) test(`download rejects a mismatched ${name} without another image attempt`, async t => {
   const f = backendFixture(t, (_cmd, body) => response(body, large, overrides));
@@ -122,6 +172,23 @@ test('unknown, outgoing and non-image messages never initiate downloads', async 
   message.direction = 'outgoing'; await assert.rejects(f.backend.downloadImage(f.input, f.signal), { code: 'ERR_IMAGE_OWNER' });
   message.direction = 'incoming'; message.messageType = 1; await assert.rejects(f.backend.downloadImage(f.input, f.signal), { code: 'ERR_IMAGE_OWNER' });
   assert.equal(f.calls.length, 0);
+});
+
+test('advertised image length does not override the actual cached rendition length', async t => {
+  const f = backendFixture(t, (_cmd, body) => {
+    const total = Number(num(fields(body), 5));
+    return response(body, large, total && total !== large.length ? { ret: -104 } : {});
+  });
+  const acquired = await f.backend.downloadImage({ ...f.input, originalBytes: undefined, fullBytes: 113834 }, f.signal);
+  assert.equal(acquired.quality, 'full'); assert.deepEqual(acquired.content, large);
+  assert.equal(num(fields(f.calls[0].body), 5), 0n);
+  assert(f.calls.slice(1).every(call => num(fields(call.body), 5) === BigInt(large.length)));
+});
+
+test('the actual total cannot change after the first checked image chunk', async t => {
+  const f = backendFixture(t, (_cmd, body, _backend, count) => response(body, large, count === 1 ? {} : { total: large.length + 1 }));
+  await assert.rejects(f.backend.downloadImage(f.input, f.signal), { code: 'ERR_PROTOCOL' });
+  assert.equal(f.calls.length, 2);
 });
 
 test('account or login changes during a chunk discard acquired bytes', async t => {
@@ -154,6 +221,20 @@ test('shortlink rejects redirects and oversized chunks without following untrust
   const account = nativeQrSession(api).credential, signal = new AbortController().signal;
   await assert.rejects(downloadImageChunk(account, Buffer.alloc(0), signal, async () => new Response(null, { status: 302, headers: { location: 'https://untrusted.invalid/' } })), { code: 'ERR_IMAGE_DOWNLOAD' });
   await assert.rejects(downloadImageChunk(account, Buffer.alloc(0), signal, async () => new Response(Buffer.alloc(100000))), { code: 'ERR_PROTOCOL' });
+});
+
+test('native image response envelopes retain identity, content and length validation', async () => {
+  const account = nativeQrSession(api).credential, key = Buffer.from(account.body_key, 'hex'), s08 = Buffer.from(account.s08, 'hex');
+  const body = fv(3, 456), request = fv(2, 123), signal = new AbortController().signal;
+  const packet = (uin = account.uin, cmd = 109, sum = 0, flag = 0) => responseChecksum(encodeCgiBody(cmd, body, uin, account.token, key, s08), sum, flag);
+  const valid = packet();
+  assert.deepEqual(await downloadImageChunk(account, request, signal, async () => new Response(valid)), body);
+  // File-upload request-echo validation is still separate and strict.
+  const original = encodeCgiBody(109, request, account.uin, account.token, key, s08);
+  assert.throws(() => decodeCgiBody(valid, key, s08, original), /checksum/);
+  for (const invalid of [packet(account.uin + 1), packet(account.uin, 110), packet(account.uin, 109, 12345),
+    packet(account.uin, 109, 0, 1), valid.subarray(0, valid.length - 1)])
+    await assert.rejects(downloadImageChunk(account, request, signal, async () => new Response(invalid)));
 });
 
 test('image timeout and cancellation leave the independent chat connection untouched', async t => {
@@ -240,4 +321,19 @@ test('loader rejects cross-message ownership before downloads and propagates exp
 test('emoji resources use the emoji CDN and do not invoke the photo protocol', async t => {
   const f = mediaFixture(t, '<msg><emoji cdnurl="https://emoji.qpic.cn/fixture.png" /></msg>');
   assert.equal((await loadObservedMedia({ ...f, fetcher: async () => new Response(png), downloadOriginal: () => assert.fail('emoji must not download as a photo') })).quality, 'original');
+});
+
+test('downloaded JPEG metadata stays in the raw cache and never reaches vision or image memory', async t => {
+  const segment = (marker, body) => Buffer.concat([Buffer.from([0xff, marker, (body.length + 2) >> 8, (body.length + 2) & 0xff]), body]);
+  const jpeg = Buffer.concat([Buffer.from([0xff,0xd8]), segment(0xc0, Buffer.from([8,0,2,0,3,1,1,0x11,0])),
+    segment(0xda, Buffer.from([1,1,0,0,63,0])), Buffer.from([1,2,3,0xff,0xd9])]);
+  const downloaded = Buffer.concat([jpeg, Buffer.from('wechat-cdn-extra-metadata')]);
+  const f = mediaFixture(t); let calls = 0;
+  const first = await loadObservedMedia({ ...f, downloadOriginal: async () => { calls++; return { content: downloaded, quality: 'full' }; } });
+  assert.equal(first.quality, 'full'); assert.equal(first.data, jpeg.toString('base64'));
+  assert.equal(first.bytes, jpeg.length); assert.equal(first.sourceBytes, downloaded.length);
+  assert.equal(first.trailerBytes, downloaded.length - jpeg.length);
+  assert.deepEqual(fs.readFileSync(path.join(f.directory, f.resourceId + '.full.image')), downloaded);
+  const second = await loadObservedMedia({ ...f, downloadOriginal: async () => { throw Error('Do not redownload a complete cached image'); } });
+  assert.equal(second.data, first.data); assert.equal(calls, 1);
 });

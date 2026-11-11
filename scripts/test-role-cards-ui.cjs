@@ -1,0 +1,52 @@
+const assert = require('node:assert/strict');
+
+module.exports = async function verifyRoleCards({ evaluate, waitFor, click, clickText, input, fixture, screenshot, assertLayout, check, resize }) {
+  const select = '[aria-label="角色卡所属会话"]', label = '[aria-label="角色卡名称"]', style = '[aria-label="表达方式"]';
+  const scope = { chatType: 'private', peerId: 'wxid_alice' };
+  const document = await fixture('seedLongMemorySources'), original = document.markdown;
+  await click('[data-testid="nav-memory"]'); await clickText('会话角色卡');
+  await waitFor(selector => isUsable(document.querySelector(selector)), [select]);
+  const alice = await evaluate(selector => [...document.querySelector(selector).options].find(option => /Alice/.test(option.textContent)).value, select);
+  await input(select, alice); await waitFor(selector => isUsable(document.querySelector(selector)), [label]);
+  assert.equal((await fixture('roleCard', scope)).inherited, true);
+  await input(label, '聊得来的同事'); await input('[aria-label="平时称呼对方"]', 'Alice');
+  await input(style, '自然简短，讨论方案时先说结论。');
+  assert.equal(await evaluate(selector => document.querySelector(selector).disabled, select), true);
+  await fixture('failNext', { endpoint: 'memory.role.save' }); await clickText('保存角色卡');
+  await waitFor(() => [...document.querySelectorAll('[role="alert"]')].some(node => node.textContent.includes('模拟保存失败')));
+  assert.equal((await fixture('roleCard', scope)).inherited, true);
+  assert.equal(await evaluate(selector => document.querySelector(selector).value, style), '自然简短，讨论方案时先说结论。');
+  check('failed role save keeps both the persisted default and the editable draft');
+  await clickText('保存角色卡'); await waitFor(() => document.querySelector('#wa-memory-panel-roles [role="status"]')?.textContent.includes('已保存'));
+  const saved = await fixture('roleCard', scope); assert.equal(saved.card.addressAs, 'Alice');
+  await clickText('长期记忆'); await clickText('会话角色卡'); await input(select, alice);
+  await waitFor(selector => document.querySelector(selector)?.value === '聊得来的同事', [label]);
+  assert.equal((await fixture('globalMemory')).markdown, original);
+  check('saved role survives page remount without rewriting any long-term fact');
+  for (const [width, theme] of [[1280, 'light'], [430, 'dark'], [320, 'light']]) {
+    resize(width, 1000); await assertLayout('role card width ' + width); await screenshot('role-card-' + width + '-' + theme, theme, '[data-testid="role-cards-page"]');
+  }
+  check('role editor fits desktop, 430px and 320px layouts');
+  resize(1280, 940);
+  const group = await evaluate(selector => [...document.querySelector(selector).options].find(option => /产品讨论组/.test(option.textContent)).value, select);
+  await input(select, group); await waitFor(selector => isUsable(document.querySelector(selector)) && document.querySelector(selector).value === '', [label]);
+  assert.equal((await fixture('roleCard', { chatType: 'group', peerId: 'group_alpha@chatroom' })).inherited, true);
+  assert.equal(await evaluate(selector => document.querySelector(selector).value, style), '');
+  check('another conversation inherits defaults and cannot see the saved private card');
+  await input(select, alice); await waitFor(selector => document.querySelector(selector)?.value === '聊得来的同事', [label]);
+  await clickText('恢复默认角色'); await clickText('保存角色卡');
+  await waitFor(() => document.querySelector('#wa-memory-panel-roles [role="status"]')?.textContent.includes('已保存'));
+  const reset = await fixture('roleCard', scope); assert(reset.inherited); assert.equal(reset.roleId, saved.roleId);
+  assert.equal((await fixture('globalMemory')).markdown, original);
+  check('resetting a card preserves its stable identity and every existing fact');
+  await fixture('holdNext', { endpoint: 'memory.role.get' }); await clickText('重新读取角色卡');
+  await waitFor(async () => (await window.__uiFixture('heldRequest', { endpoint: 'memory.role.get' })).started);
+  await fixture('switchAccount');
+  await waitFor(selector => !document.querySelector(selector) && document.querySelector('#wa-memory-tab-conversation')?.getAttribute('aria-selected') === 'true', [select]);
+  await fixture('releaseRequest', { endpoint: 'memory.role.get' });
+  await clickText('会话角色卡');
+  await waitFor(selector => document.querySelector(selector)?.value === '', [select]);
+  await waitFor(selector => !document.querySelector(selector), [label]);
+  assert(!await evaluate(() => document.querySelector('#wa-memory-panel-roles').textContent.includes('聊得来的同事')));
+  check('account switch discards the selected card and late read results');
+};
