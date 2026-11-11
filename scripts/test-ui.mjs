@@ -271,9 +271,15 @@ const runner = { selection: () => store.modelChoice() || { provider: 'fixture', 
     if (input.mode !== 'moments-publish') throw new Error('The UI fixture must never generate a model response');
     momentGenerationCalls++;
     if (momentGenerationMode === 'fail') { momentGenerationMode = 'normal'; throw new ChannelError('MOMENTS_FIXTURE_FAILED', '界面测试：正文生成失败，未发布'); }
-    if (momentGenerationMode === 'hold') await momentGenerationGate.promise;
+    if (momentGenerationMode === 'hold') {
+      let abort;
+      try { await Promise.race([momentGenerationGate.promise, new Promise((resolve, reject) => {
+        abort = () => reject(input.signal.reason); input.signal.addEventListener('abort', abort, { once: true });
+        if (input.signal.aborted) abort();
+      })]); } finally { input.signal.removeEventListener('abort', abort); }
+    }
     input.signal.throwIfAborted(); const request = JSON.parse(input.text);
-    return { text: JSON.stringify({ theme: request.themes[0] || '随手想法', text: '合成 AI 草稿：冰箱里大家很冷静，仅本地验证。', imagePrompt: request.image ? '合成配图要求' : '',
+    return { text: JSON.stringify({ theme: request.themes[0] || '随手想法', text: request.research?.unavailable ? '合成纯文字草稿：给忙碌的一天留一点空白，仅本地验证。' : '合成 AI 草稿：冰箱里大家很冷静，仅本地验证。', imagePrompt: request.image ? '合成配图要求' : '',
       materialIds: request.materials.slice(0, 2).map(item => item.id), imageMaterialId: request.imageMode === 'library' ? request.materials.find(item => item.kind === 'image' && item.imageUse === 'publish')?.id || '' : '' }) }; } };
 let channel = new WechatChannel({ store, runner, transport: worker });
 if (interactionsFixture) channel.momentsAutomation.interactions.automation.start();

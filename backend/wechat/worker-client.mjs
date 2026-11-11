@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import path from "node:path";
 import { ChannelError } from "../../shared/contracts.mjs";
+import { MOMENTS_PUBLISH_RPC_TIMEOUT_MS } from '../../shared/moments-publishing.mjs';
 
 export class WorkerClient extends EventEmitter {
   constructor(root, resources, options = {}) {
@@ -68,7 +69,7 @@ export class WorkerClient extends EventEmitter {
   readMomentsPublication(params, signal) { return this.call('moments.publication', params, { signal, timeoutMs: 20000 }); }
   readMomentsImages(params, signal) { return this.call('moments.images', params, { signal, timeoutMs: 100000 }); }
   readMomentsAudience(params, signal) { return this.call('moments.audience', params, { signal, timeoutMs: 300000 }); }
-  writeMoments(params, signal) { return this.call('moments.write', params, { signal, timeoutMs: 600000 }); }
+  writeMoments(params, signal) { return this.call('moments.write', params, { signal, timeoutMs: params?.query?.action === 'publish' ? MOMENTS_PUBLISH_RPC_TIMEOUT_MS : 600000 }); }
   async close() {
     if (this.closing) return this.closing;
     this.closed = true;

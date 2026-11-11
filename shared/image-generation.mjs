@@ -1,5 +1,7 @@
 import { ChannelError } from './contracts.mjs';
 
+export const IMAGE_GENERATION_MAX_TIMEOUT_SECONDS = 3600;
+
 const legacyFields = ['enabled', 'endpoint', 'model', 'size', 'quality', 'responseFormat', 'timeoutSeconds'];
 const providerFields = ['id', 'name', 'endpoint', 'models', 'defaultModel', 'size', 'quality', 'responseFormat', 'timeoutSeconds'];
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -30,8 +32,8 @@ export function imageGenerationProvider(input) {
   if (new Set(value.models).size !== value.models.length) invalid('同一接口的生图模型名不能重复');
   if (!text(value.defaultModel, 200) || !text(value.quality, 80) || typeof value.size !== 'string' ||
       !/^(?:auto|\d{2,4}x\d{2,4})?$/.test(value.size) || !['auto', 'b64_json', 'url'].includes(value.responseFormat) ||
-      !Number.isSafeInteger(value.timeoutSeconds) || value.timeoutSeconds < 10 || value.timeoutSeconds > 600)
-    invalid('请检查生图模型、尺寸、返回格式和超时（10–600 秒）');
+      !Number.isSafeInteger(value.timeoutSeconds) || value.timeoutSeconds < 10 || value.timeoutSeconds > IMAGE_GENERATION_MAX_TIMEOUT_SECONDS)
+    invalid('请检查生图模型、尺寸、返回格式和超时（10–3600 秒）');
   value.endpoint = imageGenerationEndpoint(value.endpoint);
   value.name = value.name.trim(); value.defaultModel = value.defaultModel.trim(); value.quality = value.quality.trim();
   if (value.models.length && !value.defaultModel) value.defaultModel = value.models[0];

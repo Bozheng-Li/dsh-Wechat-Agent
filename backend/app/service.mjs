@@ -358,6 +358,7 @@ export function createPluginService({
         const pending = (async () => {
           switch (endpoint) {
             case 'moments.publishing.configure': return manager.configure(account.id, payload.settings, combined, check);
+            case 'moments.publishing.cancel': return manager.cancel(account.id);
             case 'moments.plans.save': return manager.savePlan(account.id, payload.settings, payload.id, requestId(), combined, check);
             case 'moments.plans.enable': return manager.setEnabled(account.id, payload.id, payload.enabled);
             case 'moments.plans.delete': return manager.removePlan(account.id, payload.id);

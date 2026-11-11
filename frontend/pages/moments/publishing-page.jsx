@@ -8,15 +8,15 @@ import { ArrangementFields } from './arrangement-fields.jsx';
 
 const labels = { generating: 'AI 生成中', draft: '待审核草稿', sending: '等待微信确认', published: '微信已确认发布', failed: '生成或验证失败',
   rejected: '未取得发布确认', unknown: '结果不明，未重发', 'published-unverified': '已发布，屏蔽范围待核实', deleted: '已确认删除', skipped: '本次已跳过', discarded: '已放弃' };
-const stages = { research: '正在查找公开资料', text: '正在生成正文', reviewing: '正在检查内容是否适合公开', 'content-review': '正在检查正文与配图方案', image: '正在生成配图', 'image-review': '正在核对实际配图', sending: '正在等待微信确认' };
+const stages = { research: '正在查找公开资料', text: '正在生成正文', reviewing: '正在检查内容是否适合公开', 'content-review': '正在检查正文与配图方案', image: '正在生成配图', 'image-review': '正在核对实际配图', 'text-review': '正在准备纯文字内容', sending: '正在等待微信确认' };
 const times = plan => plan.schedule.type === 'once' ? plan.schedule.onceAt.replace('T', ' ') :
   (plan.schedule.type === 'weekly' ? '每周 ' + plan.schedule.weekdays.map(day => ['一', '二', '三', '四', '五', '六', '日'][day - 1]).join('、') : '每天') + ' ' + plan.schedule.times.join('、');
 const fresh = () => ({ ...structuredClone(MOMENTS_PLAN_DEFAULTS), themes: [], useMaterials: true,
   image: { ...MOMENTS_PLAN_DEFAULTS.image, mode: 'library' } });
 
-export function MomentsPublishingPage({ state, status, audience, audienceError, loadAudience }) {
+export function MomentsPublishingPage({ rpc, state, status, audience, audienceError, loadAudience }) {
   const data = state.data?.publishing, plans = data?.plans ?? [], runs = data?.runs ?? [];
-  const [selectedRuns, setSelectedRuns] = useState([]);
+  const [selectedRuns, setSelectedRuns] = useState([]), [stopping, setStopping] = useState(false), [stopError, setStopError] = useState('');
   const [global, setGlobal] = useState({ ...MOMENTS_PUBLISH_DEFAULTS }), [globalDirty, setGlobalDirty] = useState(false);
   const [globalError, setGlobalError] = useState(''), [showHistory, setShowHistory] = useState(false);
   const [editor, setEditor] = useState(null), [themesText, setThemesText] = useState(''), [timesText, setTimesText] = useState(''), [error, setError] = useState('');
@@ -73,6 +73,16 @@ export function MomentsPublishingPage({ state, status, audience, audienceError, 
     if (value) { await showRun(value); state.setNotice(value.state === 'draft'
       ? '预览已生成并保存为草稿，尚未发布。' : '已读取原预览记录：' + (labels[value.state] || '请核对状态') + '。'); }
   };
+  const stop = async () => {
+    if (stopping) return;
+    setStopping(true); setStopError('');
+    try {
+      await rpc('moments.publishing.cancel', { accountId: status.account.id }, AbortSignal.timeout(10000));
+      state.setNotice('已停止本次处理，后续计划保留；已提交的发布请核对微信回执。');
+      await state.refresh(true);
+    } catch (error) { setStopError(error.message); }
+    finally { setStopping(false); }
+  };
   const imageSettings = status.imageGeneration, providers = imageSettings?.providers ?? [], selectedProvider = providers.find(row => row.id === (editor?.settings.image.providerId || imageSettings?.defaultProviderId));
   return <div className="wa-moments-publishing wa-section-stack" data-testid="moments-publishing">
     <section className="wa-moments-global">
@@ -80,7 +90,9 @@ export function MomentsPublishingPage({ state, status, audience, audienceError, 
       <p className="wa-wb-note">主题可留空，由 AI 结合人设与可用素材选择内容。总开关和计划都开启后才执行；没有合适内容可以跳过，发布结果不明时暂停计划。</p>
       {data?.error && <p role="alert" className="wa-alert is-error">{data.error}</p>}
       {state.refreshError && <p role="alert" className="wa-alert is-error">{state.refreshError}</p>}
-      {data?.running && <p className="wa-wb-note" role="status">{stages[activeRun?.stage] || labels[activeRun?.state] || '正在处理'} · 已等待 {Math.floor(elapsed / 60)} 分 {elapsed % 60} 秒，本次操作最多 5 分钟。</p>}
+      {data?.running && <div className="wa-wb-between"><p className="wa-wb-note" role="status">{stages[activeRun?.stage] || labels[activeRun?.state] || '正在处理'} · 已等待 {Math.floor(elapsed / 60)} 分 {elapsed % 60} 秒，本次操作最多 1 小时。</p><Button quiet disabled={stopping} onClick={stop}>停止本次发布处理</Button></div>}
+      <p className="wa-wb-note">生图失败会改发纯文字；联网取材失败会改写不依赖实时资料的内容。</p>
+      {stopError && <p className="wa-alert is-error" role="alert">{stopError}</p>}
       <label className="wa-wb-check"><input aria-label="开启朋友圈自动发布" type="checkbox" disabled={state.busy} checked={global.enabled} onChange={e => { setGlobal({ ...global, enabled: e.target.checked }); setGlobalDirty(true); }} />开启朋友圈自动发布</label>
       <div className="wa-wb-generator">
         {[["maxPostsPer24Hours", "24 小时最多自动发布", 1, 24], ["minGapMinutes", "自动发布最短间隔（分钟）", 0, 1440]].map(([key, label, min, max]) => <label key={key}>{label}<input aria-label={label} type="number" min={min} max={max} value={global[key]} onChange={e => { setGlobal({ ...global, [key]: Number(e.target.value) }); setGlobalDirty(true); }} /></label>)}
@@ -134,11 +146,11 @@ export function MomentsPublishingPage({ state, status, audience, audienceError, 
         </section>
         <section className="wa-form-section"><h3>取材与配图</h3>
         <label className="wa-wb-check"><input aria-label="发布联网取材" type="checkbox" checked={editor.settings.research} onChange={e => update({ research: e.target.checked })} />生成前联网取材</label>
-        {editor.settings.research && <label>公开搜索主题（可选）<input aria-label="发布搜索主题" maxLength={240} value={editor.settings.researchQuery} onChange={e => update({ researchQuery: e.target.value })} /><small>留空时按内容主题搜索；未取得有效来源时不发布。</small></label>}
+        {editor.settings.research && <label>公开搜索主题（可选）<input aria-label="发布搜索主题" maxLength={240} value={editor.settings.researchQuery} onChange={e => update({ researchQuery: e.target.value })} /><small>留空时按内容主题搜索；取材失败会改写不依赖实时资料的纯文字。</small></label>}
         <label>配图<select aria-label="发布配图方式" value={editor.settings.image.mode} onChange={e => picture({ mode: e.target.value })}><option value="none">不配图，纯文字</option><option value="library">从素材库选图，合适时配图</option><option value="ai">由 AI 生成一张配图</option></select></label>
         {editor.settings.image.mode === 'ai' && <>
-          <p className="wa-wb-note">使用已有生图设置；默认接口为 {providers.find(row => row.id === imageSettings?.defaultProviderId)?.name ?? '当前默认接口'}。图片失败时保留正文，不擅自换接口或降级为纯文字。</p>
-          {!imageSettings?.enabled && <p className="wa-alert is-error">生图尚未启用，请先在模型设置中配置。</p>}
+          <p className="wa-wb-note">使用已有生图设置；默认接口为 {providers.find(row => row.id === imageSettings?.defaultProviderId)?.name ?? '当前默认接口'}。图片失败会保留正文改用纯文字，不重复生图。</p>
+          {!imageSettings?.enabled && <p className="wa-wb-note">生图尚未启用，本次将使用纯文字；需要配图时可在模型设置中配置。</p>}
           <div className="wa-wb-generator"><label>生图接口<select aria-label="发布生图接口" value={editor.settings.image.providerId} onChange={e => picture({ providerId: e.target.value, model: '', size: '' })}><option value="">跟随默认接口</option>{providers.map(row => <option value={row.id} key={row.id}>{row.name}</option>)}</select></label>
             <label>生图模型<select aria-label="发布生图模型" value={editor.settings.image.model} onChange={e => picture({ model: e.target.value })}><option value="">接口默认模型</option>{(selectedProvider?.models ?? []).map(model => <option key={model} value={model}>{model}</option>)}</select></label>
             <label>配图尺寸<input aria-label="发布配图尺寸" maxLength={40} placeholder={selectedProvider?.size ?? '跟随接口默认尺寸'} value={editor.settings.image.size} onChange={e => picture({ size: e.target.value })} /></label></div>
@@ -168,13 +180,14 @@ export function MomentsPublishingPage({ state, status, audience, audienceError, 
         {run.image && <p className="wa-wb-note">{run.image.providerName} · {run.image.model}</p>}
         {!!run.sources?.length && <details><summary>取材来源</summary>{run.sources.map(source => <p key={source.url}><a href={source.url} target="_blank" rel="noreferrer">{source.title || source.url}</a></p>)}</details>}
         {run.error && <p role="alert" className="wa-alert is-error">{run.error}</p>}
+        {run.fallbacks?.map(item => <p key={item.kind} className="wa-wb-note">{item.message}</p>)}
         {!!run.selectedMaterials?.length && <p className="wa-wb-note">选用素材：{run.selectedMaterials.map(item => item.title).join('、')}</p>}
         {run.materialsWarning && <p className="wa-alert is-error">{run.materialsWarning}</p>}
         {run.audienceWarning && <p className="wa-wb-note">{run.audienceWarning}</p>}
         {run.postId && <p className="wa-wb-note">已确认动态编号：{run.postId}</p>}
         <div className="wa-wb-actions">
           {['draft', 'failed'].includes(run.state) && <><Button quiet disabled={busy || !online || !draftText.trim() || draftText === run.text} onClick={async () => { if (await state.execute('moments.drafts.edit', { id: run.id, text: draftText })) { setDraftText(draftText.trim()); state.setNotice('草稿修改已保存，尚未发布。'); } }}>保存草稿修改</Button>
-            <Button disabled={busy || !online || !run.text || draftText !== run.text || run.settings.image.mode === 'ai' && !run.hasImage} onClick={async () => { if (await state.execute('moments.drafts.publish', { id: run.id })) state.setNotice('微信已确认发布这份草稿。'); else await state.refresh(true); }}>发布这份草稿</Button>
+            <Button disabled={busy || !online || !run.text || draftText !== run.text} onClick={async () => { if (await state.execute('moments.drafts.publish', { id: run.id })) state.setNotice('微信已确认发布这份草稿。'); else await state.refresh(true); }}>{run.textOnly || run.settings.image.mode === 'ai' && !run.hasImage ? '按纯文字发布' : '发布这份草稿'}</Button>
             <Button quiet danger disabled={busy || !online} onClick={() => state.execute('moments.drafts.discard', { id: run.id })}>放弃这份草稿</Button></>}
           {['draft', 'failed', 'discarded'].includes(run.state) && <Button quiet disabled={busy || !online} onClick={() => generatePreview(run.settings)}>重新生成预览（不发布）</Button>}
           {['unknown', 'published-unverified'].includes(run.state) && <Button quiet disabled={busy || !online} onClick={async () => { const value = await state.execute('moments.drafts.reconcile', { id: run.id }); if (value) state.setNotice(value.message || (value.confirmed ? '已完成微信回执核对。' : '当前状态仍未确认，原记录已保留。')); }}>核对微信发布状态</Button>}

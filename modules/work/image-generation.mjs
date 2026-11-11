@@ -92,7 +92,8 @@ export class ImageGenerationService {
     if (!apiKey) throw new ChannelError('IMAGE_GENERATION_CREDENTIAL', '尚未保存生图 API Key，请在设置 → 生图 API 单独保存密钥');
     const timeout = AbortSignal.timeout(provider.timeoutSeconds * 1000), combined = AbortSignal.any([signal, timeout]);
     const selectedSize = size ?? provider.size;
-    let responseSummary = {};
+    let responseSummary = {}, stage = 'request';
+    const startedAt = Date.now();
     const current = () => {
       assertAllowed(); combined.throwIfAborted(); this.store.config.assertCurrent();
       if (JSON.stringify(this.settings()) !== JSON.stringify(settings)) throw new ChannelError('IMAGE_GENERATION_CHANGED', '生图配置已变化，本次旧结果未保存或回传');
@@ -111,7 +112,9 @@ export class ImageGenerationService {
         throw new ChannelError('IMAGE_GENERATION_HTTP', response.status === 401 || response.status === 403 ? '生图 API 拒绝认证，请检查密钥及该模型的权限' : response.status === 429 ? '生图 API 限流或额度不足，本次未自动重复请求' : `生图 API 返回 HTTP ${response.status}，请检查接口和模型配置`);
       }
       let json;
-      try { json = JSON.parse((await readResponse(response, combined)).toString('utf8')); }
+      stage = 'response';
+      const responseBytes = await readResponse(response, combined);
+      try { json = JSON.parse(responseBytes.toString('utf8')); }
       catch (error) { if (error instanceof ChannelError || combined.aborted) throw error; throw new ChannelError('IMAGE_GENERATION_RESPONSE', '生图 API 没有返回兼容的 JSON 结果'); }
       current();
       const data = json?.data?.[0]; let bytes;
@@ -131,6 +134,7 @@ export class ImageGenerationService {
       } else if (urlPresent && /^data:/i.test(data.url.trim())) {
         bytes = decodeGeneratedImage(data.url);
       } else if (urlPresent) {
+        stage = 'download';
         let url;
         try { url = new URL(data.url); } catch { throw new ChannelError('IMAGE_GENERATION_RESPONSE', '生图 API 返回了无效的图片地址'); }
         const sameOrigin = url.origin === new URL(provider.endpoint).origin;
@@ -153,12 +157,16 @@ export class ImageGenerationService {
         sendAs: bytes.length > WORK_ARTIFACT_LIMITS.imageBytes ? 'file' : 'image' };
     } catch (error) {
       signal.throwIfAborted(); assertAllowed();
+      const networkCodes = new Set(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET', 'CERT_HAS_EXPIRED', 'ERR_TLS_CERT_ALTNAME_INVALID', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE']);
+      const networkCode = [error?.cause?.code, error?.code].find(code => networkCodes.has(code));
+      const networkReason = /TIMEOUT|TIMEDOUT/.test(networkCode || '') ? '连接或读取超时' : /ENOTFOUND|EAI_AGAIN/.test(networkCode || '') ? '域名解析失败' : /ECONNRESET|UND_ERR_SOCKET|EPIPE/.test(networkCode || '') ? '连接中断' : '网络请求失败';
       const failure = timeout.aborted ? new ChannelError('IMAGE_GENERATION_TIMEOUT', '生图 API 请求或图片下载超时，未自动重复请求；请查询任务状态')
         : error instanceof ChannelError ? error
-        : new ChannelError('IMAGE_GENERATION_NETWORK', '生图 API 请求或图片下载失败，请检查服务和网络；本次未自动重复请求');
+        : new ChannelError('IMAGE_GENERATION_NETWORK', (stage === 'download' ? '图片已生成，但下载时' : stage === 'response' ? '读取生图结果时' : '请求生图 API 时') + networkReason + '；本次未自动重复生图');
       const reported = new ChannelError(failure.code, `${provider.name} / ${selectedModel}：${failure.message}`);
       reported.imageGeneration = { providerId: provider.id, providerName: provider.name, endpoint: provider.endpoint, model: selectedModel,
-        size: selectedSize, responseFormat: provider.responseFormat, response: responseSummary };
+        size: selectedSize, responseFormat: provider.responseFormat, response: responseSummary, stage, elapsedMs: Date.now() - startedAt,
+        ...(networkCode ? { networkCode } : {}) };
       throw reported;
     }
   }

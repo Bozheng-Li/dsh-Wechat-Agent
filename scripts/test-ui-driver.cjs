@@ -1227,8 +1227,8 @@ app.whenReady().then(async () => {
         await clickText('新增发布计划'); await fixture('momentGeneration', { mode: 'hold' });
         await clickText('生成预览（不发布）');
         await waitFor(() => document.querySelector('[data-testid="moments-publishing"]')?.textContent.includes('正在生成正文'));
-        assert(await evaluate(() => document.querySelector('[data-testid="moments-publishing"]').textContent.includes('最多 5 分钟')));
-        check('an ongoing model request shows its real generation stage and five-minute limit without manual refresh');
+        assert(await evaluate(() => document.querySelector('[data-testid="moments-publishing"]').textContent.includes('最多 1 小时')));
+        check('an ongoing model request shows its real generation stage and one-hour limit without manual refresh');
         await fixture('momentGeneration', { mode: 'release' });
         await stateMatches(state => state.moments.publishing.runs.some(row => row.state === 'draft'));
         await waitFor(() => Array.from(document.querySelectorAll('button')).some(button => button.textContent.trim() === '生成预览（不发布）' && !button.disabled));
@@ -1244,6 +1244,26 @@ app.whenReady().then(async () => {
         assert.equal((await fixture('momentGeneration', { mode: 'status' })).calls, beforeRetry + 1);
         assert.equal((await fixture('momentWrites')).filter(row => row.action === 'publish').length, 2);
         check('explicit retry uses one new generation while retaining the failed record and never posting');
+        await input('[aria-label="发布配图方式"]', 'ai');
+        await clickText('生成预览（不发布）');
+        await stateMatches(state => state.moments.publishing.runs[0].state === 'draft' && state.moments.publishing.runs[0].textOnly);
+        await waitFor(() => Array.from(document.querySelectorAll('button')).some(button => button.textContent.trim() === '按纯文字发布' && !button.disabled));
+        assert(await evaluate(() => document.querySelector('[data-testid="moments-publishing"]').textContent.includes('配图失败')));
+        await screenshot('moments-text-only-fallback-narrow', 'light'); await assertLayout('text-only publishing narrow');
+        await clickText('按纯文字发布'); await stateMatches(state => state.moments.publishing.runs[0].state === 'published');
+        const textOnlyWrite = (await fixture('momentWrites')).filter(row => row.action === 'publish').at(-1);
+        assert.equal(textOnlyWrite.images, undefined); check('unavailable images retain the draft and explicit text-only publish receives one confirmed receipt');
+        await click('[aria-label="发布联网取材"]'); await clickText('生成预览（不发布）');
+        await stateMatches(state => state.moments.publishing.runs[0].state === 'draft' && state.moments.publishing.runs[0].fallbacks?.some(row => row.kind === 'research'));
+        assert(await evaluate(() => document.querySelector('[data-testid="moments-publishing"]').textContent.includes('不依赖实时资料')));
+        check('unavailable research yields an offline text draft and shows its fallback reason');
+        const writesBeforeStop = (await fixture('momentWrites')).length;
+        await fixture('momentGeneration', { mode: 'hold' }); await clickText('生成预览（不发布）');
+        await waitFor(() => Array.from(document.querySelectorAll('button')).some(button => button.textContent.trim() === '停止本次发布处理' && !button.disabled));
+        await clickText('停止本次发布处理');
+        await stateMatches(state => !state.moments.publishing.running && state.moments.publishing.runs[0].state === 'failed');
+        await fixture('momentGeneration', { mode: 'release' }); assert.equal((await fixture('momentWrites')).length, writesBeforeStop);
+        check('stopping an in-flight operation never falls back to publishing and preserves future settings');
       assert.deepEqual(report.errors, []); report.ok = true; return;
     }
     if (process.env.WECHAT_UI_TEST_IMAGE_MEMORY_ONLY === '1') {

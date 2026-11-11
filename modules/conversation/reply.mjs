@@ -24,6 +24,7 @@ import { momentsInteractionTool } from '../tools/moments-interactions.mjs';
 import { momentsImagesTool } from '../tools/moments-images.mjs';
 import { chatMomentsMedia } from '../moments/media.mjs';
 import { momentsPublishingTools } from '../tools/moments-publishing.mjs';
+import { MOMENTS_PUBLISH_RPC_TIMEOUT_MS } from '../../shared/moments-publishing.mjs';
 
 export async function processReply(channel, item) {
   const { record } = item;
@@ -32,11 +33,19 @@ export async function processReply(channel, item) {
   const active = { ...item, controller, finished: finished.promise };
   if (item.workLane) channel.workActive.set(record.key, active);
   else channel.active = active;
-  const timeout = setTimeout(
+  let timeout = setTimeout(
     () => controller.abort(new ChannelError('MODEL_TIMEOUT', '模型处理超时，未继续发送')),
     channel.timeoutMs
   );
   timeout.unref?.();
+  let momentsWaitExtended = false;
+  const extendMomentsWait = action => {
+    if (momentsWaitExtended || !['preview', 'publish'].includes(action)) return;
+    controller.signal.throwIfAborted();
+    momentsWaitExtended = true; clearTimeout(timeout);
+    timeout = setTimeout(() => controller.abort(new ChannelError('MODEL_TIMEOUT', '朋友圈处理达到 1 小时时限，未继续发送')), MOMENTS_PUBLISH_RPC_TIMEOUT_MS);
+    timeout.unref?.();
+  };
   let replySignal = controller.signal;
   try {
     channel.assertAllowed(item);
@@ -333,9 +342,11 @@ export async function processReply(channel, item) {
               audience: signal => channel.moments.audience(scope, AbortSignal.any([controller.signal, signal].filter(Boolean)), assertAllowed) }));
             if (channel.moments.writeAvailable(scope)) tools.push(...momentsWriteTools({ assertAllowed, subjects: channel.moments.subjects(scope),
               media: chatMomentsMedia(channel, scope, lookupSnapshot, record.key),
-              write: (query, signal, operationKey) => channel.moments.write(query, scope, record.key, AbortSignal.any([controller.signal, signal].filter(Boolean)), assertAllowed, operationKey) }));
+              write: (query, signal, operationKey) => { extendMomentsWait(query.action);
+                return channel.moments.write(query, scope, record.key, AbortSignal.any([controller.signal, signal].filter(Boolean)), assertAllowed, operationKey); } }));
             if (channel.momentsAutomation?.publishing) tools.push(...momentsPublishingTools({ assertAllowed,
-              manage: (args, signal, operationKey) => channel.moments.managePublishing(args, scope, record.key, AbortSignal.any([controller.signal, signal].filter(Boolean)), assertAllowed, operationKey) }));
+              manage: (args, signal, operationKey) => { extendMomentsWait(args.action);
+                return channel.moments.managePublishing(args, scope, record.key, AbortSignal.any([controller.signal, signal].filter(Boolean)), assertAllowed, operationKey); } }));
             if (channel.momentsAutomation?.interactions) tools.push(momentsInteractionTool({ assertAllowed, subjects: channel.moments.subjects(scope),
               manage: (args, signal) => channel.moments.manageInteractions(args, scope, record.key, AbortSignal.any([controller.signal, signal].filter(Boolean)), assertAllowed) }));
           }

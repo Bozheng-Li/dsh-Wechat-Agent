@@ -13,7 +13,13 @@
 </div>
 
 <details>
-<summary><strong>更新记录 · 0.2.0-preview.9 · 2026-11-11（点击展开）</strong></summary>
+<summary><strong>更新记录 · 0.2.0-preview.10 · 2026-11-11（点击展开）</strong></summary>
+
+### 0.2.0-preview.10 · 2026-11-11
+
+- 朋友圈生成与发布最多等待 1 小时，页面可主动停止，聊天触发也不会被普通聊天时限提前打断。
+- 生图、取图或联网取材失败时回退纯文字；必要时修正文案里的缺图引用，保留回退原因。
+- 主题可细化为具体选题，继续检查内容与屏蔽范围；取消和未知回执不触发重发。
 
 ### 0.2.0-preview.9 · 2026-11-11
 
@@ -28,7 +34,7 @@
 - 修复保存的人设与恢复会话上下文，加入模型推理强度选择、相关记忆筛选和后台压缩。
 - 更新工作台与记忆页面，移除知识库功能，保留已有本地资料。
 
-[完整更新日志](https://github.com/Bozheng-Li/dsh-Wechat-Agent/blob/main/CHANGELOG.md) · [GitHub 安装包](https://github.com/Bozheng-Li/dsh-Wechat-Agent/releases/tag/v0.2.0-preview.9) · [npm 版本](https://www.npmjs.com/package/dsh-plugin-wechat-agent/v/0.2.0-preview.9)
+[完整更新日志](https://github.com/Bozheng-Li/dsh-Wechat-Agent/blob/main/CHANGELOG.md) · [GitHub 安装包](https://github.com/Bozheng-Li/dsh-Wechat-Agent/releases/tag/v0.2.0-preview.10) · [npm 版本](https://www.npmjs.com/package/dsh-plugin-wechat-agent/v/0.2.0-preview.10)
 
 </details>
 
@@ -55,17 +61,17 @@
 
 ## 开始使用
 
-本页对应 **`0.2.0-preview.9`**，支持 **Windows x64 · DeepSeek Harness `0.2.1-rc.5`**。模型使用你在 DSH 中配置的服务。
+本页对应 **`0.2.0-preview.10`**，支持 **Windows x64 · DeepSeek Harness `0.2.1-rc.5`**。模型使用你在 DSH 中配置的服务。
 
 本版整合会话角色卡、分层记忆、按需上下文、图片引用、工作模式和朋友圈自动化。模型仍可能补写事实或未完整遵守人设，具体限制见[使用指南](docs/USER-GUIDE.md#当前版本与已知限制)，版本历史可展开上方更新记录。
 
 在 DSH 插件管理页输入 `dsh-plugin-wechat-agent` 安装，或在 PowerShell 执行：
 
 ```powershell
-dsh plugin --profile desktop add dsh-plugin-wechat-agent@0.2.0-preview.9
+dsh plugin --profile desktop add dsh-plugin-wechat-agent@0.2.0-preview.10
 ```
 
-完整 npm 包包含微信认证组件、Python 与依赖，安装后即可打开侧栏 **微信 Agent**。[GitHub Releases](https://github.com/Bozheng-Li/dsh-Wechat-Agent/releases/tag/v0.2.0-preview.9) 提供相同安装包及 SHA-256 校验文件。
+完整 npm 包包含微信认证组件、Python 与依赖，安装后即可打开侧栏 **微信 Agent**。[GitHub Releases](https://github.com/Bozheng-Li/dsh-Wechat-Agent/releases/tag/v0.2.0-preview.10) 提供相同安装包及 SHA-256 校验文件。
 
 1. **扫码连接** — 用手机微信扫码并确认。
 2. **设置助手与模型** — 选择 DSH 模型及其支持的推理强度，在“默认助手”中编辑所有会话共用的设定。

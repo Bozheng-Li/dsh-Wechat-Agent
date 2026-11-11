@@ -4,12 +4,14 @@ import { createHash, randomUUID } from 'node:crypto';
 import { atomicJson } from '../../backend/storage/atomic-json.ts';
 import { atomicBytes } from '../../backend/storage/atomic-text.mjs';
 import { ChannelError, publicError } from '../../shared/contracts.mjs';
-import { momentsPublishingSettings, momentsPlanSettings, momentsPlanId, momentsRunId, nextMomentsOccurrence, visibleMomentsText } from '../../shared/moments-publishing.mjs';
+import { momentsPublishingSettings, momentsPlanSettings, momentsPlanId, momentsRunId, nextMomentsOccurrence, visibleMomentsText,
+  MOMENTS_PUBLISH_TIMEOUT_MS, MOMENTS_TEXT_FALLBACK_RESERVE_MS } from '../../shared/moments-publishing.mjs';
 import { workPath } from '../work/policy.mjs';
 import { momentsImage } from './media.mjs';
 import { generateMomentsContent, similarMomentsText } from './publishing-content.mjs';
 import { reviewMaterialText } from './material-privacy.mjs';
 import { reviewMomentsContent } from './publishing-review.mjs';
+import { canOmitMomentsImage, omitMomentsImage, reviewMomentsTextOnly } from './publishing-fallback.mjs';
 import { arrangeMoments, momentsDate } from './arrangement.mjs';
 
 const hash = value => createHash('sha256').update(Buffer.isBuffer(value) ? value : JSON.stringify(value)).digest('hex');
@@ -34,7 +36,8 @@ export class MomentsPublishing {
       }
       for (const [id, run] of Object.entries(data.runs)) {
         if (!momentsRunId(id) || run.id !== id || typeof run.accountId !== 'string' || !states.has(run.state) || !Number.isSafeInteger(run.createdAt) ||
-            typeof run.requestId !== 'string' || !run.requestId || run.requestId.length > 2000 || run.inputHash !== hash(run.settings) || run.text !== undefined && (typeof run.text !== 'string' || run.text.length > 2000)) throw Error();
+            typeof run.requestId !== 'string' || !run.requestId || run.requestId.length > 2000 || run.inputHash !== hash(run.settings) || run.text !== undefined && (typeof run.text !== 'string' || run.text.length > 2000) ||
+            run.textOnly !== undefined && typeof run.textOnly !== 'boolean') throw Error();
         momentsPlanSettings(run.settings);
         if (!Number.isSafeInteger(run.scheduledAt) || !Number.isSafeInteger(run.updatedAt) || !['preview', 'schedule'].includes(run.origin) || run.planId !== undefined && (!momentsPlanId(run.planId) || data.plans[run.planId]?.accountId !== run.accountId) ||
             run.image && (!object(run.image) || typeof run.image.path !== 'string' || !new RegExp('^storage/moments/publishing-media/' + id + '\\.(png|jpg)$').test(run.image.path) || !/^[a-f0-9]{64}$/.test(run.image.sha256)) ||
@@ -74,7 +77,7 @@ export class MomentsPublishing {
       running: this.activeAccount === accountId, activePlanId: this.activeAccount === accountId ? this.activePlanId ?? null : null,
       operationStartedAt: this.activeAccount === accountId ? this.operationStartedAt : null, schedulerStarted: !this.stopped, error: this.error ?? null };
   }
-  publicRun(run) { const { query, ...value } = run; return copy({ ...value, hasImage: !!run.image, image: run.image ? { providerName: run.image.providerName, model: run.image.model } : null }); }
+  publicRun(run) { const { query, ...value } = run; return copy({ ...value, hasImage: !!run.image && !run.textOnly, image: run.image && !run.textOnly ? { providerName: run.image.providerName, model: run.image.model } : null }); }
   configure(accountId, input, signal, assertAllowed = () => {}) {
     const check = () => { assertAllowed(); this.check(accountId, signal); }; check(); momentsPublishingSettings(input);
     const previous = this.account(accountId), automatic = previous.settings.automatic;
@@ -165,7 +168,7 @@ export class MomentsPublishing {
   }
   async operation(accountId, planId, signal, work) {
     this.check(accountId, signal); if (this.pending) throw new ChannelError('MOMENTS_PUBLISH_BUSY', '已有朋友圈内容正在生成或提交，请等它完成后操作');
-    this.controller = new AbortController(); this.operationTimeout = AbortSignal.timeout(300000);
+    this.controller = new AbortController(); this.operationTimeout = AbortSignal.timeout(MOMENTS_PUBLISH_TIMEOUT_MS);
     const combined = AbortSignal.any([this.controller.signal, ...(signal ? [signal] : []), this.operationTimeout]);
     this.activeAccount = accountId; this.activePlanId = planId; this.operationStartedAt = this.now();
     this.pending = Promise.resolve().then(() => work(combined)).finally(() => { this.pending = undefined; this.controller = undefined; this.activeAccount = undefined; this.activePlanId = undefined; this.operationStartedAt = undefined; this.operationTimeout = undefined; });
@@ -176,8 +179,10 @@ export class MomentsPublishing {
     Object.assign(run, await generateMomentsContent(this.channel, run.settings, this.recent(run.accountId), run.scheduledAt, signal, check, stage)); run.updatedAt = this.now(); this.save();
     this.deadline(run);
     await this.reviewMaterials(run, signal, check, stage);
-    stage('content-review');
-    if (await reviewMomentsContent(this.channel, run, null, signal, check)) this.save();
+    stage(run.textOnly ? 'text-review' : 'content-review');
+    if (run.textOnly ? await reviewMomentsTextOnly(this.channel, run, this.recent(run.accountId), signal, check)
+      : await reviewMomentsContent(this.channel, run, null, signal, check)) this.save();
+    if (!run.textOnly) try {
     if (run.imageMaterialId) {
       const materials = this.channel.momentsAutomation.materials;
       materials.assertSelection(run.accountId, run.materialContextRefs);
@@ -192,7 +197,11 @@ export class MomentsPublishing {
       if (!service?.generate) throw new ChannelError('MOMENTS_IMAGE_UNAVAILABLE', '生图服务未加载，正文已保留但未发布');
       const catalog = service.catalog(), image = run.settings.image, provider = catalog.providers.find(row => row.providerId === (image.providerId || catalog.defaultProviderId));
       if (!provider || !catalog.enabled) throw new ChannelError('MOMENTS_IMAGE_UNAVAILABLE', '所选生图接口未启用或已不存在，正文已保留但未发布');
-      const generated = await service.generate({ prompt: run.imagePrompt, providerId: provider.providerId, model: image.model || provider.defaultModel, ...(image.size ? { size: image.size } : {}) }, signal, check); check();
+      const remaining = MOMENTS_PUBLISH_TIMEOUT_MS - (this.now() - this.operationStartedAt) - MOMENTS_TEXT_FALLBACK_RESERVE_MS;
+      if (remaining <= 0) throw new DOMException('Image budget exhausted', 'TimeoutError');
+      const imageSignal = AbortSignal.any([signal, AbortSignal.timeout(remaining)]);
+      const generated = await service.generate({ prompt: run.imagePrompt, providerId: provider.providerId, model: image.model || provider.defaultModel, ...(image.size ? { size: image.size } : {}) }, imageSignal,
+        () => { check(); imageSignal.throwIfAborted(); }); check(); imageSignal.throwIfAborted();
       momentsImage(generated.bytes);
       const relative = 'storage/moments/publishing-media/' + run.id + generated.extension, target = workPath(this.channel.store.root, relative);
       fs.mkdirSync(path.dirname(target), { recursive: true }); atomicBytes(target, generated.bytes);
@@ -201,6 +210,12 @@ export class MomentsPublishing {
     if (run.image) {
       stage('image-review');
       if (await reviewMomentsContent(this.channel, run, this.contentImage(run.accountId, run.id), signal, check)) this.save();
+    }
+    } catch (error) {
+      check();
+      if (!canOmitMomentsImage(error)) throw error;
+      omitMomentsImage(run, error); stage('text-review');
+      if (await reviewMomentsTextOnly(this.channel, run, this.recent(run.accountId), signal, check)) this.save();
     }
     check(); this.deadline(run); run.state = 'draft'; run.error = null; run.errorCode = null; run.updatedAt = this.now(); this.save();
   }
@@ -232,14 +247,23 @@ export class MomentsPublishing {
   query(run) {
     if (!visibleMomentsText(run.text) || run.text.trim().length > run.settings.maxChars)
       throw new ChannelError('MOMENTS_CONTENT_INVALID', '草稿须有可见正文且在计划字数上限内，未发布');
-    if (run.settings.image.mode === 'ai' && !run.image) throw new ChannelError('MOMENTS_IMAGE_UNAVAILABLE', '本计划要求配图但图片未生成，未降级为纯文字发布');
+    if (run.settings.image.mode === 'ai' && !run.image && !run.textOnly) throw new ChannelError('MOMENTS_IMAGE_UNAVAILABLE', '配图尚未准备好');
     return { action: 'publish', text: run.text, blockedLabelIds: run.settings.blockedLabelIds, blockedUserIds: run.settings.blockedUserIds,
-      ...(run.image ? { images: [(({ data, width, height }) => ({ data, width, height }))(this.contentImage(run.accountId, run.id))] } : {}) };
+      ...(run.image && !run.textOnly ? { images: [(({ data, width, height }) => ({ data, width, height }))(this.contentImage(run.accountId, run.id))] } : {}) };
   }
   async submit(run, signal, check) {
     await this.reviewMaterials(run, signal, check);
     // Old and edited drafts receive the same review as newly generated ones.
-    if (await reviewMomentsContent(this.channel, run, run.image ? this.contentImage(run.accountId, run.id) : null, signal, check)) this.save();
+    if (!run.textOnly) try {
+      if (run.settings.image.mode === 'ai' && !run.image) throw new ChannelError('MOMENTS_IMAGE_UNAVAILABLE', '旧草稿的配图未生成');
+      if (await reviewMomentsContent(this.channel, run, run.image ? this.contentImage(run.accountId, run.id) : null, signal, check)) this.save();
+    } catch (error) {
+      check();
+      if (!canOmitMomentsImage(error) || !run.image && run.settings.image.mode !== 'ai') throw error;
+      omitMomentsImage(run, error); this.save();
+    }
+    if (run.textOnly && await reviewMomentsTextOnly(this.channel, run, this.recent(run.accountId), signal, check)) this.save();
+    await this.reviewMaterials(run, signal, check);
     const current = () => { check(); this.channel.momentsAutomation?.materials.assertSelection(run.accountId, run.materialContextRefs || run.selectedMaterials || []); };
     current();
     check(); if (this.recent(run.accountId).some(text => similarMomentsText(text, run.text))) throw new ChannelError('MOMENTS_CONTENT_DUPLICATE', '这份草稿与近期已发布内容过于相似，未提交');
@@ -258,11 +282,11 @@ export class MomentsPublishing {
     if (receipt) { this.published(run, receipt); return error; }
     const submitted = run.state === 'sending', rejected = ['not-sent', 'rejected'].includes(error?.details?.snsDelivery);
     if (error?.name === 'TimeoutError' && this.operationTimeout?.aborted) error = new ChannelError('MOMENTS_PUBLISH_TIMEOUT', submitted
-      ? '等待发布确认时达到 5 分钟上限，结果不明；请核对微信，未自动重发'
-      : '本次生成达到 5 分钟上限，已停止；已有内容保留，未发布，也不会自动重试');
+      ? '等待发布确认时达到 1 小时上限，结果不明；请核对微信，未自动重发'
+      : '本次生成达到 1 小时上限，已停止；已有内容保留，未发布，也不会自动重试');
     else if (error?.name === 'TimeoutError') error = new ChannelError('MOMENTS_REQUEST_TIMEOUT', submitted
       ? '发布确认请求超时，结果不明；请核对微信，未自动重发'
-      : '生成请求超时，已有内容保留，未发布；服务自身的请求时限可能短于 5 分钟总时限');
+      : '生成请求超时，已有内容保留，未发布；服务自身的请求时限可能短于 1 小时总时限');
     else if (error?.name === 'AbortError') error = new ChannelError('MOMENTS_PUBLISH_CANCELLED', submitted
       ? '已取消等待发布确认，结果仍需在微信核对；未自动重发'
       : '本次生成已取消；已有内容保留，未发布');
@@ -334,6 +358,7 @@ export class MomentsPublishing {
       return { confirmed: ['published', 'deleted'].includes(result.kind), outcome: result.kind, message: result.message, ...this.list(accountId) };
     });
   }
+  cancel(accountId) { this.check(accountId); if (this.activeAccount === accountId) this.controller?.abort(); return this.list(accountId); }
   start() { if (this.timer || this.error) return; this.stopped = false; this.timer = setInterval(() => { void this.tick().catch(() => {}); }, 10000); this.timer.unref?.(); }
   async close() { this.stopped = true; clearInterval(this.timer); this.timer = undefined; this.controller?.abort(); await this.whenIdle(); }
   async whenIdle() { await this.pending?.catch(() => {}); }

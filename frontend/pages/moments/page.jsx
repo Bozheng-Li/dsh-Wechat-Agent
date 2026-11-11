@@ -70,7 +70,7 @@ function MomentsWorkspace({ rpc, status }) {
         onInteract={post => { setInteractionPost({ postId: post.id, key: crypto.randomUUID() }); setTab('interactions'); }} />}
       {tab === 'interactions' && <MomentsInteractionsPage key={status.account?.id} rpc={rpc} status={status} initialPost={interactionPost} onSeedUsed={() => setInteractionPost(null)} onComments={loadComments} />}
       {tab === 'materials' && <MomentsMaterialsPage rpc={rpc} status={status} embedded />}
-      {tab === 'publishing' && <MomentsPublishingPage state={state} status={status} audience={audience} audienceError={audienceError} loadAudience={loadAudience} />}
+      {tab === 'publishing' && <MomentsPublishingPage rpc={rpc} state={state} status={status} audience={audience} audienceError={audienceError} loadAudience={loadAudience} />}
       {tab === 'posts' && <>
         <div className="wa-moments-toolbar">
           <Button disabled={state.busy || !status.online} onClick={() => state.execute('moments.discover')}>拉取我的动态</Button>

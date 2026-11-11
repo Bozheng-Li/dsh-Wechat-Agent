@@ -41,6 +41,24 @@ function fixture(t, response) {
 }
 const signal = () => new AbortController().signal;
 
+for (const stage of ['request', 'response', 'download']) test(`image ${stage} transport errors identify their stage without secrets or automatic regeneration`, async t => {
+  const transportError = new TypeError('private-image-key must not be reported', { cause: Object.assign(new Error('private endpoint'), { code: 'ECONNRESET' }) });
+  const f = fixture(t, (_url, options) => {
+    if (stage === 'request') throw transportError;
+    if (stage === 'response') return new Response(new ReadableStream({ start(controller) { controller.error(transportError); } }));
+    if (options.method === 'POST') return Response.json({ data: [{ url: 'https://image.invalid/original.png' }] });
+    throw transportError;
+  });
+  await assert.rejects(f.service.generate({ prompt: '检查传输故障' }, signal()), error => {
+    assert.equal(error.code, 'IMAGE_GENERATION_NETWORK'); assert.equal(error.imageGeneration.stage, stage);
+    assert.equal(error.imageGeneration.networkCode, 'ECONNRESET'); assert.match(error.message, /连接中断/);
+    assert(!JSON.stringify(error).includes('private-image-key')); assert(!error.message.includes('private-image-key'));
+    return true;
+  });
+  assert.equal(f.calls.filter(call => call.options.method === 'POST').length, 1);
+  assert.equal(f.calls.length, stage === 'download' ? 2 : 1);
+});
+
 test('base64 data URIs, MIME line breaks, omitted padding and URL-safe encoding retain exact API image bytes', async t => {
   let bytes = png();
   for (let width = 2; !bytes.toString('base64').endsWith('='); width++) bytes = png(width);

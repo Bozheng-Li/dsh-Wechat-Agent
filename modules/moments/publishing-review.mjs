@@ -15,10 +15,11 @@ export async function reviewMomentsContent(channel, run, image, signal, check) {
     const item = store.item(run.accountId, ref.id);
     return { id: ref.id, revision: item.revision, title: item.fields.title, text: item.fields.text, origin: item.origin };
   });
-  const phase = image ? 'image' : 'proposal';
-  const input = { phase, theme: run.theme, text: run.text, imagePrompt: run.imagePrompt || '',
-    imageMode: run.settings.image.mode, imagePlanned: !!image || run.settings.image.mode === 'ai' || !!run.imageMaterialId,
-    themes: run.settings.themes, instruction: run.settings.instructions, imageInstructions: run.settings.image.instructions, materials };
+  const phase = run.textOnly ? 'text-only' : image ? 'image' : 'proposal';
+  const input = { phase, theme: run.theme, text: run.text, imagePrompt: run.textOnly ? '' : run.imagePrompt || '',
+    imageMode: run.textOnly ? 'none' : run.settings.image.mode, imagePlanned: !run.textOnly && (!!image || run.settings.image.mode === 'ai' || !!run.imageMaterialId),
+    researchUnavailable: run.fallbacks?.some(item => item.kind === 'research') === true,
+    themes: run.settings.themes, instruction: run.settings.instructions, imageInstructions: run.textOnly ? '' : run.settings.image.instructions, materials };
   const fingerprint = hash([policy, input, refs, image ? run.image.sha256 : null]);
   if (run.contentReviews?.[phase]?.fingerprint === fingerprint) return false;
   const result = await channel.runner.run({ mode: 'moments-content-review', tools: [], signal, allowEmptyReply: true,

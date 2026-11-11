@@ -6,6 +6,7 @@ import path from 'node:path';
 import { StateStore, WorkStore, WechatChannel, MomentsService, momentsTool, momentsCommentsTool, momentsWriteTools, momentsAudienceTool, resolveMomentsAudience, workMomentsMedia, chatMomentsMedia, createPluginService, rpcHandler, ChannelError, identity } from '../lib/testing.js';
 import { createHash } from 'node:crypto';
 import { fixtureWorkRouteDecision } from './fixtures/work-dialogue.mjs';
+import { MOMENTS_PUBLISH_RPC_TIMEOUT_MS } from '../shared/moments-publishing.mjs';
 const accountId = 'moments-bot', room = 'moments-room@chatroom';
 const scope = { accountId, chatType: 'private', peerId: 'alice', senderId: 'alice' };
 function fixture(t, { beforeRead, beforeWrite } = {}) {
@@ -100,6 +101,27 @@ test('chat model can invoke the read-only moments tool for the verified administ
   assert.equal(f.reads[0].accountId, accountId); assert.equal(f.reads[0].scopeKey, identity([accountId, 'private', 'alice', 'alice']));
   assert(f.sent.some(payload => JSON.stringify(payload).includes('已读取朋友圈')));
 });
+for (const action of ['preview', 'publish']) test(`chat ${action} waits beyond the ordinary reply limit but still stops at one hour`, async t => {
+  const f = fixture(t), entered = Promise.withResolvers(), release = Promise.withResolvers();
+  let operationSignal;
+  f.channel.moments.managePublishing = async (_args, _scope, _key, signal) => {
+    operationSignal = signal; entered.resolve();
+    await Promise.race([release.promise, new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))]);
+    signal.throwIfAborted(); return {};
+  };
+  f.runner.run = async input => {
+    const tool = input.tools.find(row => row.name === 'wechat_moments_draft'); assert(tool);
+    await tool.execute(action === 'preview' ? { action, settings: {} } : { action, id: 'a'.repeat(64) }, { signal: input.signal });
+    return { text: '已完成' };
+  };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.after(() => { release.resolve(); t.mock.timers.reset(); });
+  f.receive('按我的要求处理朋友圈'); await entered.promise;
+  t.mock.timers.tick(600001); assert.equal(operationSignal.aborted, false); assert.equal(f.sent.length, 0);
+  t.mock.timers.tick(MOMENTS_PUBLISH_RPC_TIMEOUT_MS - 600001); assert.equal(operationSignal.aborted, true);
+  await f.channel.whenIdle(); assert.equal(f.sent.length, 0); assert.equal(f.writes.length, 0);
+});
+
 test('members, fake sender identity, disabled access and unready components receive no social tool', async t => {
   const f = fixture(t), member = { chatType: 'group', peerId: room, sender: { id: 'bob', nickname: '管理员' } };
   f.receive('小胖，看看朋友圈', member); await f.channel.whenIdle();

@@ -1,8 +1,12 @@
 import { ChannelError } from './contracts.mjs';
 import { validateAudienceSelection } from './moments-audience.mjs';
 
+export const MOMENTS_PUBLISH_TIMEOUT_MS = 60 * 60 * 1000;
+export const MOMENTS_PUBLISH_RPC_TIMEOUT_MS = MOMENTS_PUBLISH_TIMEOUT_MS + 15000;
+export const MOMENTS_TEXT_FALLBACK_RESERVE_MS = 5 * 60 * 1000;
+
 export const MOMENTS_PLAN_DEFAULTS = Object.freeze({ name: '新的发布计划', enabled: false, themes: ['日常心情与小笑话'], style: '自然、轻松、有一点幽默',
-  instructions: '', maxChars: 300, useMaterials: false, reviewRequired: false, research: false, researchQuery: '', graceMinutes: 30, blockedLabelIds: [], blockedUserIds: [],
+  instructions: '', maxChars: 300, useMaterials: false, reviewRequired: false, research: false, researchQuery: '', graceMinutes: 60, blockedLabelIds: [], blockedUserIds: [],
   schedule: { type: 'daily', timezone: 'Asia/Shanghai', times: ['09:00'], weekdays: [1, 2, 3, 4, 5], onceAt: '' },
   image: { mode: 'none', providerId: '', model: '', size: '', instructions: '' } });
 export const MOMENTS_AUTOMATIC_CONTENT_KEYS = ['themes', 'style', 'instructions', 'maxChars', 'useMaterials', 'reviewRequired', 'research', 'researchQuery', 'graceMinutes', 'blockedLabelIds', 'blockedUserIds', 'image'];

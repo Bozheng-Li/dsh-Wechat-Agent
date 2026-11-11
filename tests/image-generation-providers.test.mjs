@@ -67,6 +67,15 @@ test('one interface supports multiple explicit models using the same credential 
   assert.equal(JSON.parse(calls[1].options.body).size, '2048x2048'); assert.equal(new Set(f.resolved).size, 1);
 });
 
+test('image interfaces accept and preserve an explicit one-hour timeout without exceeding it', async t => {
+  const f = fixture(t), value = f.service.settings(), deadlines = [];
+  value.providers[0].timeoutSeconds = 3600; f.save(value);
+  assert.equal(new ImageGenerationService(f.ctx, new StateStore(f.root)).settings().providers[0].timeoutSeconds, 3600);
+  t.mock.method(AbortSignal, 'timeout', milliseconds => { deadlines.push(milliseconds); return new AbortController().signal; });
+  await f.service.generate({ prompt: '一小时预算的图片' }, signal()); assert.deepEqual(deadlines, [3600000]);
+  value.providers[0].timeoutSeconds = 3601; assert.throws(() => imageGenerationSettings(value), { code: 'IMAGE_GENERATION_CONFIG' });
+});
+
 test('cross-interface selection uses the chosen model, options and key, including identically named models', async t => {
   const calls = [], f = fixture(t, async (url, options) => { calls.push({ url, options }); return response(); });
   await f.service.generate({ prompt: '第二接口', providerId: 'second' }, signal());

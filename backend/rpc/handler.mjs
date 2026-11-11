@@ -43,6 +43,7 @@ export function rpcHandler(service, isDisposed = () => false) {
           'moments.configure',
           'moments.write',
           'moments.publishing.configure',
+          'moments.publishing.cancel',
           'moments.plans.save',
           'moments.plans.enable',
           'moments.plans.delete',
