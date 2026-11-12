@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="590" viewBox="0 0 1440 590" fill="none">
-  <title>微信 Agent — 把人设、记忆与提醒带进微信</title>
+  <title>微信 Agent — 消息、记忆、工作与朋友圈</title>
   <desc>青玉与石墨色的微信 Agent 工作台。聊天示例连接会话记忆、定时提醒与工作任务，支持全局助手设定和自己的微信表情库，运行在 DeepSeek Harness。</desc>
   <defs>
     <clipPath id="hero-frame"><rect width="1440" height="590" rx="24"/></clipPath>
@@ -18,7 +18,7 @@
       <text x="129" y="102" font-size="11" letter-spacing="1.7" fill="#60767C">DEEPSEEK HARNESS PLUGIN</text>
       <text x="66" y="202" font-size="60" font-weight="700" letter-spacing="-1.5" fill="#20353B">让微信，多一个</text>
       <text x="66" y="282" font-size="60" font-weight="700" letter-spacing="-1.5" fill="#087F79">懂你的伙伴。</text>
-      <text x="70" y="336" font-size="21" fill="#516970">会聊天，有记忆，也记得你的约定。</text>
+      <text x="70" y="336" font-size="21" fill="#516970">聊日常，记住你，把工作交给 DSH。</text>
       <rect x="68" y="384" width="298" height="38" rx="9" fill="#FFFFFF" stroke="#D7E3E5"/>
       <g transform="translate(85 396)" stroke="#087F79" stroke-width="1.5" stroke-linejoin="round"><rect width="15" height="10" rx="2"/><path d="M7.5 10v4m-4 0h8"/></g>
       <text x="112" y="408" font-size="14" fill="#516970">Windows x64 · DSH 0.2.1-rc.5</text>
@@ -49,11 +49,10 @@
       <text x="70" y="516" font-size="17" font-weight="600" fill="#20353B">一位全局助手</text>
       <text x="70" y="542" font-size="13" fill="#60767C">名字、唤醒词与表达偏好</text>
       <path d="M333 503v43M658 503v43M1040 503v43" stroke="#D7E3E5"/>
-      <text x="367" y="517" font-size="23" font-weight="650" fill="#087F79">30</text>
-      <text x="405" y="516" font-size="16" font-weight="600" fill="#20353B">张精选表情</text>
-      <text x="367" y="542" font-size="13" fill="#60767C">让回复多一点表情</text>
-      <text x="693" y="516" font-size="17" font-weight="600" fill="#20353B">记忆与约定</text>
-      <text x="693" y="542" font-size="13" fill="#60767C">在自己的工作目录里</text>
+      <text x="367" y="516" font-size="17" font-weight="600" fill="#20353B">自己的微信表情</text>
+      <text x="367" y="542" font-size="13" fill="#60767C">同步收藏与授权聊天表情</text>
+      <text x="693" y="516" font-size="17" font-weight="600" fill="#20353B">人物、记忆与朋友圈</text>
+      <text x="693" y="542" font-size="13" fill="#60767C">按授权整理与使用资料</text>
       <text x="1073" y="516" font-size="17" font-weight="600" fill="#20353B">消息与结果，都能核对</text>
       <text x="1073" y="542" font-size="13" fill="#60767C">连接 · 执行 · 微信回执</text>
     </g>

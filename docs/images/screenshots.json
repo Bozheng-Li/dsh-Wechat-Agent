@@ -1,0 +1,100 @@
+{
+  "version": "0.2.0-preview.11",
+  "capturedAt": "2026-11-12T11:34:23.293Z",
+  "clientSha256": "adaef6a98cf9d3275dc1258d0cd8c066a30f66cc0541aa67627df532246034be",
+  "actualFrontendBuild": true,
+  "syntheticData": true,
+  "externalRequests": 0,
+  "realWeChatMessages": 0,
+  "realModelRequests": 0,
+  "auditedThemes": [
+    "light",
+    "dark"
+  ],
+  "checks": [
+    "layout overflow",
+    "visible control names",
+    "form labels",
+    "tab panel associations",
+    "solid-background text contrast"
+  ],
+  "images": [
+    {
+      "file": "studio-overview-light.png",
+      "width": 2242,
+      "height": 1649,
+      "bytes": 139480,
+      "sha256": "74ea7de2c70abb741ce9911ae28713fa41f2417eca3faba206ae047cd857939b"
+    },
+    {
+      "file": "workspace-dark.png",
+      "width": 2242,
+      "height": 1649,
+      "bytes": 135500,
+      "sha256": "596546a9d3c920fd4035fa5c51768b8bad853380de18fd874b2908f429769e43"
+    },
+    {
+      "file": "studio-automation-light.png",
+      "width": 2242,
+      "height": 1649,
+      "bytes": 154559,
+      "sha256": "af35f089bfd6521fa8b2866d37f1fe17920dd067081f43c1b9c4eeaf24536c4a"
+    },
+    {
+      "file": "studio-time-light.png",
+      "width": 2242,
+      "height": 1649,
+      "bytes": 194821,
+      "sha256": "5c35d9ee9b1ffd0c66a8933f192e72511c561291a0f1d263e16fb8483b18b5e0"
+    },
+    {
+      "file": "studio-role-cards-light.png",
+      "width": 2242,
+      "height": 1649,
+      "bytes": 189828,
+      "sha256": "5a6cbb4b6c4362ff45ccea0fc964b01c2b7d4fb174c4fc036c2a186199341ec9"
+    },
+    {
+      "file": "studio-work-light.png",
+      "width": 2242,
+      "height": 1649,
+      "bytes": 173190,
+      "sha256": "490df304213cbf5770e525e873ab24acac7bedb09dcea085cb41954203fe6be7"
+    },
+    {
+      "file": "studio-moments-light.png",
+      "width": 2242,
+      "height": 1649,
+      "bytes": 128079,
+      "sha256": "63ec33dd325849c24a701c854f3378a715ccdcc73d03f9398f312cb080d86ae3"
+    },
+    {
+      "file": "studio-persona-editor-light.png",
+      "width": 2242,
+      "height": 1649,
+      "bytes": 129393,
+      "sha256": "230109c2e19c14999428b5796110db7b00ecfcf1b8bf46b5b841a0870813d18a"
+    },
+    {
+      "file": "studio-memory-light.png",
+      "width": 2242,
+      "height": 1649,
+      "bytes": 164016,
+      "sha256": "0bbd06d6ade77baac0b91123c2fcad0a432949eee63cbbc7ba52320515ab64dd"
+    },
+    {
+      "file": "studio-tasks-light.png",
+      "width": 2242,
+      "height": 1649,
+      "bytes": 167281,
+      "sha256": "38d13fa4918a8cb234a1667747b0fb146cf4f69503449287ef38c87d8205cec1"
+    },
+    {
+      "file": "studio-stickers-light.png",
+      "width": 2242,
+      "height": 1649,
+      "bytes": 182617,
+      "sha256": "d5a9abd7381b25fc7b32d5f17200d1f0daa788280def238cbef0916f47560ac8"
+    }
+  ]
+}

@@ -12,8 +12,8 @@
         "zh": "微信 Agent"
       },
       "description": {
-        "en": "Personas, persistent memory, image replies, scheduled reminders and selectable Tavily or DeepSeek native search for WeChat on Windows x64.",
-        "zh": "Windows x64 微信 Agent：独立人设、持久记忆、图片与表情回复、定时提醒、Tavily 与 DeepSeek 原生搜索。"
+        "en": "A DSH assistant for WeChat on Windows x64: natural chat, authorized person cards and memory, native work tasks, scheduled reminders, images and Moments automation.",
+        "zh": "Windows x64 微信 Agent：统一助手、人物卡与记忆、DSH 工作任务、定时提醒、图片表情与朋友圈自动化。"
       },
       "metadata": {
         "keywords": [
@@ -22,6 +22,9 @@
           "小胖",
           "agent",
           "memory",
+          "工作任务",
+          "朋友圈",
+          "人物卡",
           "定时任务",
           "tavily",
           "search",
@@ -29,6 +32,17 @@
         ]
       },
       "versions": [
+        {
+          "version": "0.2.0-preview.11",
+          "publishTimestamp": 1794478079,
+          "engines": {
+            "dsh": "0.2.1-rc.5"
+          },
+          "source": {
+            "type": "npm",
+            "registry": "https://registry.npmjs.org/"
+          }
+        },
         {
           "version": "0.2.0-preview.10",
           "publishTimestamp": 1794374115,
