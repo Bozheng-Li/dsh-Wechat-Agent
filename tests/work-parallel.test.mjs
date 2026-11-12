@@ -181,17 +181,17 @@ test('slow result polishing does not prevent another sender from submitting and 
   assert(!f.sent.some(payload => payload.peerId === 'alice' && JSON.stringify(payload).includes('完成：慢任务')));
 });
 
-test('task dispatch waits for the acknowledgement attempt and still runs after an unknown receipt without replay', async t => {
+test('task dispatch confirms once and an unknown final receipt is not replayed', async t => {
   const ack = Promise.withResolvers(), attempting = Promise.withResolvers();
   const f = fixture(t, { send: async (_payload, count) => {
-    if (count === 1) { attempting.resolve(); await ack.promise; return {}; }
-    return { delivery: 'server-ack', serverMessageIds: ['final-ack'] };
+    if (count === 2) { attempting.resolve(); await ack.promise; return {}; }
+    return { delivery: 'server-ack', serverMessageIds: ['opening-ack'] };
   } });
-  f.receive('独立任务'); await attempting.promise;
-  assert.equal(f.channel.work.list(scope).jobs.length, 1); assert.equal(f.executions.length, 0);
-  ack.resolve(); await f.replies(); await waitFor(() => f.executions.length === 1);
-  assert.equal(f.store.data.records.find(record => record.mode === 'work').state, 'unknown');
-  f.executions[0].gate.resolve(); await f.channel.whenIdle();
+  f.receive('独立任务'); await f.replies(); await waitFor(() => f.executions.length === 1);
+  assert.equal(f.channel.work.list(scope).jobs.length, 1); assert.equal(f.sent.length, 1);
+  f.executions[0].gate.resolve(); await attempting.promise;
+  ack.resolve(); await f.channel.whenIdle();
+  assert.equal(f.channel.work.list(scope).jobs[0].delivery.state, 'unknown');
   const count = f.sent.length; new WorkStore(f.store); assert.equal(f.sent.length, count); assert.equal(count, 2);
 });
 
@@ -207,6 +207,16 @@ test('chat API failure cannot block original-message submission and falls back t
   assert.equal(job.state, 'succeeded'); assert.equal(job.result.polish.state, 'fallback');
   assert.equal(job.result.text, job.result.originalText); assert.equal(job.delivery.state, 'sent');
   assert(!JSON.stringify(f.sent).includes('没有新开任务'));
+});
+
+test('an unknown opening receipt does not repeat confirmation or block authorized execution', async t => {
+  const f = fixture(t, { send: (_payload, count) => count === 1 ? {} : { delivery: 'server-ack', serverMessageIds: ['final-ack'] } });
+  f.receive('独立任务'); await f.replies(); await waitFor(() => f.executions.length === 1);
+  assert.equal(f.store.data.records[0].state, 'unknown'); assert.equal(f.sent.length, 1);
+  f.executions[0].gate.resolve(); await f.channel.whenIdle();
+  const job = f.channel.work.list(scope).jobs[0];
+  assert.equal(job.state, 'succeeded'); assert.equal(job.delivery.state, 'sent'); assert.equal(f.sent.length, 2);
+  new WorkStore(f.store); assert.equal(f.sent.length, 2);
 });
 
 test('native session management tools expose only owned state and cannot continue or cancel another sender task', async t => {

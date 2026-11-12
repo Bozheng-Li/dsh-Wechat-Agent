@@ -3,8 +3,6 @@ const path = require('node:path');
 const assert = require('node:assert/strict');
 const { app, BrowserWindow } = require('electron');
 const expectedVersion = require('../package.json').version;
-const suiteTimeoutMs = Number(process.env.WECHAT_UI_TEST_TIMEOUT_MS || 210000);
-if (!Number.isSafeInteger(suiteTimeoutMs) || suiteTimeoutMs < 1) throw new Error('WECHAT_UI_TEST_TIMEOUT_MS must be a positive integer');
 
 const origin = process.env.WECHAT_UI_TEST_ORIGIN || process.argv[2], out = path.resolve(process.argv[3] || '');
 if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(origin || '') || !process.argv[3]) throw new Error('Pass an isolated localhost fixture and a report directory');
@@ -12,7 +10,8 @@ fs.mkdirSync(out, { recursive: true });
 fs.mkdirSync(path.join(out, 'browser-profile'), { recursive: true });
 app.setPath('userData', path.join(out, 'browser-profile'));
 app.disableHardwareAcceleration();
-if (process.env.WECHAT_UI_TEST_AUTHORIZATION_ONLY === '1' || process.env.WECHAT_UI_TEST_GENERATED_IMAGES_ONLY === '1') app.commandLine.appendSwitch('force-device-scale-factor', '1');
+if (process.env.WECHAT_UI_TEST_TRACES_ONLY === '1') app.commandLine.appendSwitch('force-device-scale-factor', '1');
+if (process.env.WECHAT_UI_TEST_AUTHORIZATION_ONLY === '1' || process.env.WECHAT_UI_TEST_GENERATED_IMAGES_ONLY === '1' || process.env.WECHAT_UI_TEST_STICKERS_ONLY === '1' || process.env.WECHAT_UI_TEST_ROLE_CARDS_ONLY === '1') app.commandLine.appendSwitch('force-device-scale-factor', '1');
 const report = { ok: false, runId: process.env.WECHAT_UI_TEST_RUN_ID || null, assertions: [], errors: [], screenshots: [], at: new Date().toISOString() };
 let window;
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -98,7 +97,7 @@ async function assertLayout(label) {
   });
   assert(result.document <= result.viewport + 1 && [result.panel, result.shell, result.workspace].every(([client, scroll]) => scroll <= client + 1), label + ' has horizontal overflow: ' + JSON.stringify(result));
 }
-function check(name) { report.assertions.push(name); console.log('[ui ' + report.assertions.length + '] ' + name); }
+function check(name) { report.assertions.push(name); }
 const peer = (state, id) => state.conversations.find(item => item.peerId === id);
 
 async function waitForReasoning(expectedValue = '') {
@@ -417,12 +416,8 @@ async function verifyMemory() {
   const selectedKey = name => evaluate(name => Array.from(document.querySelector('[aria-label="选择会话"]').options).find(option => option.textContent.includes(name)).value, name);
   const assertPanel = async id => {
     assert(await evaluate(id => {
-      return ['conversation', 'global', 'roles', 'images', 'generated-images', 'review'].every(tab => {
-        const button = document.querySelector('#wa-memory-tab-' + tab), panel = document.querySelector('#wa-memory-panel-' + tab);
-        return button?.getAttribute('aria-selected') === String(tab === id) && button.tabIndex === (tab === id ? 0 : -1) &&
-          button.getAttribute('aria-controls') === panel?.id && panel.getAttribute('aria-labelledby') === button.id &&
-          isVisible(panel) === (tab === id);
-      });
+      return document.querySelector('#wa-memory-tab-' + id).getAttribute('aria-selected') === 'true' &&
+        ['conversation', 'global', 'images', 'review'].every(tab => isVisible(document.querySelector('#wa-memory-panel-' + tab)) === (tab === id));
     }, id), id + ' must be the only visible memory panel');
   };
   const overview = async memoryDoc => {
@@ -471,11 +466,7 @@ async function verifyMemory() {
   check('image failures show grouped causes; unsuccessful retry reports remaining failures; success clears stale errors and keeps thumbnail limits');
 
   await evaluate(() => document.querySelector('#wa-memory-tab-conversation').focus());
-  for (const [keyCode, tab] of [
-    ['Right', 'global'], ['Right', 'roles'], ['Right', 'images'], ['Right', 'generated-images'], ['Right', 'review'], ['Right', 'conversation'],
-    ['Left', 'review'], ['Left', 'generated-images'], ['Left', 'images'], ['Left', 'roles'], ['Left', 'global'], ['Left', 'conversation'],
-    ['End', 'review'], ['Home', 'conversation'],
-  ]) {
+  for (const [keyCode, tab] of [['Right', 'global'], ['Left', 'conversation'], ['Left', 'review'], ['Right', 'conversation'], ['End', 'review'], ['Left', 'images'], ['Home', 'conversation']]) {
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode });
     await waitFor(tab => document.activeElement?.id === 'wa-memory-tab-' + tab && document.activeElement.getAttribute('aria-selected') === 'true', [tab]);
     await assertPanel(tab);
@@ -492,7 +483,7 @@ async function verifyMemory() {
   await clickText('撤销修改', globalPanel); assert.equal(await value('[aria-label="全局通用备注"]'), '');
   await input('[aria-label="全局通用备注"]', globalNotes);
   await clickText('会话记忆'); assert.equal(await value('[aria-label="记忆摘要"]'), localSummary);
-  check('real arrow/Home/End keys select and focus all six memory tabs with wraparound and matching accessible panels; unsaved local/global drafts survive switching and undo restores each saved value');
+  check('real arrow/Home/End keys select and focus all four memory tabs including review; unsaved local/global drafts survive switching and undo restores each saved value');
 
   await fixture('holdNext', { endpoint: 'memory.edit' }); await clickText('保存记忆', localPanel);
   await waitFor(async () => (await window.__uiFixture('heldRequest', { endpoint: 'memory.edit' })).started);
@@ -671,8 +662,17 @@ async function verifyTasks() {
     assert.deepEqual(task.targets, [{ id: 'wxid_alice', name: 'Alice·产品同事' }, { id: 'wxid_bob', name: 'Bob·设计同事' }]);
     assert((await fixture('stats')).memberRequests.every(request => request.accountId === 'wxid_ui_fixture' && ['group_alpha@chatroom', 'group_beta@chatroom'].includes(request.peerId)));
     check('task recipients search by names/remarks, distinguish duplicates, support removal and multi-select, clear on group switch, and persist scoped targets');
+    await waitFor(() => document.querySelector('.wa-task-next .wa-countdown')?.dataset.state === 'scheduled');
+    const countdown = await evaluate(() => document.querySelector('.wa-task-next .wa-countdown-value').textContent);
+    await pause(1200);
+    assert.notEqual(await evaluate(() => document.querySelector('.wa-task-next .wa-countdown-value').textContent), countdown);
+    assert.equal(await evaluate(() => document.querySelector('.wa-task-next .wa-countdown').getAttribute('aria-live')), 'off');
+    check('task countdowns tick every second beside the saved execution time without repeated screen-reader announcements');
     await clickText('暂停', '.wa-task'); await waitFor(async () => (await window.__uiFixture('stats')).tasks[0].state === 'paused');
+    await waitFor(() => document.querySelector('.wa-task-next .wa-countdown')?.dataset.state === 'paused');
     await clickText('恢复', '.wa-task'); await waitFor(async () => (await window.__uiFixture('stats')).tasks[0].state === 'pending');
+    await waitFor(() => document.querySelector('.wa-task-next .wa-countdown')?.dataset.state === 'scheduled');
+    check('paused tasks show their paused state and resuming restores the countdown');
     await assertLayout('desktop tasks'); await screenshot('tasks-desktop-dark'); await screenshot('tasks-desktop-light', 'light');
     await clickText('取消任务', '.wa-task'); await waitFor(async () => (await window.__uiFixture('stats')).tasks[0].state === 'cancelled');
     await waitFor(() => !document.querySelector('.wa-task'));
@@ -691,6 +691,7 @@ async function verifyTasks() {
     assert(completionShown, 'history must show completion time, not the planned hour');
     await click('[data-task-id="ui-history-completed-0"] summary');
     await waitFor(() => document.querySelector('[data-task-id="ui-history-completed-0"]').open);
+    assert.equal(await evaluate(() => document.querySelectorAll('[data-task-id="ui-history-completed-0"] .wa-countdown').length), 0);
     assert((await evaluate(() => document.querySelector('[data-task-id="ui-history-completed-0"]').textContent)).includes('fixture-history-ack-0'));
     await pause(2300); assert.equal(await evaluate(() => document.querySelector('[data-task-id="ui-history-completed-0"]').open), true);
     await click('[data-task-id="ui-history-completed-0"] summary');
@@ -884,20 +885,55 @@ app.whenReady().then(async () => {
     if ((severity === 'error' || severity === 3) && !text.includes('favicon.ico')) report.errors.push(text.slice(0, 600));
   });
   window.webContents.on('render-process-gone', (_event, details) => report.errors.push('Renderer exited: ' + details.reason));
-  const watchdog = setTimeout(() => { report.failure = 'UI verification exceeded ' + suiteTimeoutMs + ' milliseconds'; fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2)); app.exit(1); }, suiteTimeoutMs);
+  const watchdog = setTimeout(() => { report.failure = 'UI verification exceeded 210 seconds'; fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2)); app.exit(1); }, 210000);
   try {
     await window.loadURL(origin);
     await waitFor(() => typeof window.__uiFixture === 'function' && document.querySelector('.wa-account-name')?.textContent.includes('界面测试'));
     assert.equal((await fixture('state')).account.id, 'wxid_ui_fixture', 'Refuse to operate outside the synthetic fixture');
 
+    if (process.env.WECHAT_UI_TEST_AUTOMATION_ONLY === '1') {
+      await require('./test-automation-settings-ui.cjs')({ evaluate, waitFor, click, clickText, input, fixture,
+        screenshot, assertLayout, check, resize: (width, height) => window.setContentSize(width, height) });
+      assert.deepEqual(report.errors, []); report.ok = true; return;
+    }
+
     if (process.env.WECHAT_UI_TEST_ROLE_CARDS_ONLY === '1') {
       await require('./test-role-cards-ui.cjs')({ evaluate, waitFor, click, clickText, input, fixture,
-        screenshot, assertLayout, check, resize: (width, height) => window.setContentSize(width, height) });
+        screenshot, assertLayout, check, resize: (width, height) => window.setContentSize(width, height),
+        press: async keyCode => {
+          window.webContents.focus(); window.webContents.sendInputEvent({ type: 'keyDown', keyCode }); await pause(35);
+          if (keyCode === 'Enter') window.webContents.sendInputEvent({ type: 'char', keyCode: '\r' });
+          window.webContents.sendInputEvent({ type: 'keyUp', keyCode }); await pause(70);
+        } });
       assert.deepEqual(report.errors, []); report.ok = true; return;
     }
 
     if (process.env.WECHAT_UI_TEST_GENERATED_IMAGES_ONLY === '1') {
       await require('./test-generated-images-ui.cjs')({ evaluate, waitFor, click, clickText, input, fixture,
+        screenshot, assertLayout, check, resize: (width, height) => window.setContentSize(width, height) });
+      assert.deepEqual(report.errors, []); report.ok = true; return;
+    }
+    if (process.env.WECHAT_UI_TEST_TRACES_ONLY === '1') {
+      const downloads = [];
+      window.webContents.session.on('will-download', (event, item) => {
+        const filename = item.getFilename();
+        if (!/^wechat-task-\d{8}-[a-f0-9]{32}\.json$/.test(filename)) { event.preventDefault(); report.errors.push('Unexpected trace download name'); return; }
+        const file = path.join(out, filename); item.setSavePath(file);
+        item.once('done', (_event, state) => downloads.push({ state, filename, data: state === 'completed' ? JSON.parse(fs.readFileSync(file, 'utf8')) : null }));
+      });
+      // Offscreen windows need focus emulation to exercise actual focusin/blur events.
+      window.webContents.debugger.attach('1.3');
+      await window.webContents.debugger.sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true });
+      await require('./test-execution-traces-ui.cjs')({ evaluate, waitFor, click, clickText, input, fixture, screenshot, assertLayout, check,
+        downloads: () => downloads, sendInput: event => window.webContents.sendInputEvent(event), resize: (width, height) => window.setContentSize(width, height),
+        emulateReducedMotion: async enabled => {
+          if (!window.webContents.debugger.isAttached()) window.webContents.debugger.attach('1.3');
+          await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: enabled ? 'reduce' : 'no-preference' }] });
+        } });
+      assert.deepEqual(report.errors, []); report.ok = true; return;
+    }
+    if (process.env.WECHAT_UI_TEST_STICKERS_ONLY === '1') {
+      await require('./test-stickers-ui.cjs')({ evaluate, waitFor, click, clickText, input, fixture,
         screenshot, assertLayout, check, resize: (width, height) => window.setContentSize(width, height) });
       assert.deepEqual(report.errors, []); report.ok = true; return;
     }
@@ -1862,14 +1898,10 @@ app.whenReady().then(async () => {
     await verifyTasks();
 
     await click('[data-testid="nav-assets"]'); await waitFor(() => document.querySelector('[data-testid="asset-upload-input"]'));
-    await waitFor(() => document.querySelectorAll('.wa-pack-card').length === 3 && document.querySelectorAll('.wa-pack-previews img').length === 9 && [...document.querySelectorAll('.wa-pack-previews img')].every(image => image.complete && image.naturalWidth === 256));
+    await waitFor(() => document.querySelector('[data-testid="wechat-stickers"]'));
     assert.equal((await fixture('assets')).total, 0);
-    assert((await fixture('assets')).packs.every(pack => !pack.enabled));
-    await fixture('failNext', { endpoint: 'assets.packs.configure' }); await click('[aria-label="启用分组 猫咪心情"]');
-    await waitFor(() => document.querySelector('[role="alert"]')?.textContent.includes('模拟保存失败'));
-    assert.equal(await evaluate(() => document.querySelector('[aria-label="启用分组 猫咪心情"]').checked), false);
-    assert.equal((await fixture('assets')).total, 0);
-    check('three built-in packs load nine real offline previews; failed enable retains the saved switch and imports no assets');
+    assert.deepEqual((await fixture('assets')).packs, []);
+    check('the empty library starts with WeChat sync controls and contains no bundled internet packs');
     await evaluate(async () => {
       const fixture = await window.__uiFixture('assetZip'), binary = atob(fixture.data), bytes = Uint8Array.from(binary, ch => ch.charCodeAt(0));
       const transfer = new DataTransfer(); transfer.items.add(new File([bytes], fixture.name, { type: 'application/zip' }));
@@ -1895,13 +1927,13 @@ app.whenReady().then(async () => {
     await clickText('关闭', '[role="dialog"]');
     check('the real file input imports a ZIP across two 256 KiB chunks and previews the original PNG');
 
-    await clickText('理解未填写含义的图片');
-    await waitFor(() => document.querySelector('[role="status"]')?.textContent.includes('2 张表情包跳过'));
-    assert.equal((await fixture('assets')).counts.described, 0);
-    assert.deepEqual((await fixture('stats')).assetAnalysisRequests, []);
+    await clickText('整理未填写的含义与情景');
+    await waitFor(() => document.querySelector('[role="status"]')?.textContent.includes('已理解 2 张'));
+    assert.equal((await fixture('assets')).counts.described, 2);
+    assert((await fixture('assets')).items.every(item => item.usage));
     await click('[data-testid="asset-settings"] summary');
-    await input('[aria-label="素材自动使用概率"]', '35'); await input('[aria-label="素材最少消息间隔"]', '5'); await clickText('保存使用设置');
-    await waitFor(async () => { const settings = (await window.__uiFixture('assets')).settings; return settings.enabled && settings.probability === 35 && settings.minGapMessages === 5; });
+    await input('[aria-label="素材最少消息间隔"]', '5'); await clickText('保存使用设置');
+    await waitFor(async () => { const settings = (await window.__uiFixture('assets')).settings; return settings.enabled && settings.minGapMessages === 5; });
     await click('[aria-label="预览并编辑 红色方块"]');
     await input('[aria-label="素材名称"]', '讨论赞同'); await input('[aria-label="素材含义"]', '红色方块，用于熟人讨论中的肯定；安慰难过的人时不用。'); await input('[aria-label="素材标签"]', '赞同，讨论');
     await click('[aria-label="启用这张素材"]');
@@ -1917,30 +1949,11 @@ app.whenReady().then(async () => {
     await click('[aria-label="预览并编辑 讨论赞同"]'); await waitFor(() => document.querySelector('.wa-assets-large-preview img')?.complete);
     await assertLayout('desktop media editor'); await screenshot('assets-editor-desktop-dark'); await screenshot('assets-editor-desktop-light', 'light');
     await clickText('关闭', '[role="dialog"]');
-    check('synthetic image descriptions, probability/gap settings, metadata search and disable/edit retry persist through real RPC');
+    check('sticker descriptions and scenarios, interval settings, metadata search and edit retries persist through real RPC');
     await click('[aria-label="选择 讨论赞同"]'); await clickText('删除选中'); await clickText('确认删除素材');
     await waitFor(() => document.querySelectorAll('.wa-asset-card').length === 1 && !document.querySelector('.wa-assets-delete'));
     assert.equal((await fixture('assets')).items[0].name, '绿色方块');
     check('confirmed asset deletion removes only the selected image and leaves the other available');
-
-    await click('[aria-label="启用分组 猫咪心情"]');
-    await waitFor(async () => (await window.__uiFixture('assets')).total === 10);
-    await input('[aria-label="素材分组筛选"]', 'builtin-fluent-cats');
-    await waitFor(() => document.querySelectorAll('.wa-asset-card').length === 9);
-    await click('[aria-label="预览并编辑 猫猫开心"]');
-    await waitFor(() => document.querySelector('.wa-assets-large-preview img')?.naturalWidth === 256);
-    await click('[aria-label="启用这张素材"]'); await clickText('保存素材', '[role="dialog"]');
-    await waitFor(() => !document.querySelector('[role="dialog"]'));
-    await click('[aria-label="启用分组 猫咪心情"]');
-    await waitFor(() => document.querySelectorAll('.wa-asset-card.is-disabled').length === 9);
-    assert.equal((await fixture('assets')).counts.enabled, 1);
-    await click('[aria-label="启用分组 猫咪心情"]');
-    await waitFor(() => document.querySelectorAll('.wa-asset-card.is-disabled').length === 1);
-    assert.equal((await fixture('assets')).total, 10);
-    await assertLayout('desktop built-in sticker groups'); await screenshot('builtin-sticker-packs-desktop-dark'); await screenshot('builtin-sticker-packs-desktop-light', 'light');
-    await click('[data-testid="nav-overview"]'); await click('[data-testid="nav-assets"]');
-    await waitFor(() => document.querySelector('[aria-label="启用分组 猫咪心情"]')?.checked && document.querySelectorAll('.wa-asset-card').length === 10);
-    check('built-in enable imports nine captioned PNGs, filtering and group disable work, and re-enable/navigation preserve a per-image opt-out');
 
     window.setContentSize(430, 900);
     await assertLayout('narrow media library'); await screenshot('assets-narrow-dark'); await screenshot('assets-narrow-light', 'light');

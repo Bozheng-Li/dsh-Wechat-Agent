@@ -2,13 +2,18 @@ import { ChannelError } from '../../shared/contracts.mjs';
 import { readPrompt } from '../../prompts/loader.mjs';
 import { personaInstructions } from '../../prompts/reply/compose.mjs';
 import { publicLanguageInstructions } from '../../prompts/reply/language.mjs';
+import { momentsPersonMemory } from '../memory/roles/tool.mjs';
+import { ROLE_CARD_READING_PROMPT } from '../../prompts/memory/role-card.mjs';
+import { readableMomentsImages } from './image-context.mjs';
 
-export async function generateInteractionComments(channel, rows, instructions, signal, check) {
+export async function generateInteractionComments(channel, rows, instructions, signal, check, accountId = channel.transport?.status().account?.id) {
   check();
-  const response = await channel.runner.run({ mode: 'moments-interaction', tools: [], signal,
-    systemOverride: [readPrompt('moments/interactions.md'), personaInstructions(channel.store.persona()), publicLanguageInstructions()].join('\n\n'),
-    text: JSON.stringify({ instruction: instructions, posts: rows.map(row => ({ postId: row.postId, text: row.text, imageCount: row.imageCount,
-      imageContext: row.imageContext?.complete ? row.imageContext.images.map(image => ({ index: image.index, description: image.description })) : [] })) }) });
+  const personMemory = momentsPersonMemory(channel, accountId, rows.map(row => ({ id: row.userId, name: row.nickname })), check, rows.map(row => row.text).join('\n'));
+  const response = await channel.runner.run({ mode: 'moments-interaction', tools: personMemory.tools, signal, assertAllowed: check,
+    systemOverride: [readPrompt('moments/interactions.md'), personaInstructions(channel.store.persona()), publicLanguageInstructions(), ROLE_CARD_READING_PROMPT].join('\n\n'),
+    text: JSON.stringify({ instruction: instructions, personMemory: personMemory.context, posts: rows.map(row => ({ postId: row.postId, authorId: row.userId, text: row.text, imageCount: row.imageCount,
+      imageContext: readableMomentsImages(row.imageContext).map(image => ({ index: image.index, description: image.description })),
+      unreadImageCount: row.imageCount - readableMomentsImages(row.imageContext).length })) }) });
   check(); let result;
   try { result = JSON.parse(String(response?.text ?? '').trim().replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```$/, '').trim()); } catch {}
   if (!result || !Array.isArray(result.comments) || Object.keys(result).some(key => key !== 'comments') || result.comments.length !== rows.length ||

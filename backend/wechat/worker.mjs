@@ -22,9 +22,10 @@ const runtimeReady = process.platform === 'win32' && process.arch === 'x64' &&
   ['runtime/python/python.exe', 'runtime/native_login_worker.py', 'runtime/wechat39-engine/manifest.json'].every(file => fs.existsSync(path.join(resources, file)));
 function send(message) { if (process.connected) process.send(message, () => {}); }
 function publicDeliveryParts(value) {
-  if (!Array.isArray(value) || value.length > 256 || !value.every((part, index) => part?.index === index && ['text', 'image', 'file'].includes(part.type) &&
+  if (!Array.isArray(value) || value.length > 256 || !value.every((part, index) => part?.index === index && ['text', 'image', 'face', 'file'].includes(part.type) &&
     ['acknowledged', 'unknown', 'not-sent'].includes(part.state) && (part.state !== 'acknowledged' || typeof part.serverMessageId === 'string' && part.serverMessageId && part.serverMessageId !== '0'))) return null;
   return value.map(part => ({ index: part.index, type: part.type, state: part.state, ...(part.state === 'acknowledged' ? { serverMessageId: part.serverMessageId } : {}),
+    ...(part.nativeFallback === true ? { nativeFallback: true } : {}),
     ...(typeof part.name === 'string' && part.name.length <= 240 && !/[\\/:\u0000-\u001f\u007f]/.test(part.name) && Number.isSafeInteger(part.bytes) && part.bytes > 0 && /^[a-f0-9]{64}$/.test(part.sha256) ? { name: part.name, bytes: part.bytes, sha256: part.sha256 } : {}) }));
 }
 function snapshot() {
@@ -38,6 +39,7 @@ function snapshot() {
     momentsImagesReady: status.online && !!backend.session.value?.image_base_request,
     momentsWriteReady: status.online && !!backend.session.value?.image_base_request,
     momentsAudienceReady: status.online && !!backend.session.value?.image_base_request,
+    nativeStickersReady: status.online && !!(backend.session.value?.image_base_request ?? backend.session.value?.heartbeat_base_request),
     ...diagnostics.lastError ? { error: '微信连接异常，请检查网络；持续离线时请重新扫码' } : {}
   };
 }
@@ -93,8 +95,12 @@ async function perform(id, op, args) {
       const account = backend.session.value;
       if (!account || args?.accountId !== account.wxid) throw new ChannelError('ACCOUNT_CHANGED', '微信账号已变化，未操作其他账号的朋友圈');
       if (typeof args.clientId !== 'string' || !/^sns_[a-f0-9]{64}$/.test(args.clientId)) throw new ChannelError('ERR_INVALID_MOMENTS_WRITE', '朋友圈操作缺少稳定请求编号');
+      if (!Array.isArray(args.authorizedUserIds) || args.authorizedUserIds.length > 50000 ||
+          args.authorizedUserIds.some(value => typeof value !== 'string' || !/^[\w.:-]{1,200}$/.test(value)) ||
+          new Set(args.authorizedUserIds).size !== args.authorizedUserIds.length)
+        throw new ChannelError('OBJECT_NOT_AUTHORIZED', '朋友圈操作缺少当前账号的有效授权对象，未执行');
       const controller = new AbortController(); sending.set(id, controller);
-      try { return await backend.writeMoments(args.query, args.clientId, controller.signal); }
+      try { return await backend.writeMoments(args.query, args.clientId, controller.signal, args.authorizedUserIds); }
       finally { sending.delete(id); }
     }
     case 'moments.audience': {
@@ -120,6 +126,17 @@ async function perform(id, op, args) {
         return result;
       } finally { sending.delete(id); }
     }
+    case 'stickers.list':
+    case 'stickers.content':
+    case 'stickers.favorite':
+    case 'stickers.recent': {
+      const account = backend.session.value;
+      if (!account || args?.accountId !== account.wxid) throw new ChannelError('ACCOUNT_CHANGED', '微信账号已变化，未读取其他账号的表情');
+      const controller = new AbortController(); sending.set(id, controller);
+      try {
+        return await (op === 'stickers.list' ? backend.readStickers(controller.signal) : op === 'stickers.favorite' ? backend.favoriteSticker(args.md5, controller.signal) : op === 'stickers.content' ? backend.readStickerContent(args.md5, controller.signal) : backend.recentStickers(controller.signal));
+      } finally { sending.delete(id); }
+    }
     case 'media': {
       const account = backend.session.value;
       if (!account || args.accountId !== account.wxid) throw new ChannelError('ACCOUNT_CHANGED', '微信账号已变化，未读取其他账号的图片');
@@ -127,6 +144,7 @@ async function perform(id, op, args) {
       try {
         const image = await loadObservedMedia({ directory: path.join(dirs.cache, 'protocol/media', String(account.uin)), peerId: args.peerId, messageId: args.messageId, resourceId: args.resourceId, signal: controller.signal,
           preferOriginal: args.preferOriginal === true,
+          preserveStickerOriginal: args.preserveStickerOriginal === true,
           downloadOriginal: ({ signal, ...input }) => backend.downloadImage(input, signal) });
         const current = backend.session.value;
         if (!current || ['uin', 'wxid', 'token', 'body_key', 's08'].some(key => current[key] !== account[key]))
@@ -134,6 +152,9 @@ async function perform(id, op, args) {
         return image;
       }
       finally { sending.delete(id); }
+    }
+    case 'files': {
+      throw new ChannelError('FILE_FEATURE_DISABLED', '微信附件读取功能已停用');
     }
     case 'close': await close(); return null;
     default: throw new ChannelError('UNKNOWN_OPERATION', '不支持的微信操作');
@@ -150,7 +171,7 @@ process.on('message', async message => {
     const parts = publicDeliveryParts(details.deliveryParts);
     send({ type: 'result', id: message.id, ok: false, error: {
       code: error?.code || 'WECHAT_FAILED',
-      message: error instanceof ChannelError || ['ERR_LOGIN_BUSY', 'ERR_SESSION_EXISTS', 'ERR_LOGIN_HANDOFF', 'ERR_IMAGE_FORMAT', 'ERR_IMAGE_CREDENTIAL', 'ERR_FILE_CREDENTIAL', 'ERR_FILE_REJECTED', 'ERR_FILE_NETWORK', 'ERR_FILE_PROTOCOL', 'ERR_UNSUPPORTED_IMAGE', 'ERR_MENTION_TARGET', 'ERR_MENTION_LIMIT',
+      message: error instanceof ChannelError || /^ERR_STICKER_/.test(error?.code ?? '') || message.op === 'files' && /^ERR_FILE_/.test(error?.code ?? '') || ['ERR_LOGIN_BUSY', 'ERR_SESSION_EXISTS', 'ERR_LOGIN_HANDOFF', 'ERR_IMAGE_FORMAT', 'ERR_IMAGE_CREDENTIAL', 'ERR_FILE_CREDENTIAL', 'ERR_FILE_REJECTED', 'ERR_FILE_NETWORK', 'ERR_FILE_PROTOCOL', 'ERR_UNSUPPORTED_IMAGE', 'ERR_MENTION_TARGET', 'ERR_MENTION_LIMIT',
         'ERR_INVALID_MOMENTS_QUERY', 'ERR_MOMENTS_OFFLINE', 'ERR_MOMENTS_CREDENTIAL', 'ERR_MOMENTS_NETWORK', 'ERR_MOMENTS_REJECTED', 'ERR_MOMENTS_PROTOCOL', 'ERR_MOMENTS_CURSOR', 'ERR_MOMENTS_ACCOUNT_CHANGED',
         'ERR_INVALID_MOMENTS_WRITE', 'ERR_MOMENTS_WRITE_REJECTED', 'ERR_MOMENTS_WRITE_PROTOCOL', 'ERR_MOMENTS_TARGET_UNAVAILABLE', 'ERR_MOMENTS_AUDIENCE'].includes(error?.code)
         ? error.message : message.op === 'send' ? publicSendErrorMessage(error) ?? '微信发送失败，请检查连接及回执记录' : '微信操作失败，请检查连接状态',

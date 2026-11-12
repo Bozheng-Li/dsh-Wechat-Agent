@@ -48,8 +48,10 @@ function fixture(t, answers, { caption = '此刻歇一歇，也无妨。', after
         messages.push(message);
         pending = (async () => {
           if (number !== 0 || !selectMedia) return;
-          const tool = scope.definitions.find(value => value.name === 'wechat_reply_media'); assert(tool);
-          const result = JSON.parse(await tool.execute({ action: 'select', assetId: asset.id, caption }, { signal: options.signal }));
+          const read = scope.definitions.find(value => value.name === 'wechat_sticker_read'); assert(read);
+          await read.execute({ action: 'read', assetId: asset.id }, { signal: options.signal });
+          const tool = scope.definitions.find(value => value.name === 'wechat_sticker_send'); assert(tool);
+          const result = JSON.parse(await tool.execute({ assetId: asset.id, caption }, { signal: options.signal }));
           assert(result.ok && !result.sent);
           await afterSelect?.({ runtime, choice, store, channel, asset });
         })();
@@ -67,8 +69,10 @@ function fixture(t, answers, { caption = '此刻歇一歇，也无妨。', after
   // the memory suites and must not consume the model answers for this turn.
   runner.extractLongTermMemory = undefined;
   if (legacy) runner.run = async input => {
-    const tool = input.tools.find(value => value.name === 'wechat_reply_media'); assert(tool);
-    await tool.execute({ action: 'select', assetId: asset.id, caption }, { signal: input.signal });
+    const read = input.tools.find(value => value.name === 'wechat_sticker_read'); assert(read);
+    await read.execute({ action: 'read', assetId: asset.id }, { signal: input.signal });
+    const tool = input.tools.find(value => value.name === 'wechat_sticker_send'); assert(tool);
+    await tool.execute({ assetId: asset.id, caption }, { signal: input.signal });
     return { text: '兼容 runner 的未采用正文' };
   };
   const transport = {
@@ -76,6 +80,7 @@ function fixture(t, answers, { caption = '此刻歇一歇，也无妨。', after
     send: async input => { sent.push(input); if (sendFailure) throw sendFailure; return { delivery: 'server-ack', serverMessageIds: ['persona-delivery-ack'] }; },
   };
   channel = new WechatChannel({ store, runner, transport, random: () => 0 });
+  channel.library.configure(accountId, { ...channel.library.account(accountId).settings, autoDescribe: false });
   channel.library.import(accountId, { name: '示例.png', kind: 'sticker', data: png().toString('base64') });
   asset = channel.library.list(accountId).items[0];
   const receive = async (question = '发个表情包，配一句话。') => {

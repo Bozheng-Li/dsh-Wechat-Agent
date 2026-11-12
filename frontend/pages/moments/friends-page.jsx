@@ -1,12 +1,12 @@
+import { AutomationLink } from '../../components/automation-link.jsx';
 import { CleanupControl } from '../../components/cleanup-control.jsx';
 import { useEffect, useRef, useState } from 'react';
 import { Button, Empty, Feedback, Tag } from '../../components/workbench-ui.jsx';
 import { useWorkbench } from '../../hooks/use-workbench.mjs';
 import { formatTime } from '../../shared/conversations.mjs';
 import { Glyph } from '../../components/glyph.jsx';
-import { MOMENTS_LIKE_DEFAULTS as defaults } from '../../../shared/moments-likes.mjs';
+import { ScheduleCountdown } from '../../components/schedule-countdown.jsx';
 
-const bounds = [['intervalMinutes', '检查间隔（分钟）', 5, 1440], ['lookbackDays', '查看最近几天', 1, 30], ['maxLikesPerRun', '每轮最多点赞', 1, 20], ['maxLikesPerDay', '每天最多点赞', 1, 100]];
 const recordLabels = { sending: '等待微信确认', liked: '微信已确认', unknown: '结果不明', rejected: '未提交成功', skipped: '已跳过' };
 const runLabels = { running: '执行中', completed: '已完成', cancelled: '已取消', failed: '执行失败', interrupted: '已中断' };
 // Keep the same operation identity when this tab is closed and reopened.
@@ -16,17 +16,15 @@ const errorText = error => typeof error === 'string' ? error : error?.message ||
 const postLiked = (post, accountId) => post.likedByCurrentAccount === true || (post.likes ?? []).some(row => row.userId === accountId);
 const stamp = seconds => seconds ? formatTime(seconds * 1000) : '时间未知';
 
-export function MomentsFriendsPage({ rpc, status, onInteract, onComments }) {
+export function MomentsFriendsPage({ rpc, status, onInteract, onComments, onNavigate }) {
   const accountId = status.account?.id, online = status.online && !!accountId;
-  const state = useWorkbench(rpc, accountId, 'moments.likes.list', '', 5000);
+  const state = useWorkbench(rpc, accountId, 'moments.likes.list', '', 5000, status.timeSettings);
   const [feed, setFeed] = useState(emptyFeed), [scope, setScope] = useState('timeline'), [user, setUser] = useState('');
-  const [contacts, setContacts] = useState(null), [contactsError, setContactsError] = useState(''), [contactSearch, setContactSearch] = useState(''), [contactLimit, setContactLimit] = useState(50);
-  const [settings, setSettings] = useState({ ...defaults }), [dirty, setDirty] = useState(false), [, renderLikes] = useState(0), [cancelling, setCancelling] = useState(false), [controlError, setControlError] = useState('');
+  const [contacts, setContacts] = useState(null), [contactsError, setContactsError] = useState('');
+  const [, renderLikes] = useState(0), [cancelling, setCancelling] = useState(false), [controlError, setControlError] = useState('');
   const api = useRef(rpc), reader = useRef(null), contactReader = useRef(null), epoch = useRef(0), live = useRef(false), writes = useRef(new Set()), runRequest = useRef(null);
   api.current = rpc;
   const data = state.data?.accountId === accountId ? state.data : null;
-  useEffect(() => { if (data?.settings && !dirty) setSettings(data.settings); }, [data, dirty]);
-  const update = patch => { setSettings(value => ({ ...value, ...patch })); setDirty(true); };
   const invalidate = () => { epoch.current++; reader.current?.abort(); reader.current = null; setFeed(emptyFeed()); };
   const read = async (cursor, target = { scope, user }) => {
     if (!online || target.scope === 'user' && !target.user.trim()) return;
@@ -72,8 +70,6 @@ export function MomentsFriendsPage({ rpc, status, onInteract, onComments }) {
     } catch (error) { Object.assign(operation, { state: ['not-sent', 'rejected'].includes(error?.delivery) ? 'rejected' : 'unknown', error: errorText(error) || '没有收到微信确认。' }); }
     finally { writes.current.delete(controller); if (live.current) renderLikes(value => value + 1); }
   };
-  const valid = bounds.every(([key, , min, max]) => Number.isInteger(settings[key]) && settings[key] >= min && settings[key] <= max) && (!settings.enabled || settings.userIds.length > 0) && settings.userIds.length <= 100;
-  const visibleContacts = (contacts ?? []).filter(row => [row.name, row.nickname, row.remark, row.id].some(value => String(value ?? '').toLocaleLowerCase().includes(contactSearch.trim().toLocaleLowerCase())));
   const contactNames = new Map((contacts ?? []).map(row => [row.id, row.name || row.nickname || row.id]));
   const run = async () => {
     runRequest.current ??= 'ui-moments-' + crypto.randomUUID();
@@ -95,6 +91,7 @@ export function MomentsFriendsPage({ rpc, status, onInteract, onComments }) {
         {scope === 'user' && <label>好友昵称或微信 ID<input aria-label="好友动态查询对象" list="wa-moments-friend-options" value={user} maxLength={150} placeholder="输入精确昵称、备注或微信 ID" onChange={event => { invalidate(); setUser(event.target.value); }} /><datalist id="wa-moments-friend-options">{(contacts ?? []).map(row => <option value={row.id} key={row.id}>{row.name || row.nickname || row.id}</option>)}</datalist></label>}
         <Button type="submit" disabled={!online || feed.loading || scope === 'user' && !user.trim()}>{feed.loaded ? '刷新好友动态' : '读取好友动态'}</Button>
       </form>
+      {contactsError && <p className="wa-alert is-error" role="alert">好友列表读取失败：{contactsError}</p>}
       <p className="wa-wb-note">仅显示好友当前可见的动态，每次最多读取 20 条；指定好友时按发布时间核对顺序。点赞数以最近一次微信读取为准。</p>
       {feed.selection?.complete === false && feed.nextCursor && <p className="wa-wb-note">还有未核实的动态范围，可以继续读取；当前结果不代表该好友的全部动态。</p>}
       {feed.error && <p role="alert" className="wa-alert is-error">{feed.error}</p>}
@@ -118,36 +115,19 @@ export function MomentsFriendsPage({ rpc, status, onInteract, onComments }) {
       {feed.nextCursor && <Button quiet disabled={!online || feed.loading} onClick={() => read(feed.nextCursor)}>继续读取好友动态</Button>}
     </section>
 
-    <section className="wa-friend-automation" data-testid="moments-likes-settings" aria-labelledby="wa-friend-likes-title">
+    <section className="wa-friend-automation" data-testid="moments-likes-status" aria-labelledby="wa-friend-likes-title">
       <header className="wa-index-heading"><h2 id="wa-friend-likes-title">自动点赞</h2><Tag state={data?.running ? 'running' : data?.settings.enabled ? 'ready' : 'disabled'}>{data?.running ? '本轮执行中' : data?.settings.enabled ? '定时已开启' : '定时已关闭'}</Tag></header>
       <Feedback state={state} cancellable={false} />
       {state.busy && <p className="wa-wb-loading" role="status"><span className="wa-activity-indicator" aria-hidden="true" />{runRequest.current ? '正在处理本轮点赞，等待执行结果…' : '正在更新点赞状态…'}</p>}
       {controlError && <p role="alert" className="wa-alert is-error">{controlError}</p>}
       {state.refreshError && <p role="alert" className="wa-wb-note">{state.refreshError}</p>}
       {data?.error && <p role="alert" className="wa-alert is-error">{errorText(data.error)}</p>}
-      <p className="wa-wb-note">定时仅处理选中好友的新动态，默认关闭。聊天中的明确点赞请求由下方开关控制；结果不明时保留记录，不重复提交。</p>
-      <fieldset className="wa-likes-fields" disabled={state.loading || state.busy || !data}>
-        <section className="wa-form-section"><h3>触发方式</h3>
-          <label className="wa-wb-check"><input aria-label="开启定时点赞" type="checkbox" checked={settings.enabled} onChange={event => update({ enabled: event.target.checked })} />定时为选中好友的新动态点赞</label>
-          <label className="wa-wb-check"><input aria-label="响应聊天点赞请求" type="checkbox" checked={settings.respondToRequests} onChange={event => update({ respondToRequests: event.target.checked })} />响应聊天中明确提出的朋友圈点赞请求</label>
-        </section>
-        <section className="wa-form-section"><div className="wa-audience-heading"><h3>定时点赞的好友</h3><span className="wa-audience-count">已选 {settings.userIds.length} / 100</span></div>
-          <div className="wa-friend-contact-search"><label>搜索好友<input aria-label="搜索自动点赞好友" type="search" value={contactSearch} placeholder="搜索昵称、备注或微信 ID" onChange={event => { setContactSearch(event.target.value); setContactLimit(50); }} /></label><Button quiet disabled={!online} onClick={readContacts}>刷新好友列表</Button></div>
-          {contactsError && <p className="wa-alert is-error" role="alert">好友列表读取失败：{contactsError} 已选好友保留。</p>}
-          <div className="wa-friend-contact-list" role="group" aria-label="自动点赞好友选择">{visibleContacts.slice(0, contactLimit).map(row => <label className={'wa-wb-check wa-audience-row' + (settings.userIds.includes(row.id) ? ' is-selected' : '')} key={row.id}>
-            <input aria-label={`自动点赞好友 ${row.name || row.nickname || row.id} ${row.id}`} type="checkbox" disabled={!settings.userIds.includes(row.id) && settings.userIds.length >= 100} checked={settings.userIds.includes(row.id)} onChange={event => update({ userIds: event.target.checked ? [...settings.userIds, row.id] : settings.userIds.filter(id => id !== row.id) })} /><span>{row.name || row.nickname || row.id}<small className="wa-audience-identity">{row.id}</small></span>
-          </label>)}{!visibleContacts.length && <p className="wa-wb-note">{contacts ? '没有匹配的好友。' : '正在读取好友列表…'}</p>}</div>
-          {visibleContacts.length > contactLimit && <Button quiet onClick={() => setContactLimit(value => value + 50)}>显示更多好友</Button>}
-          {settings.userIds.length > 0 && <div className="wa-recipient-selection">{settings.userIds.map(id => <Button quiet key={id} aria-label={`移除自动点赞好友 ${id}`} onClick={() => update({ userIds: settings.userIds.filter(value => value !== id) })}>{contactNames.get(id) || id} ×</Button>)}</div>}
-          {!settings.userIds.length && <p className="wa-wb-note">尚未选择好友；开启定时或立即执行前，请先选择并保存。</p>}
-        </section>
-        <section className="wa-form-section"><h3>频率与额度</h3><div className="wa-wb-generator wa-likes-limits">{bounds.map(([key, label, min, max]) => <label key={key}>{label}<input aria-label={label} type="number" min={min} max={max} value={settings[key]} onChange={event => update({ [key]: event.target.value === '' ? '' : Number(event.target.value) })} /></label>)}</div>
-          <label className="wa-wb-check"><input aria-label="包含开启前的动态" type="checkbox" checked={settings.includeExisting} onChange={event => update({ includeExisting: event.target.checked })} />也处理开启前、仍在最近天数范围内的动态</label>
-          <p className="wa-wb-note">检查间隔 5–1440 分钟，最近 1–30 天；每轮 1–20 次，每天 1–100 次。未获确认的提交也占用尝试额度。</p>
-        </section>
-      </fieldset>
-      <div className="wa-form-actions"><span className={dirty ? 'wa-dirty' : 'wa-help'}>{dirty ? '有尚未保存的更改' : '保存后生效，立即执行使用已保存设置。'}</span><div className="wa-wb-actions"><Button quiet disabled={!dirty || state.busy} onClick={() => { setSettings(data?.settings ?? { ...defaults }); setDirty(false); }}>取消点赞设置更改</Button><Button disabled={!dirty || !valid || state.busy || !data} onClick={async () => { const result = await state.execute('moments.likes.configure', { settings }, false); if (result) { state.setData(result); setDirty(false); state.setNotice('自动点赞设置已保存。'); } }}>保存点赞设置</Button></div></div>
-      <div className="wa-likes-status"><div><p>下次检查：{data?.nextRunAt ? formatTime(data.nextRunAt) : '未安排'}</p><p>今日尝试 {data?.today?.attempted ?? 0} 次 · 确认新增 {data?.today?.liked ?? 0} 赞 · 剩余额度 {data?.today?.remaining ?? '—'}</p></div><div className="wa-wb-actions"><Button quiet disabled={state.busy} onClick={state.refresh}>刷新点赞状态</Button><Button quiet disabled={!online || state.busy || data?.running || dirty || !data?.settings.userIds.length} onClick={run}>{runRequest.current ? '核对此轮执行结果' : '立即执行一轮'}</Button>{data?.running && <Button quiet disabled={cancelling} onClick={cancelRun}>{cancelling ? '正在请求停止…' : '停止本轮'}</Button>}</div></div>
+      <div className="wa-wb-between"><p className="wa-wb-note">好友名单、定时点赞与聊天请求开关统一在“设置 → 自动功能”中管理。</p>
+        <AutomationLink onNavigate={onNavigate} from="moments" section="moments-likes">自动点赞设置</AutomationLink></div>
+      <div className="wa-likes-status"><div><p className="wa-schedule-time"><span>下次检查：{data?.nextRunAt ? formatTime(data.nextRunAt) : '未安排'}</span>
+        {data && <ScheduleCountdown at={data.nextRunAt} enabled={data.settings.enabled} running={data.running}
+          paused={data.error || data.schedulerStarted === false || !data.settings.userIds.length} status={status} action="检查" />}</p>
+        <p>今日尝试 {data?.today?.attempted ?? 0} 次 · 确认新增 {data?.today?.liked ?? 0} 赞 · 剩余额度 {data?.today?.remaining ?? '—'}</p></div><div className="wa-wb-actions"><Button quiet disabled={state.busy} onClick={state.refresh}>刷新点赞状态</Button><Button quiet disabled={!online || state.busy || data?.running || !data?.settings.userIds.length} onClick={run}>{runRequest.current ? '核对此轮执行结果' : '立即执行一轮'}</Button>{data?.running && <Button quiet disabled={cancelling} onClick={cancelRun}>{cancelling ? '正在请求停止…' : '停止本轮'}</Button>}</div></div>
     </section>
     <section className="wa-likes-history" data-testid="moments-likes-history"><header className="wa-index-heading"><h2>执行记录</h2><span>自动点赞</span></header><div className="wa-wb-actions"><CleanupControl key={status.account?.id + ":runs"} state={state} kind="moments.likes.runs" label="清空执行轮次" /><CleanupControl key={status.account?.id + ":records"} state={state} kind="moments.likes.records" label="清空点赞记录" /></div>
       {!!data?.runs?.length && <p className="wa-wb-note">显示最近 10 轮执行与 30 条动态的处理结果。</p>}

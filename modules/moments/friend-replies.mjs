@@ -6,7 +6,10 @@ import { readPrompt } from '../../prompts/loader.mjs';
 import { personaInstructions } from '../../prompts/reply/compose.mjs';
 import { publicLanguageInstructions } from '../../prompts/reply/language.mjs';
 import { readInteractionPool, readInteractionDetail, interactionContentHash } from './interaction-read.mjs';
-import { readMomentsImageContext } from './image-context.mjs';
+import { readMomentsImageContext, readableMomentsImages, momentsCommentBasis, momentsImageFailure, recoverableMomentsImageError } from './image-context.mjs';
+import { momentsPersonMemory } from '../memory/roles/tool.mjs';
+import { ROLE_CARD_READING_PROMPT } from '../../prompts/memory/role-card.mjs';
+import { readMomentsWithMemory } from './read.mjs';
 
 const key = (accountId, postId, commentId = '') => identity([accountId, postId, commentId]);
 const blocked = state => ['sent', 'existing', 'sending', 'unknown', 'rejected', 'skipped'].includes(state);
@@ -33,11 +36,11 @@ export function validateFriendReplies(data) {
 }
 
 async function commentsFor(channel, context, postId, signal, check) {
-  const comments = [], ids = new Set(), cursors = new Set(); let cursor, expected;
+  const comments = [], ids = new Set(), cursors = new Set(); let cursor, expected, filtered = 0;
   for (let page = 0; page < 10; page++) {
     check();
-    const result = await channel.transport.readMoments({ accountId: context.accountId, scopeKey: context.scopeKey,
-      query: { action: 'comments', postId, limit: 50, ...(cursor ? { cursor } : {}) } }, signal);
+    const result = await readMomentsWithMemory(channel, { accountId: context.accountId, scopeKey: context.scopeKey,
+      query: { action: 'comments', postId, limit: 50, ...(cursor ? { cursor } : {}) } }, signal, check);
     check();
     if (result?.accountId !== context.accountId || result.source !== 'wechat-sns-live' || result.action !== 'comments' || result.postId !== postId ||
         !Array.isArray(result.items) || result.items.length > 50 || !Number.isSafeInteger(result.visibleCommentEntries) || result.visibleCommentEntries < 0 ||
@@ -47,12 +50,13 @@ async function commentsFor(channel, context, postId, signal, check) {
       fail('评论区的账号、动态或内容不完整，未自动回复');
     if (expected === undefined) expected = result.visibleCommentEntries;
     else if (result.visibleCommentEntries !== expected) fail('评论区分页内容发生变化，留待下次读取');
+    filtered += result.authorizationFilteredCount || 0;
     for (const row of result.items) {
       if (row.id && ids.has(row.id)) fail('评论区包含重复编号，未自动回复');
       if (row.id) ids.add(row.id); comments.push(row);
     }
     if (!result.nextCursor) {
-      if (expected !== comments.length) fail('评论区尚未完整返回，未自动回复');
+      if (expected !== comments.length + filtered) fail('评论区尚未完整返回，未自动回复');
       return comments;
     }
     cursor = result.nextCursor;
@@ -87,15 +91,26 @@ function watchedPosts(manager, accountId, posts, threshold) {
 async function generateReply(manager, accountId, rule, row, post, context, signal, check) {
   const {channel}=manager; let imageContext;
   if (post.imageCount>0) {
-    imageContext=await readMomentsImageContext(channel,{accountId,scopeKey:context.scopeKey,postId:post.id,expectedHash:interactionContentHash(post)},signal,check);
-    if(!imageContext.complete)throw new ChannelError('MOMENTS_REPLY_IMAGE','配图未能完整读取，已跳过这条回复');
+    try {
+      imageContext=await readMomentsImageContext(channel,{accountId,scopeKey:context.scopeKey,postId:post.id,expectedHash:interactionContentHash(post)},signal,check);
+      row.imageContext=imageContext;
+    } catch(error) {
+      check(); row.imageReadError=momentsImageFailure(error);
+      if(!recoverableMomentsImageError(error))throw error;
+    }
+    manager.save();
   }
   check();
-  const response=await channel.runner.run({mode:'moments-reply',tools:[],signal:AbortSignal.any([signal,AbortSignal.timeout(45000)]),
-    systemOverride:[readPrompt('moments/friend-reply.md'),personaInstructions(channel.store.persona()),publicLanguageInstructions()].join('\n\n'),
+  row.commentBasis=momentsCommentBasis([post.text,row.ourComment.text,row.incomingReply.text].join('\n'),imageContext);
+  if(!row.commentBasis)return {text:'',skipReason:'配图未读到可用内容，且没有可回复的正文或评论',imageContext};
+  const personMemory = momentsPersonMemory(channel, accountId,
+    [{ id: row.incomingReply.userId, name: row.author }, { id: post.author.userId, name: post.author.nickname }], check, row.incomingReply.text);
+  const response=await channel.runner.run({mode:'moments-reply',tools:personMemory.tools,assertAllowed:check,signal:AbortSignal.any([signal,AbortSignal.timeout(45000)]),
+    systemOverride:[readPrompt('moments/friend-reply.md'),personaInstructions(channel.store.persona()),publicLanguageInstructions(),ROLE_CARD_READING_PROMPT].join('\n\n'),
     text:JSON.stringify({currentAccountId:accountId,post:{id:post.id,author:post.author,text:post.text,createdAt:post.createdAt},
-      ourComment:row.ourComment,incomingReply:row.incomingReply,
-      imageContext:imageContext?.images.map(image=>({index:image.index,description:image.description}))??[],instruction:rule.settings.replyInstructions})});
+      ourComment:row.ourComment,incomingReply:row.incomingReply,personMemory:personMemory.context,
+      imageContext:readableMomentsImages(imageContext).map(image=>({index:image.index,description:image.description})),
+      unreadImageCount:post.imageCount-readableMomentsImages(imageContext).length,instruction:rule.settings.replyInstructions})});
   check();let value;
   try{value=JSON.parse(String(response?.text??'').trim().replace(/^```(?:json)?\s*\n?/i,'').replace(/\n?```$/,'').trim());}catch{}
   if(!value||Array.isArray(value)||Object.keys(value).some(k=>!['text','skipReason'].includes(k))||

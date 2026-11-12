@@ -22,3 +22,5 @@ __pycache__/
 *.pem
 *.key
 *.tgz
+/[0-9].md
+/codex-session-*.md

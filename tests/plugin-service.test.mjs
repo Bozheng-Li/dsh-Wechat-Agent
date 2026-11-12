@@ -344,7 +344,7 @@ test('revoking a group drains only that group and preserves another queued reply
   assert.deepEqual(f.sent.map(value => value.peerId), [roomB]);
   assert.deepEqual(f.store.progress(account.id, 'group', roomA), { count: 0, target: null });
   assert.deepEqual(f.store.progress(account.id, 'group', roomB), { count: 2, target: 5 });
-  assert.equal(f.store.recordsPage(account.id, selector()).records[0].state, 'cancelled');
+  assert(!f.store.data.records.some(record => record.accountId === account.id && record.peerId === roomA));
   assert.deepEqual(new StateStore(f.root).settings(account.id).groups, [roomB]);
 });
 

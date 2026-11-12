@@ -40,6 +40,7 @@ export function Overview({ status, busy, blocked, onAction, onNavigate }) {
           </div>
           <div className="wa-overview-status-footer">
             <p className="wa-help">{!settings.enabled ? '开启自动回复后，处理已授权会话的新消息。' : !status.online ? '微信未连接，恢复连接后才能回复。' : '正在接收已授权会话的新消息。'}</p>
+            <Button quiet icon="settings" onClick={() => onNavigate('automation', 'overview')}>自动功能设置</Button>
             <Button quiet icon="arrow" onClick={() => onNavigate('records')}>查看回复记录</Button>
           </div>
         </section>

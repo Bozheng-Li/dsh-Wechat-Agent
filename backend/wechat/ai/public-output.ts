@@ -1,4 +1,4 @@
-import { BridgeError } from "@napcat-wechat/protocol";
+import { BridgeError } from "../types.ts";
 import type { ModelOptions, ModelReply } from "./types.js";
 
 // Some compatible services put explicitly marked reasoning in content instead

@@ -12,7 +12,7 @@ function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-moments-likes-')), accountId = 'likes-owner';
   let clock = Date.parse('2026-11-10T04:00:00Z'), enabled = true;
   const status = { online: true, account: { id: accountId }, momentsReadReady: true, momentsWriteReady: true }, reads = [], writes = [], posts = new Map();
-  const channel = { now: () => clock, store: { root, data: { storeId: 'likes-test' }, settings: () => ({ enabled }) },
+  const channel = { now: () => clock, store: { root, data: { storeId: 'likes-test' }, settings: () => ({ enabled, privatePeers: ['friend-a'], groups: [] }) },
     transport: { status: () => status, readMoments: async ({ accountId: requestedAccount, query, scopeKey }, signal) => {
       signal.throwIfAborted(); reads.push({ accountId: requestedAccount, query, scopeKey });
       const all = posts.get(query.userId) ?? [], offset = Number(query.cursor ?? 0), items = all.slice(offset, offset + query.limit);

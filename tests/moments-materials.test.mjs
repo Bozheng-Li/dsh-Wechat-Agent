@@ -1,3 +1,4 @@
+import { stickerPng } from './fixtures/stickers.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -84,7 +85,10 @@ function fixture(t) {
   const channel = { now: () => now, store, memory: { load: input => {
     assert.equal(input.accountId, accountId); if (!docs.has(input.peerId)) docs.set(input.peerId, { ...doc, entries: [], generation: input.peerId }); return docs.get(input.peerId);
   } }, transport: { status: () => status, writeMoments: async input => {
-    writes.push(input); return { accountId, action: 'publish', postId: String(100 + writes.length), text: input.query.text, imageCount: input.query.images?.length || 0, delivery: 'server-ack' };
+    writes.push(input); return { accountId, action: 'publish', postId: String(100 + writes.length), text: input.query.text, imageCount: input.query.images?.length || 0, delivery: 'server-ack',
+      audienceConfirmed: true, authorizationConfirmed: true, authorizationExcludedCount: 0,
+      authorizedAudienceUserIds: store.settings(accountId).privatePeers, blockedUserIds: [],
+      audienceSource: 'wechat-contacts-live', audienceFetchedAt: new Date(now).toISOString() };
   } }, runner: {
     describeImage: async () => '一张绿色方块的创作图片，没有人物。',
     run: async input => {
@@ -100,7 +104,7 @@ function fixture(t) {
   channel.moments = new MomentsService(channel); channel.momentsAutomation = new MomentsAutomation(channel);
   const materials = channel.momentsAutomation.materials, publishing = channel.momentsAutomation.publishing;
   const put = fields => materials.put(accountId, { fields: { title: '随手记', text: '这是一条可公开的随手记。', ...fields }, requestId: 'manual-' + Math.random() });
-  const png = fs.readFileSync(path.join(import.meta.dirname, '../assets/stickers', fs.readdirSync(path.join(import.meta.dirname, '../assets/stickers'), { recursive: true }).find(file => file.endsWith('.png'))));
+  const png = stickerPng();
   t.after(async () => { await channel.momentsAutomation.close(); const real = fs.realpathSync(root); assert.equal(path.dirname(real), fs.realpathSync(os.tmpdir())); assert.match(path.basename(real), /^wechat-materials-/); fs.rmSync(real, { recursive: true, force: true }); });
   return { root, store, channel, materials, publishing, put, png, calls, writes, doc, status, advance: ms => { now += ms; }, now: () => now,
     configure: (extra = {}) => materials.configure(accountId, { sources: [source], ...extra }), organize: id => materials.organize(accountId, id, signal()) };

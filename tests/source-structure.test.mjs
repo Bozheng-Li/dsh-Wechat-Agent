@@ -71,7 +71,8 @@ test('resource paths resolve from nested source, built entry and installed packa
   assert.equal(packageRoot(), expected);
   assert.equal(packageRoot(new URL('../lib/index.js', import.meta.url)), expected);
   assert.equal(resourcePath('CHANGELOG.md'), path.join(expected, 'CHANGELOG.md'));
-  assert(fs.existsSync(resourcePath('assets', 'stickers', 'manifest.json')));
+  assert(!fs.existsSync(resourcePath('assets', 'stickers', 'manifest.json')), 'retired internet artwork is no longer packaged');
+  assert(fs.existsSync(resourcePath('prompts', 'vision', 'requests.json')));
   assert(fs.existsSync(resourcePath('runtime', 'requirements.txt')));
   const installed = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-package-resources-'));
   t.after(() => fs.rmSync(installed, { recursive: true, force: true }));

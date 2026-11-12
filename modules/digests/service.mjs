@@ -5,7 +5,8 @@ import { internal, timestamp } from "../workbench/helpers.mjs";
 
 export function reminderView(workbench, task) {
   return task
-    ? { at: task.schedule?.kind === 'once' ? task.schedule.at : null, content: task.content, state: task.state }
+    ? { at: task.schedule?.kind === 'once' ? task.schedule.at : null, content: task.content, state: task.state,
+      nextRunAt: Math.max(task.nextRunAt ?? task.schedule?.at ?? 0, task.retryAt ?? 0) || null }
     : { at: null, state: 'missing' };
 }
 

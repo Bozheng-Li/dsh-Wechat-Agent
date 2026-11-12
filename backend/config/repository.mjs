@@ -7,9 +7,11 @@ import { atomicBytes } from '../storage/atomic-text.mjs';
 import { commitConfigurationFiles } from './transaction.mjs';
 import { ChannelError, validateSettings, validatePersona, validateGlobalPersona, validateModelChoice, validateModelConfig, validateConversationSettings, workSettings, remoteSettings } from '../../shared/contracts.mjs';
 import { imageGenerationSettings } from '../../shared/image-generation.mjs';
+import { roleCardSettings } from '../../shared/role-card-settings.mjs';
+import { timeSettings } from '../../shared/time-settings.mjs';
 
-export const CONFIG_FIELDS = ['connectionWanted', 'accounts', 'modelChoice', 'modelConfig', 'persona', 'storageSettings', 'conversationConfigs', 'modelConfigVersion', 'personaTemplatesVersion'];
-const allowed = new Set(['version', 'ownerStoreId', ...CONFIG_FIELDS, 'conversationDefaults', 'memory', 'imageMemoryDefaults', 'imageMemory', 'mediaDefaults', 'media', 'prompts', 'work', 'remote', 'imageGeneration']);
+export const CONFIG_FIELDS = ['connectionWanted', 'accounts', 'modelChoice', 'modelConfig', 'persona', 'storageSettings', 'roleCardSettings', 'conversationConfigs', 'modelConfigVersion', 'personaTemplatesVersion'];
+const allowed = new Set(['version', 'ownerStoreId', ...CONFIG_FIELDS, 'conversationDefaults', 'memory', 'imageMemoryDefaults', 'imageMemory', 'mediaDefaults', 'media', 'prompts', 'work', 'remote', 'imageGeneration', 'timeSettings']);
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const clone = value => structuredClone(value);
 const signature = bytes => bytes === null ? null : createHash('sha256').update(bytes).digest('hex');
@@ -90,6 +92,8 @@ export class ConfigurationRepository {
     next.work = workSettings(next.work);
     next.remote = remoteSettings(next.remote);
     next.imageGeneration = imageGenerationSettings(next.imageGeneration ?? {});
+    next.roleCardSettings = roleCardSettings(next.roleCardSettings);
+    next.timeSettings = timeSettings(next.timeSettings);
     next.persona = validateGlobalPersona(this.persona(next.persona));
     if (!Number.isSafeInteger(next.personaTemplatesVersion) || next.personaTemplatesVersion < 1) throw Error('invalid persona version');
     next.modelChoice = validateModelChoice(next.modelChoice);
@@ -113,7 +117,7 @@ export class ConfigurationRepository {
     if (!object(next.memory) || !Number.isSafeInteger(next.memory.windowChars) || next.memory.windowChars < 1000 || typeof next.memory.windowCustomized !== 'boolean' || !Number.isSafeInteger(next.memory.retentionDays) || next.memory.retentionDays < 1 || next.memory.retentionDays > 36500) throw Error();
     if (!object(next.imageMemory) || !object(next.media) || !object(next.prompts) || typeof next.prompts.identity !== 'string' || !next.prompts.identity.startsWith('prompts/') || !next.prompts.identity.endsWith('.md')) throw Error();
     const imageSettings = value => object(value) && typeof value.enabled === 'boolean' && (value.retentionDays === null || Number.isSafeInteger(value.retentionDays) && value.retentionDays >= 1 && value.retentionDays <= 36500);
-    const mediaSettings = value => object(value) && typeof value.enabled === 'boolean' && Number.isInteger(value.probability) && value.probability >= 0 && value.probability <= 100 && Number.isInteger(value.minGapMessages) && value.minGapMessages >= 0 && value.minGapMessages <= 100;
+    const mediaSettings = value => object(value) && typeof value.enabled === 'boolean' && Number.isInteger(value.probability) && value.probability >= 0 && value.probability <= 100 && Number.isInteger(value.minGapMessages) && value.minGapMessages >= 0 && value.minGapMessages <= 100 && ['captureIncoming', 'preferNative', 'autoDescribe'].every(key => value[key] === undefined || typeof value[key] === 'boolean');
     if (!imageSettings(next.imageMemoryDefaults) || Object.values(next.imageMemory).some(value => !imageSettings(value)) || !mediaSettings(next.mediaDefaults) || Object.values(next.media).some(value => !object(value) || !mediaSettings(value.settings) || !object(value.packs) || !object(value.assets) || [...Object.values(value.packs), ...Object.values(value.assets)].some(enabled => typeof enabled !== 'boolean'))) throw Error();
     plain(this.root, path.resolve(this.root, next.prompts.identity));
     return next;

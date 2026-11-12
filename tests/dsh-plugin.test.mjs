@@ -323,12 +323,16 @@ test('DSH adapter establishes tool limits before followup and always disposes ow
   const ctx = { agentDefaultModel: { currentSelection: () => ({ provider: 'mock', model: 'm' }) }, agents: {
     create: async opts => { options = opts; opts.setup({
       tools: { restrict: filter => { assert.deepEqual(filter, { allow: [] }); order.push('restrict'); }, guard: fn => { assert.equal(typeof fn({ name: 'any' }), 'string'); order.push('guard'); } },
-      systemPrompt: { suppressRuntimeContext: () => order.push('suppress'), section: spec => { assert(spec.complete && spec.interpolate === false); order.push('prompt'); } }
+      systemPrompt: { suppressRuntimeContext: () => order.push('suppress'), section: spec => {
+        assert.equal(spec.interpolate, false);
+        if (spec.name === 'wechat-quiet-tools') { assert(spec.text.includes('静默执行')); order.push('quiet'); }
+        else { assert(spec.complete); order.push('prompt'); }
+      } }
     }); return handle; }
   } };
   const result = await new DshAgentRunner(ctx).run({ text: '问题', group: false, signal: abort.signal });
   assert.equal(result.text, '完成'); assert.equal(options.agentOptions.provider, 'mock');
-  assert.deepEqual(order, ['restrict', 'guard', 'suppress', 'prompt', 'followup', 'cancel', 'dispose']);
+  assert.deepEqual(order, ['restrict', 'guard', 'quiet', 'suppress', 'prompt', 'followup', 'cancel', 'dispose']);
 });
 
 test('bundled protocol worker starts with isolated empty state and exits cleanly', async t => {

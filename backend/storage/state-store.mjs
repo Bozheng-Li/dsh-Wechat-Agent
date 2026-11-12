@@ -1,5 +1,6 @@
 import { defaults, object, historyLimit, clone } from "./helpers.mjs";
-import { messageReferences, withMessageReferences, describeReferencedImage, unavailableMessageContext } from '../../shared/message-references.mjs';
+import { describeMessageImage, unavailableMessage } from '../../shared/message-content.mjs';
+import { receivedFileMetadata } from '../../shared/received-files.mjs';
 import { initializeState } from "./initialize.mjs";
 import { migrateNamedDirectories } from "./initialize.mjs";
 import { validateArchiveView } from "./archive.mjs";
@@ -23,6 +24,8 @@ import { sameDirectory, writableDirectory } from "./paths.mjs";
 import { identity, conversationFolder, info, recordInfo } from "./keys.mjs";
 import { CONFIG_FIELDS } from '../config/repository.mjs';
 import { RoleCards } from './role-cards.mjs';
+import { roleCardSettings, roleCardSettingsRevision } from '../../shared/role-card-settings.mjs';
+import { revokedObjects } from '../../shared/authorization.mjs';
 
 /**
  * config.yaml owns settings; channel.json owns the runtime/path index. Each conversation owns one
@@ -145,13 +148,25 @@ export class StateStore {
     return clone(this.data.persona ?? defaults.persona());
   }
   conversationPersona(accountId, chatType, peerId) {
-    return this.roleCards.persona({ accountId, chatType, peerId }, this.persona());
+    return this.persona();
   }
   modelConfig() {
     return clone(this.data.modelConfig ?? defaults.model());
   }
   storageSettings() {
     return clone(this.data.storageSettings);
+  }
+  roleCardSettings() { return roleCardSettings(this.data.roleCardSettings); }
+  roleCardSettingsView() {
+    const settings = this.roleCardSettings();
+    return { settings, revision: roleCardSettingsRevision(settings) };
+  }
+  setRoleCardSettings(input, revision) {
+    const settings = roleCardSettings(input);
+    if (revision !== this.roleCardSettingsView().revision)
+      throw new ChannelError('ROLE_CARD_SETTINGS_CHANGED', '角色卡总设置已更新，请重新载入后保存；当前草稿保留');
+    this._setting('roleCardSettings', settings, roleCardSettings);
+    return this.roleCardSettingsView();
   }
   ensureWorkspace() {
     const directory = this.data.storageSettings.workspacePath;
@@ -196,15 +211,23 @@ export class StateStore {
   }
   configure(accountId, input) {
     const settings = validateSettings(input),
-      before = this.data.accounts[accountId];
+      before = this.data.accounts[accountId], revoked = revokedObjects(accountId, before, settings),
+      previousRevocations = this.data.authorizationRevocations, previousEpochs = this.data.authorizationEpochs;
+    if (revoked.length) {
+      this.data.authorizationRevocations = [...previousRevocations, ...revoked].filter((row, index, rows) =>
+        rows.findIndex(other => other.accountId === row.accountId && other.chatType === row.chatType && other.peerId === row.peerId) === index);
+      this.data.authorizationEpochs = { ...previousEpochs, [accountId]: (previousEpochs[accountId] || 0) + 1 };
+    }
     this.data.accounts[accountId] = settings;
     try {
       this.save();
     } catch (error) {
       if (before) this.data.accounts[accountId] = before;
       else delete this.data.accounts[accountId];
+      this.data.authorizationRevocations = previousRevocations; this.data.authorizationEpochs = previousEpochs;
       throw error;
     }
+    this.onAuthorizationChange?.({ accountId, before, settings, revoked });
     return clone(settings);
   }
   conversationSettings(accountId, chatType, peerId) {
@@ -225,13 +248,15 @@ export class StateStore {
       const directory = this._directory(conversation, this.data.storageSettings, config);
       if (!sameDirectory(directory, metadata.directory)) this._writeAt(view, directory);
       const beforeConfig = this.data.conversationConfigs[conversation.key],
-        beforeDirectory = metadata.directory;
+        beforeDirectory = metadata.directory, beforeArchives = metadata.archiveDirectories;
       this.data.conversationConfigs[conversation.key] = config;
+      if (!sameDirectory(directory, beforeDirectory)) metadata.archiveDirectories = [...new Set([...(beforeArchives || []), beforeDirectory])];
       metadata.directory = directory;
       try {
         this.save();
       } catch (error) {
         metadata.directory = beforeDirectory;
+        if (beforeArchives === undefined) delete metadata.archiveDirectories; else metadata.archiveDirectories = beforeArchives;
         if (beforeConfig === undefined) delete this.data.conversationConfigs[conversation.key];
         else this.data.conversationConfigs[conversation.key] = beforeConfig;
         throw error;
@@ -249,21 +274,31 @@ export class StateStore {
     return this._withSourceLocks(this.views.values(), () => {
       const previous = this.data.storageSettings,
         oldDirectories = new Map(),
+        oldArchives = new Map(),
         destinations = new Map();
       for (const [key, view] of this.views) {
         const metadata = this.data.conversations[key],
           directory = this._directory(view, settings);
         oldDirectories.set(key, metadata.directory);
+        oldArchives.set(key, metadata.archiveDirectories);
         destinations.set(key, directory);
         if (!sameDirectory(metadata.directory, directory)) this._writeAt(view, directory);
       }
       this.data.storageSettings = settings;
-      for (const [key, directory] of destinations) this.data.conversations[key].directory = directory;
+      for (const [key, directory] of destinations) {
+        const metadata = this.data.conversations[key];
+        if (!sameDirectory(metadata.directory, directory)) metadata.archiveDirectories = [...new Set([...(metadata.archiveDirectories || []), metadata.directory])];
+        metadata.directory = directory;
+      }
       try {
         this.save();
       } catch (error) {
         this.data.storageSettings = previous;
         for (const [key, directory] of oldDirectories) this.data.conversations[key].directory = directory;
+        for (const [key, archives] of oldArchives) {
+          if (archives === undefined) delete this.data.conversations[key].archiveDirectories;
+          else this.data.conversations[key].archiveDirectories = archives;
+        }
         throw error;
       }
       return this.storageSettings();
@@ -296,7 +331,8 @@ export class StateStore {
       ...new Set(
         segments
           .filter((segment) => !['text', 'at', 'reply'].includes(segment.type))
-          .map((segment) => '[' + (mediaNames[segment.type] || '非文本') + '消息]')
+          .map((segment) => segment.type === 'file' && receivedFileMetadata(segment.data)
+            ? '[文件：' + receivedFileMetadata(segment.data).name + '（正文未读取）]' : '[' + (mediaNames[segment.type] || '非文本') + '消息]')
       ),
     ].join(' ');
     const entry = {
@@ -310,39 +346,23 @@ export class StateStore {
       observedAt: at,
       kind: 'message',
       mediaOnly,
+      ...(segments.some(segment => segment.type === 'file') ? { files: segments.filter(segment => segment.type === 'file').map(segment => receivedFileMetadata(segment.data)).filter(Boolean) } : {}),
       attachments: segments
         .filter((segment) => ['image', 'face'].includes(segment.type) && typeof segment.data?.resourceId === 'string')
         .map((segment) => ({ resourceId: segment.data.resourceId, type: segment.type })),
     };
-    const unavailable = unavailableMessageContext(message);
-    if (unavailable) Object.assign(entry, { bodyText: entry.text, text: entry.text + '\n\n' + unavailable, contentUnavailable: true });
-    const references = messageReferences(segments, message.peerId);
-    return references.length ? withMessageReferences(entry, references) : entry;
-  }
-  updateMessageReferences(input, key, references) {
-    const view = this.views.get(info(input.accountId, input.chatType, input.peerId).key),
-      entry = view?.messages.find(value => value.key === key), record = view?.records.find(value => value.key === key);
-    const serialized = JSON.stringify(references);
-    if (entry && JSON.stringify(entry.references) !== serialized || record && JSON.stringify(record.references) !== serialized) {
-      if (entry) Object.assign(entry, withMessageReferences(entry, clone(references)));
-      if (record) record.references = clone(references);
-      this.save();
-    }
-    this.memory?.updateMessageReferences(input, key, references);
+    if (unavailableMessage(message)) entry.contentUnavailable = true;
+    return entry;
   }
   describeImageReferences(input, image) {
     const view = this.views.get(info(input.accountId, input.chatType, input.peerId).key);
     if (view) {
       let changed = false;
       view.messages = view.messages.map(entry => {
-        const next = describeReferencedImage(entry, input, image);
+        const next = describeMessageImage(entry, input, image);
         if (next !== entry) changed = true;
         return next;
       });
-      for (const record of view.records) if (record.references?.length) {
-        const source = { references: record.references }, next = describeReferencedImage(source, input, image);
-        if (next !== source) { record.references = clone(next.references); changed = true; }
-      }
       if (changed) this.save();
     }
     this.memory?.describeImageReferences(input, image);
@@ -381,7 +401,6 @@ export class StateStore {
       this.claimOwners.set(key, target.key);
       if (observation.message && !view.messages.some((message) => message.key === key)) {
         view.messages.push(this._observation(key, target.accountId, observation.message, at));
-        if (record && view.messages.at(-1).references) record.references = clone(view.messages.at(-1).references);
         if (view.messages.length > historyLimit) view.messages = view.messages.slice(-historyLimit);
       }
       if (observation.progress !== undefined) {
@@ -639,9 +658,21 @@ export class StateStore {
     }
     if (changed) this.migrateNamedDirectories();
   }
-  conversations(accountId) {
+  conversationSelector(accountId, chatType, peerId) {
+    const conversation = info(accountId, chatType, peerId),
+      known = this.data.conversations[conversation.key];
+    if (known && (known.key !== conversation.key || known.accountId !== accountId ||
+        known.chatType !== chatType || known.peerId !== peerId))
+      throw new ChannelError('INVALID_CONVERSATION', '会话档案标识不一致，请检查会话索引后重试');
+    const settings = this.data.accounts[accountId];
+    if (!known && !(chatType === 'group' ? settings?.groups : settings?.privatePeers)?.includes(peerId))
+      throw new ChannelError('MEMORY_CONVERSATION_MISSING', '请先选择已授权或有历史记录的会话');
+    return { ...conversation, name: known?.name || peerId };
+  }
+  conversationSelectors(accountId) {
     const settings = this.settings(accountId),
-      entries = new Map();
+      entries = new Map(),
+      authorized = { private: new Set(settings.privatePeers), group: new Set(settings.groups) };
     for (const [chatType, peers] of [
       ['private', settings.privatePeers],
       ['group', settings.groups],
@@ -654,6 +685,11 @@ export class StateStore {
     for (const metadata of Object.values(this.data.conversations))
       if (metadata.accountId === accountId) entries.set(metadata.key, metadata);
     return [...entries.values()]
+      .map(({ key, chatType, peerId }) => ({ key, accountId, chatType, peerId,
+        name: this.data.conversations[key]?.name || peerId, authorized: authorized[chatType].has(peerId) }));
+  }
+  conversations(accountId) {
+    return this.conversationSelectors(accountId)
       .map((conversation) => {
         const view = this.views.get(conversation.key),
           records = view?.records ?? [],
@@ -664,10 +700,8 @@ export class StateStore {
           accountId,
           chatType: conversation.chatType,
           peerId: conversation.peerId,
-          name: this.data.conversations[conversation.key]?.name || conversation.peerId,
-          authorized: (conversation.chatType === 'group' ? settings.groups : settings.privatePeers).includes(
-            conversation.peerId
-          ),
+          name: conversation.name,
+          authorized: conversation.authorized,
           config: this.conversationSettings(accountId, conversation.chatType, conversation.peerId),
           recordsPath: this.data.conversations[conversation.key]?.directory || this._directory(conversation),
           recordCount: records.length,

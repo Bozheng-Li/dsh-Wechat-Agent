@@ -15,6 +15,8 @@ import { workPresentationPrompt } from './presentation.mjs';
 import { publicLanguageInstructions } from '../../prompts/reply/language.mjs';
 import { planProgressiveTools } from '../tools/progressive.mjs';
 import { observeModelRequests } from '../agent/request-metrics.mjs';
+import { observeExecutionSession } from '../traces/model.mjs';
+import { currentTrace } from '../traces/context.mjs';
 
 async function waitForIdle(agent, signal) {
   signal.throwIfAborted();
@@ -38,6 +40,7 @@ export class DshWorkRunner {
     const modelConfig = structuredClone(this.chatRunner.getRuntimeSettings?.()?.modelConfig ?? {});
     const promptStrategy = modelConfig.promptStrategy ?? 'legacy';
     const requestMetrics = [];
+    const executionTrace = currentTrace();
     let handle, borrowed = false;
     const toolDisposers = [];
     const operations = [], recordOperation = async operation => { operations.push(structuredClone(operation)); await onOperation(operation); };
@@ -86,10 +89,11 @@ export class DshWorkRunner {
         if (typeof dispose === 'function') toolDisposers.push(dispose);
       }
       const plan = promptStrategy === 'progressive-v1' ? planProgressiveTools(definitions, request) : { initial: definitions, deferredGroups: [] };
-      registerModelTools(ctx, plan.initial, { deferredGroups: plan.deferredGroups, assertAllowed, onBeforeTool, native: true, inherit: true, agent,
+      registerModelTools(ctx, plan.initial, { deferredGroups: plan.deferredGroups, assertAllowed, onBeforeTool, native: true, inherit: true, quiet: true, workProgressManaged: true, agent,
         onDispose: disposer => toolDisposers.push(disposer) });
-      const stopMetrics = observeModelRequests(ctx, { strategy: promptStrategy, mode: 'work', rows: requestMetrics });
+      const stopMetrics = observeModelRequests(ctx, { strategy: promptStrategy, mode: 'work', sessionId: id, rows: requestMetrics });
       if (typeof stopMetrics === 'function') toolDisposers.push(stopMetrics);
+      toolDisposers.push(observeExecutionSession(ctx, { sessionId: id, agent, selection: agentOptions, mode: 'work', context: executionTrace }));
     };
     const id = sessionId || randomUUID();
     try {
@@ -149,7 +153,7 @@ export class DshWorkRunner {
             if (titles?.rename) await titles.rename(agent.session, '微信工作 · ' + request.replace(/\s+/g, ' ').slice(0, 65));
           }
           assertAllowed(); signal.throwIfAborted();
-          stopProgress = observeWorkProgress(this.ctx, agent, onProgress);
+          if (typeof onProgress === 'function') stopProgress = observeWorkProgress(this.ctx, agent, onProgress);
           agent.followup(Object.freeze({ id: randomUUID(), role: 'user', content: [{ type: 'text', text: request }], source: { kind: 'user' } }));
           submitted = true;
         };

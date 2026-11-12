@@ -397,4 +397,36 @@ export const settingsCss = `
  .wa-panel .wa-recovery-sheet>.wa-wb-review{padding:16px 13px}
  .wa-panel .wa-editor-toolbar{align-items:flex-start}
 }
+.wa-panel .wa-time-fields{border:0;padding:0;margin:18px 0;min-width:0}
+.wa-panel .wa-time-group{border:1px solid var(--wa-border);border-radius:12px;margin-top:12px;overflow:hidden}
+.wa-panel .wa-time-group>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 20px;cursor:pointer;font-weight:600}
+.wa-panel .wa-time-group>summary small{font-weight:400;color:var(--wa-muted);white-space:nowrap}
+.wa-panel .wa-time-group>summary>span:first-child{min-width:0;flex:1}
+.wa-panel .wa-time-group-meta{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:6px 12px;min-width:0}
+.wa-panel .wa-time-group>.wa-settings-block{margin:0;padding:0 20px 20px;border:0;border-radius:0}
+.wa-panel .wa-automation-master{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:20px;border:1px solid var(--wa-border);border-radius:12px}
+.wa-panel .wa-automation-master>div{min-width:0;flex:1}
+.wa-panel .wa-automation-master h2{margin:0 0 8px}
+.wa-panel .wa-automation-master .wa-help{margin:0}
+.wa-panel .wa-automation-master>.wa-toggle{flex-shrink:0}
+.wa-panel .wa-automation-group{margin-top:12px;border:1px solid var(--wa-border);border-radius:12px;min-width:0}
+.wa-panel .wa-automation-group>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:18px 20px;cursor:pointer;list-style:none}
+.wa-panel .wa-automation-group>summary::-webkit-details-marker{display:none}
+.wa-panel .wa-automation-group>summary>span{min-width:0}
+.wa-panel .wa-automation-group>summary strong,.wa-panel .wa-automation-group>summary small{display:block}
+.wa-panel .wa-automation-group>summary small{margin-top:4px;color:var(--wa-muted);font-weight:400}
+.wa-panel .wa-automation-group[open]>summary>svg{transform:rotate(90deg)}
+.wa-panel .wa-automation-group-body{padding:0 20px 20px;min-width:0}
+.wa-panel .wa-automation-group-body>.wa-settings-block{margin:0;padding:0;border:0;border-radius:0}
+.wa-panel .wa-automation-group-body .wa-moments-schedule{margin:0}
+.wa-panel .wa-automation-fields{border:0;padding:0;margin:16px 0;min-width:0}
+.wa-panel .wa-automation-fields>.wa-check-row{margin-bottom:12px}
+.wa-panel .wa-automation-settings label:is(.wa-check-row,.wa-row,.wa-toggle){flex-direction:row;align-items:center}
+.wa-panel .wa-automation-group .wa-form-actions{flex-wrap:wrap}
+@media(max-width:600px){
+ .wa-panel .wa-automation-master{flex-wrap:wrap;padding:16px}
+ .wa-panel .wa-automation-master>div{flex-basis:100%}
+ .wa-panel .wa-automation-group>summary{padding:16px}
+ .wa-panel .wa-automation-group-body{padding:0 16px 16px}
+}
 `;

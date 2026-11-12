@@ -1,13 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  buildWechatPrompt, personaFromPreset, progressiveDialogueFocus, planProgressiveTools, capabilityCatalog, replyMemoryContext
-} from '../lib/testing.js';
-
-
-
-
-
+import { buildWechatPrompt } from '../prompts/reply/compose.mjs';
+import { personaFromPreset } from '../prompts/personas/catalog.mjs';
+import { progressiveDialogueFocus } from '../prompts/reply/progressive-dialogue.mjs';
+import { planProgressiveTools } from '../modules/tools/progressive.mjs';
+import { capabilityCatalog } from '../prompts/agent/capabilities.mjs';
+import { replyMemoryContext } from '../modules/conversation/reply-context.mjs';
 
 test('quoted identity questions do not turn a translation into an identity answer', () => {
   const focus = progressiveDialogueFocus({ requestText: '把“你叫什么名字？”翻成英文，只输出译文。', preference: { value: 'help' } });

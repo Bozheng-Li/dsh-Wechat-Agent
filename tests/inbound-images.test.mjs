@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { rolldown } from 'rolldown';
 import { createHash } from 'node:crypto';
 import { nativeQrSession } from './fixtures/native-qr-session.mjs';
+import { stickerDigest, stickerJpeg } from './fixtures/stickers.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const entry = ['backend.ts', 'wire.ts', 'image-download.ts', 'media.ts', 'media-loader.mjs', 'reference.ts'].map(name =>
@@ -84,26 +85,23 @@ test('type-57 text quotes keep exact uint64 IDs and the original group speaker w
   assert.equal(message[1].data.text, '这句话什么意思？');
 });
 
-test('quoted image descriptors belong to the quoting message and preserve readable pixels without exposing XML or overwriting the original', async t => {
+test('image quotes retain their basic envelope without saving or downloading referenced media', t => {
   const f = backendFixture(t), account = f.backend.session.value, currentId = (BigInt(messageId) + 1n).toString(),
     mediaDir = path.join(f.backend.options.cacheDir, 'media', String(account.uin));
   const original = observedImage(fields(ld(8, Buffer.concat([fv(1, png.length), ld(2, png)]))), '', mediaDir, `${peerId}:${messageId}`);
-  const originalFile = path.join(mediaDir, original.data.resourceId + '.json'), baseline = fs.readFileSync(originalFile);
+  const originalFile = path.join(mediaDir, original.data.resourceId + '.json'), baseline = fs.readFileSync(originalFile), baselineFiles = fs.readdirSync(mediaDir).sort();
   const content = 'alice:\n<msg><appmsg><type>57</type><title>图片上的时间？</title><refermsg><type>3</type>' +
     `<svrid>${messageId}</svrid><fromusr>${peerId}</fromusr><chatusr>original-member</chatusr><displayname>小柏</displayname>` +
     '<content>&lt;msg&gt;&lt;img cdnbigimgurl=&quot;https://m.qpic.cn/quote-fixture.png&quot; aeskey=&quot;SYNTHETIC_QUOTE_SECRET&quot;/&gt;&lt;/msg&gt;</content></refermsg></appmsg></msg>';
   const message = f.backend.decodeMessage(fields(Buffer.concat([ld(2, peerId), ld(3, account.wxid), fv(4, 49), ld(5, content), fv(9, 1700000000), fv(12, BigInt(currentId))])));
   const ref = message.message.find(segment => segment.type === 'reply');
   assert.equal(ref.data.id, `wx:${peerId}:${messageId}`); assert.equal(ref.data.senderId, 'original-member');
-  assert.match(ref.data.image.resourceId, /^[a-f0-9]{64}$/); assert.notEqual(ref.data.image.resourceId, original.data.resourceId);
+  assert.equal(ref.data.image, undefined);
   assert.equal(message.messageType, 49); assert.equal(message.partial, false); assert(!JSON.stringify(message).includes('SYNTHETIC_QUOTE_SECRET'));
   assert(!JSON.stringify(message).includes('cdnbigimgurl')); assert.equal(ref.data.content, undefined);
   assert.deepEqual(fs.readFileSync(originalFile), baseline);
-  const descriptor = JSON.parse(fs.readFileSync(path.join(mediaDir, ref.data.image.resourceId + '.json'), 'utf8'));
-  assert.equal(descriptor.messageId, `${peerId}:${currentId}`);
-  const acquired = await loadObservedMedia({ directory: mediaDir, resourceId: ref.data.image.resourceId, peerId, messageId: currentId,
-    signal: f.signal, fetcher: async url => { assert.equal(url.href, 'https://m.qpic.cn/quote-fixture.png'); return new Response(png); } });
-  assert.equal(acquired.data, png.toString('base64'));
+  assert.deepEqual(fs.readdirSync(mediaDir).sort(), baselineFiles);
+  assert.equal(f.calls.length, 0);
 });
 
 test('GetMsgImg request uses an exact uint64 server ID, authenticated account and bounded original chunks', () => {
@@ -334,6 +332,16 @@ test('downloaded JPEG metadata stays in the raw cache and never reaches vision o
   assert.equal(first.bytes, jpeg.length); assert.equal(first.sourceBytes, downloaded.length);
   assert.equal(first.trailerBytes, downloaded.length - jpeg.length);
   assert.deepEqual(fs.readFileSync(path.join(f.directory, f.resourceId + '.full.image')), downloaded);
-  const second = await loadObservedMedia({ ...f, downloadOriginal: async () => { throw Error('Do not redownload a complete cached image'); } });
+  const second = await loadObservedMedia({ ...f, preserveStickerOriginal: true, downloadOriginal: async () => { throw Error('Do not redownload a complete cached image'); } });
   assert.equal(second.data, first.data); assert.equal(calls, 1);
+});
+
+test('only an explicit sticker archive read retains the verified JPEG original and its native MD5', async t => {
+  const { pixels, original } = stickerJpeg(), md5 = stickerDigest(original);
+  const f = mediaFixture(t, '<msg><emoji md5="' + md5 + '" cdnurl="https://emoji.qpic.cn/native.jpg" /></msg>');
+  let downloads = 0;
+  const archive = await loadObservedMedia({ ...f, preserveStickerOriginal: true, fetcher: async () => { downloads++; return new Response(original); } });
+  assert.equal(archive.stickerMd5, md5); assert.equal(archive.data, original.toString('base64'));
+  const preview = await loadObservedMedia({ ...f, fetcher: () => assert.fail('use the already verified cache') });
+  assert.equal(preview.data, pixels.toString('base64')); assert.equal(downloads, 1);
 });

@@ -149,7 +149,8 @@ test('generated-image tools search request metadata but read the actual saved im
   const calls = [], references = [], scope = { ...generatedScope, senderId: 'alice' };
   const tool = imageMemoryTool(f.images, { run: async request => { calls.push(request); return { text: '实际图片是红色方块，没有毛衣。' }; } }, scope, () => {}, { onRead: ref => references.push(ref) });
   assert.equal(tool.name, 'wechat_generated_image_memory');
-  assert.match(tool.description, /版本不支持/);
+  assert.match(tool.description, /读取保存的真实原图/);
+  assert(!tool.description.includes('版本不支持'));
   const found = JSON.parse(await tool.execute({ action: 'search', query: '自己的样貌' }, { signal: signal() }));
   assert.equal(found.images.length, 1); assert.equal(calls.length, 0);
   assert.equal(found.images[0].description, '尚未按需查看');

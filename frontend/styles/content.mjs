@@ -36,6 +36,88 @@ export const contentCss = `
 .wa-panel .wa-memory-reference .wa-subsection{padding-top:14px;margin-top:14px}.wa-panel .wa-memory-reference .wa-subsection>summary{font-size:12px}
 .wa-panel .wa-memory-preview,.wa-panel .wa-long-preview{display:block;max-width:100%;max-height:480px;overflow:auto;margin:16px 0 0;padding:20px;background:var(--wa-subtle);border:1px solid var(--wa-border-soft);border-radius:6px;color:var(--wa-ink);font:12px/1.95 var(--wa-font-body);white-space:pre-wrap;overflow-wrap:anywhere;tab-size:2}
 .wa-panel .wa-memory-reference .wa-note-box{margin-top:14px}.wa-panel .wa-memory-reference .wa-note-box>.wa-row{margin-top:14px}
+/* Each person has a separate profile card; the full record opens in its own card. */
+.wa-panel .wa-role-settings{margin-bottom:26px;border-bottom:1px solid var(--wa-border-soft)}
+.wa-panel .wa-role-settings>summary{display:flex;align-items:center;justify-content:space-between;gap:14px;min-height:46px;padding:12px 0;list-style:none;cursor:pointer}
+.wa-panel .wa-role-settings>summary::-webkit-details-marker{display:none}
+.wa-panel .wa-role-settings>summary>span{display:flex;align-items:center;gap:8px;font-size:12px}.wa-panel .wa-role-settings>summary>span:last-child{font-size:11px;color:var(--wa-muted)}
+.wa-panel .wa-role-settings[open]>summary{border-bottom:1px solid var(--wa-border-soft)}.wa-panel .wa-role-settings[open]>summary>span:last-child svg{transform:rotate(90deg)}
+.wa-panel .wa-role-settings>.wa-settings-block{margin:0;padding:20px 0 24px;border:0;max-width:780px}.wa-panel .wa-role-settings>.wa-settings-block h2{font-size:13px}
+.wa-panel .wa-role-gallery{min-width:0}.wa-panel .wa-role-gallery>.wa-alert{margin-bottom:18px}
+.wa-panel .wa-role-gallery-head{display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:22px;min-width:0}
+.wa-panel .wa-role-gallery-head>div{min-width:0}.wa-panel .wa-role-gallery-head h2{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;font-size:15px}
+.wa-panel .wa-role-gallery-head h2>span{font-size:11px;font-weight:400;color:var(--wa-muted)}.wa-panel .wa-role-gallery-head p{margin-top:5px;color:var(--wa-muted);font-size:12px}
+.wa-panel .wa-role-gallery-head>.wa-search{flex:0 1 280px;min-width:0;margin:0}.wa-panel .wa-role-search-result{font-size:12px;color:var(--wa-muted);margin-bottom:16px}
+.wa-panel .wa-role-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,260px),1fr));gap:20px;min-width:0}
+.wa-panel .wa-role-tag-tools{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:22px}
+.wa-panel .wa-role-tag-tools>p{font-size:11px;line-height:1.7;color:var(--wa-muted)}.wa-panel .wa-role-tag-tools>.wa-button{font-size:11px;flex-shrink:0}
+.wa-panel .wa-role-groups{display:flex;flex-direction:column;gap:32px;min-width:0}.wa-panel .wa-role-tag-group{min-width:0}
+.wa-panel .wa-role-tag-head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;padding-bottom:12px;margin-bottom:18px;border-bottom:1px solid var(--wa-border-soft)}
+.wa-panel .wa-role-tag-head h3{font-size:14px;font-weight:600;overflow-wrap:anywhere}.wa-panel .wa-role-tag-head>span{font-size:11px;color:var(--wa-muted)}
+.wa-panel :is(.wa-role-card,.wa-role-dialog){--wa-role-tint:light-dark(#e2eee7,#293b33);--wa-role-tint-ink:light-dark(#3c6451,#b4d9c5)}
+.wa-panel :is(.wa-role-card,.wa-role-dialog)[data-tone="1"]{--wa-role-tint:light-dark(#e5edf8,#2d374a);--wa-role-tint-ink:light-dark(#435f8b,#bccff0)}
+.wa-panel :is(.wa-role-card,.wa-role-dialog)[data-tone="2"]{--wa-role-tint:light-dark(#eee7f3,#3b3046);--wa-role-tint-ink:light-dark(#705483,#d7bfe7)}
+.wa-panel :is(.wa-role-card,.wa-role-dialog)[data-tone="3"]{--wa-role-tint:light-dark(#f4eadc,#40372c);--wa-role-tint-ink:light-dark(#805c32,#e3ccac)}
+.wa-panel .wa-role-card{position:relative;display:flex;flex-direction:column;min-width:0;min-height:342px;border:1px solid var(--wa-border);border-radius:16px;background:var(--wa-surface);overflow:hidden;box-shadow:0 3px 12px light-dark(#242b340a,#00000024);transition:transform .18s var(--wa-ease),box-shadow .18s var(--wa-ease),border-color .18s}
+.wa-panel .wa-role-card:hover{transform:translateY(-3px);border-color:color-mix(in srgb,var(--wa-role-tint-ink) 45%,var(--wa-border));box-shadow:0 9px 24px light-dark(#242b3414,#00000038)}
+.wa-panel .wa-role-card:has(.wa-role-card-open:focus-visible){outline:2px solid var(--wa-accent);outline-offset:3px}.wa-panel .wa-role-card-open:focus-visible{outline:none}
+.wa-panel .wa-role-card-cover{position:relative;height:76px;flex-shrink:0;padding:15px 18px;background:var(--wa-role-tint);overflow:hidden;display:flex;justify-content:flex-end;align-items:flex-start}
+.wa-panel .wa-role-card-cover::before{content:'';position:absolute;width:108px;height:108px;top:-64px;right:-25px;border:18px solid color-mix(in srgb,var(--wa-role-tint-ink) 7%,transparent);border-radius:50%}
+.wa-panel .wa-role-source{position:relative;display:inline-flex;align-items:center;gap:5px;font-size:10px;line-height:1.5;color:var(--wa-role-tint-ink)}
+.wa-panel .wa-role-card-identity{position:relative;display:flex;align-items:flex-start;gap:12px;padding:0 20px;margin-top:-24px;min-width:0}
+.wa-panel .wa-role-avatar{display:grid;place-items:center;width:60px;height:60px;flex-shrink:0;border:4px solid var(--wa-surface);border-radius:17px;background:var(--wa-role-tint);color:var(--wa-role-tint-ink);font:600 23px/1 var(--wa-title-font);letter-spacing:-.5px;box-shadow:0 2px 5px light-dark(#25332c0c,#00000020)}
+.wa-panel .wa-role-card-identity>div{min-width:0;padding-top:26px}.wa-panel .wa-role-card-identity h3{font:600 17px/1.5 var(--wa-title-font);letter-spacing:-.25px;overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
+.wa-panel .wa-role-card-identity p{font-size:11px;line-height:1.7;color:var(--wa-muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wa-panel .wa-role-card-copy{display:flex;flex-direction:column;flex:1;padding:17px 20px 18px;min-width:0}
+.wa-panel .wa-role-relationship{font-size:12px;line-height:1.75;min-height:21px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;overflow-wrap:anywhere}
+.wa-panel .wa-role-card-summary{margin-top:15px;min-height:78px}.wa-panel .wa-role-card-summary>span{font-size:10px;line-height:1.6;color:var(--wa-muted)}
+.wa-panel .wa-role-card-summary>p{margin-top:6px;font-size:13px;line-height:1.8;white-space:pre-line;overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden}
+.wa-panel :is(.wa-role-card,.wa-role-dialog) .is-empty{color:var(--wa-muted)}
+.wa-panel .wa-role-card-meta{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:auto;padding-top:16px;font-size:10px;line-height:1.7;font-variant-numeric:tabular-nums;color:var(--wa-muted)}
+.wa-panel .wa-role-card-meta>.wa-role-conflict{color:var(--wa-warning)}
+.wa-panel .wa-role-card-meta>.wa-role-card-id{flex-basis:100%;font:10px/1.7 var(--wa-font-mono);overflow-wrap:anywhere}
+.wa-panel .wa-role-card-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 20px;border-top:1px solid var(--wa-border-soft);background:light-dark(#fafbfc,#232528)}
+.wa-panel .wa-role-card-status{display:flex;flex-direction:column;align-items:flex-start;gap:6px;min-width:0}
+.wa-panel .wa-role-state{display:inline-flex;align-items:center;gap:6px;min-width:0;font-size:10px;line-height:1.7;color:var(--wa-muted)}.wa-panel .wa-role-state>span{width:5px;height:5px;border-radius:50%;background:currentColor;flex-shrink:0}
+.wa-panel .wa-role-state[data-state=ready]{color:var(--wa-success)}.wa-panel .wa-role-state:is([data-state=updating],[data-state=queued]){color:var(--wa-info)}.wa-panel .wa-role-state[data-state=retrying]{color:var(--wa-danger)}
+.wa-panel .wa-role-card-open{display:flex;align-items:center;gap:5px;flex-shrink:0;min-height:24px;padding:0;border:0;background:transparent;color:var(--wa-role-tint-ink);font-size:11px;font-weight:500}
+.wa-panel .wa-role-card-open::after{content:'';position:absolute;inset:0;z-index:1;border-radius:16px}
+.wa-panel .wa-role-dialog{width:min(760px,calc(100% - 48px));max-width:760px;max-height:calc(100dvh - 48px);margin:auto;padding:0;overflow:auto;border:1px solid var(--wa-border);border-radius:20px;background:var(--wa-surface);color:var(--wa-ink);box-shadow:0 24px 100px light-dark(#18202640,#00000080)}
+.wa-panel .wa-role-dialog::backdrop{background:light-dark(#18202666,#00000088);backdrop-filter:blur(4px)}
+.wa-panel .wa-role-dialog-hero{position:relative;padding:26px 28px 24px;background:var(--wa-role-tint)}
+.wa-panel .wa-role-dialog-close{position:absolute;top:16px;right:20px;min-height:30px;padding:4px 9px;border-color:color-mix(in srgb,var(--wa-role-tint-ink) 15%,transparent);background:color-mix(in srgb,var(--wa-surface) 65%,transparent);font-size:11px;color:var(--wa-role-tint-ink)}
+.wa-panel .wa-role-eyebrow{display:block;font-size:11px;color:var(--wa-role-tint-ink);line-height:1.7}
+.wa-panel .wa-role-dialog-identity{display:flex;align-items:center;gap:18px;margin-top:16px;min-width:0}.wa-panel .wa-role-dialog-identity>div{min-width:0}
+.wa-panel .wa-role-avatar.is-large{width:72px;height:72px;border-radius:20px;font-size:29px;background:var(--wa-surface)}
+.wa-panel .wa-role-dialog-identity h2{font:600 23px/1.45 var(--wa-title-font);letter-spacing:-.5px;overflow-wrap:anywhere}.wa-panel .wa-role-dialog-identity p{margin-top:6px;font-size:12px;color:var(--wa-role-tint-ink);overflow-wrap:anywhere}
+.wa-panel .wa-role-dialog-body{padding:22px 28px 26px}.wa-panel .wa-role-dialog-body>.wa-alert{margin-bottom:16px}
+.wa-panel .wa-role-detail-status{display:flex;align-items:center;flex-wrap:wrap;gap:6px 16px;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid var(--wa-border-soft);font-size:11px;line-height:1.8;color:var(--wa-muted);font-variant-numeric:tabular-nums}
+.wa-panel .wa-role-detail-status>.wa-role-state{font-size:11px}.wa-panel .wa-role-detail-tools{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;min-width:0}
+.wa-panel .wa-role-detail-tools>h3{font-size:14px}.wa-panel .wa-role-detail-tools .wa-button{font-size:11px;min-height:32px;padding:5px 10px}
+.wa-panel .wa-role-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:28px;min-width:0}
+.wa-panel .wa-role-field{min-width:0;padding:18px 0;border-bottom:1px solid var(--wa-border-soft)}.wa-panel .wa-role-field.is-wide{grid-column:1/-1}
+.wa-panel .wa-role-field>.wa-label{display:block;margin-bottom:7px;font-size:11px;color:var(--wa-muted)}.wa-panel .wa-role-field>p{font-size:13px;line-height:1.85;white-space:pre-wrap;overflow-wrap:anywhere}
+.wa-panel .wa-role-field>.wa-textarea{min-height:42px;width:100%;line-height:1.85}.wa-panel .wa-role-field>.wa-alert{margin-top:10px}
+.wa-panel .wa-role-evidence{margin-top:9px;font-size:11px;overflow-wrap:anywhere}.wa-panel .wa-role-evidence>summary{cursor:pointer;color:var(--wa-accent)}
+.wa-panel .wa-role-evidence>p{margin-top:8px;padding:10px 12px;border-left:2px solid var(--wa-border);background:var(--wa-subtle);line-height:1.85;white-space:pre-wrap}.wa-panel .wa-role-evidence>p>span{color:var(--wa-muted)}
+.wa-panel .wa-role-edit-actions{position:sticky;bottom:0;display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:20px;padding:14px 16px;border:1px solid var(--wa-border);border-radius:10px;background:var(--wa-surface-raised);box-shadow:var(--wa-shadow)}
+.wa-panel .wa-role-edit-actions>p{font-size:11px;color:var(--wa-muted)}.wa-panel .wa-role-edit-actions>.wa-row{flex-shrink:0}
+.wa-panel .wa-role-history{margin-top:24px;padding-top:18px;font-size:12px;color:var(--wa-muted);overflow-wrap:anywhere}.wa-panel .wa-role-history>summary{cursor:pointer;color:var(--wa-ink)}.wa-panel .wa-role-history>p{font-size:11px;line-height:1.85;margin-top:10px}
+@media(max-width:760px){
+ .wa-panel .wa-role-gallery-head{align-items:flex-start;flex-direction:column;gap:16px}.wa-panel .wa-role-gallery-head>.wa-search{flex:none;width:100%;max-width:420px}
+ .wa-panel .wa-role-grid{gap:18px}.wa-panel .wa-role-dialog{width:calc(100% - 28px);max-height:calc(100dvh - 28px)}
+}
+@media(max-width:480px){
+ .wa-panel .wa-role-settings{margin-bottom:22px}.wa-panel .wa-role-settings>summary{gap:10px}.wa-panel .wa-role-settings>summary>span:last-child{font-size:10px}
+ .wa-panel .wa-role-card{min-height:330px}.wa-panel .wa-role-dialog{width:calc(100% - 20px);max-height:calc(100dvh - 20px);border-radius:16px}
+ .wa-panel .wa-role-dialog-hero{padding:22px 18px}.wa-panel .wa-role-dialog-close{top:12px;right:12px}.wa-panel .wa-role-dialog-identity{gap:13px;margin-top:19px}
+ .wa-panel .wa-role-avatar.is-large{width:60px;height:60px;font-size:24px;border-radius:17px}.wa-panel .wa-role-dialog-identity h2{font-size:20px}.wa-panel .wa-role-dialog-identity p{font-size:11px}
+ .wa-panel .wa-role-dialog-body{padding:18px}.wa-panel .wa-role-fields{grid-template-columns:minmax(0,1fr)}.wa-panel .wa-role-field.is-wide{grid-column:auto}
+ .wa-panel .wa-role-detail-tools{align-items:flex-start;gap:12px}.wa-panel .wa-role-detail-tools>.wa-row{width:100%}.wa-panel .wa-role-edit-actions{flex-direction:column;align-items:stretch;padding:12px}
+ .wa-panel .wa-role-edit-actions>.wa-row{flex-wrap:nowrap}.wa-panel .wa-role-edit-actions .wa-button{flex:1;min-width:0;padding:7px 8px;font-size:12px}
+}
+@media(prefers-reduced-motion:reduce){.wa-panel .wa-role-card{transition:none}.wa-panel .wa-role-card:hover{transform:none}}
+.wa-panel[data-motion=off] .wa-role-card:hover{transform:none}
 /* Long-term memory is a document with source sections, not a grid of cards. */
 .wa-panel .wa-long-workspace{min-width:0}.wa-panel .wa-long-workspace>.wa-memory-overview{margin-bottom:0;border-bottom:0}
 .wa-panel .wa-long-shared{max-width:960px}.wa-panel .wa-long-shared>.wa-field{margin-top:20px}
@@ -111,8 +193,17 @@ export const contentCss = `
 .wa-panel .wa-image-dialog-stage{display:grid;place-items:center;padding:24px;min-height:200px;background:var(--wa-subtle)}
 .wa-panel .wa-image-preview{display:block;max-width:100%;max-height:52vh;width:auto;height:auto;object-fit:contain}
 .wa-panel .wa-image-dialog-information{padding:20px 22px}.wa-panel .wa-image-dialog-information>.wa-help{margin:8px 0 16px}.wa-panel .wa-image-delete{margin-top:16px}.wa-panel .wa-image-delete>.wa-button{margin:12px 8px 0 0}
-/* Media library: personal gallery first; built-in collections and import are supporting sections. */
+/* Personal WeChat stickers, with a compact gallery and explicit source controls. */
 .wa-panel .wa-library-page{min-width:0}.wa-panel .wa-library-gallery{min-width:0;padding-bottom:26px}
+.wa-panel .wa-sticker-controls{padding:20px 22px;margin-bottom:26px;border:1px solid var(--wa-border);border-radius:8px;background:var(--wa-subtle);min-width:0}
+.wa-panel .wa-sticker-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap}.wa-panel .wa-sticker-heading h2{font-size:15px;line-height:1.6}.wa-panel .wa-sticker-heading .wa-help{margin-top:5px}
+.wa-panel .wa-sticker-status{font-size:11px;line-height:1.8;padding:3px 9px;border:1px solid var(--wa-border);border-radius:5px;white-space:nowrap;color:var(--wa-muted);background:var(--wa-surface)}.wa-panel .wa-sticker-status.is-ready{color:var(--wa-ink)}
+.wa-panel .wa-sticker-actions{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0 10px}.wa-panel .wa-sticker-note{font-size:11px}.wa-panel .wa-sticker-controls>.wa-help{margin-top:8px}.wa-panel .wa-sticker-controls>.wa-alert{margin-top:12px}
+.wa-panel .wa-sticker-sources{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}.wa-panel .wa-sticker-sources button{padding:7px 12px;font-size:12px;color:var(--wa-muted);border:1px solid transparent;border-radius:5px;background:transparent;cursor:pointer}.wa-panel .wa-sticker-sources button[aria-pressed=true]{color:var(--wa-ink);border-color:var(--wa-border);background:var(--wa-subtle)}
+.wa-panel .wa-library-page .wa-assets-grid{grid-template-columns:repeat(auto-fill,minmax(144px,1fr));gap:20px 14px}
+.wa-panel .wa-library-page .wa-asset-preview{aspect-ratio:1;padding:16px;max-height:210px}
+.wa-panel .wa-library-page .wa-asset-details p{min-height:19px;-webkit-line-clamp:1}.wa-panel .wa-library-page .wa-asset-meta{margin-top:5px}
+@media(max-width:560px){.wa-panel .wa-sticker-controls{padding:16px 12px}.wa-panel .wa-sticker-actions{gap:7px}.wa-panel .wa-sticker-actions>.wa-button{flex:1 1 140px}.wa-panel .wa-library-page .wa-assets-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:18px 10px}.wa-panel .wa-sticker-sources button{padding:6px 8px;font-size:11px}}
 .wa-panel .wa-library-gallery>.wa-empty{min-height:150px;padding:28px 20px}.wa-panel .wa-library-gallery>.wa-empty>.wa-button{margin-top:8px}
 .wa-panel .wa-assets-gallery-heading{display:flex;align-items:center;justify-content:space-between;gap:16px}.wa-panel .wa-assets-gallery-heading h2{font-size:14px}
 .wa-panel .wa-assets-gallery-heading>.wa-button{min-height:30px;font-size:11px;padding:5px 9px}

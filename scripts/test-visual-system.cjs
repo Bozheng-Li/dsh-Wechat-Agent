@@ -194,7 +194,7 @@ app.whenReady().then(async () => {
         await click('.wa-wb-source-list > summary'); await capturePage('digest-sources');
       }
       if (id === 'nav-assets') {
-        await click('[data-testid="builtin-sticker-packs"] input[role="switch"]');
+        await fixture('seedAssets');
         await waitFor(() => !!document.querySelector('.wa-asset-open'));
         await capturePage('assets-enabled-group');
         await click('[data-testid="asset-settings"] > summary'); await capturePage('assets-reply-settings');
@@ -319,7 +319,7 @@ app.whenReady().then(async () => {
     }
     if (probe === 'assets') {
       await click('[data-testid="nav-assets"]'); await capturePage('assets-page-probe');
-      await click('[data-testid="builtin-sticker-packs"] input[role="switch"]');
+      await fixture('seedAssets');
       await waitFor(() => !!document.querySelector('.wa-asset-open'));
       await click('.wa-asset-open'); await capturePage('assets-dialog-probe'); await clickText('关闭');
     }

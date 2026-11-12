@@ -1,10 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  buildWechatPrompt, planProgressiveTools, personaFromPreset
-} from '../lib/testing.js';
-
-
+import { buildWechatPrompt } from '../prompts/reply/compose.mjs';
+import { planProgressiveTools } from '../modules/tools/progressive.mjs';
+import { personaFromPreset } from '../prompts/personas/catalog.mjs';
 
 const options = { persona: personaFromPreset(), requestText: '这个说法靠谱吗', now: new Date('2026-11-10T12:00:00Z') };
 

@@ -51,7 +51,7 @@ test('role cards inherit the global persona and keep the same memory identity af
   const bytes = fs.readFileSync(f.memory.paths(f.scope.accountId).file);
   const saved = f.store.roleCards.save(f.scope, { ...emptyRoleCard(), label: '老朋友', style: '说话自然直接', addressAs: '阿宁' }, original.revision);
   assert.equal(saved.roleId, original.roleId); assert.equal(saved.inherited, false);
-  assert.equal(f.store.conversationPersona(f.scope.accountId, 'private', 'alice').roleCard.addressAs, '阿宁');
+  assert.deepEqual(f.store.conversationPersona(f.scope.accountId, 'private', 'alice'), f.store.persona());
   assert.equal(facts(f)[0].roleId, saved.roleId);
   const reopened = new StateStore(f.root);
   assert.deepEqual(reopened.roleCards.view(f.scope), saved);
@@ -74,7 +74,7 @@ test('owner RPC validates account, known conversation, fields and optimistic car
   assert(before.ok);
   assert.equal((await f.rpc('memory.role.save', { ...f.scope, revision: 'empty', card: emptyRoleCard() }, signal(), { principal: { kind: 'agent' } })).error.code, 'OWNER_REQUIRED');
   assert.equal((await f.rpc('memory.role.get', { ...f.scope, accountId: 'foreign' }, signal(), owner)).error.code, 'ACCOUNT_CHANGED');
-  assert.equal((await f.rpc('memory.role.get', { ...f.scope, peerId: 'unknown' }, signal(), owner)).error.code, 'MEMORY_CONVERSATION_MISSING');
+  assert.equal((await f.rpc('memory.role.get', { ...f.scope, peerId: 'unknown' }, signal(), owner)).error.code, 'OBJECT_NOT_AUTHORIZED');
   assert.equal((await f.rpc('memory.role.save', { ...f.scope, revision: 'empty', card: { scope: 'foreign' } }, signal(), owner)).error.code, 'ROLE_CARD_INVALID');
   const payload = { ...f.scope, revision: 'empty', card: { ...emptyRoleCard(), relationship: '同事' } };
   assert((await f.rpc('memory.role.save', payload, signal(), owner)).ok);
@@ -178,31 +178,33 @@ test('actual chat requests receive the selected card and person facts while anot
   const f = fixture(t); await f.write('我不吃香菜。');
   let reviewInput;
   f.runner.reviewMemoryReply = async (input, text) => { reviewInput = input; return { text, audit: { calls: 0 } }; };
-  f.store.roleCards.save(f.scope, { ...emptyRoleCard(), addressAs: '阿宁', style: '自然地直接回答' }, 'empty');
+  f.store.roleCards.save(f.scope, { ...emptyRoleCard(), addressAs: '阿宁', style: '自然地直接回答' }, 'empty', f.now());
   f.channel.receive(f.message('帮我写一条点单备注'), f.scope.accountId); await f.channel.whenIdle();
-  assert.equal(f.calls.length, 1); assert.equal(f.calls[0].persona.roleCard.addressAs, '阿宁'); assert(f.calls[0].memory.includes('香菜'));
+  assert.equal(f.calls.length, 1); assert.equal(f.calls[0].persona.roleCard, undefined); assert(f.calls[0].memory.includes('香菜'));
+  assert(f.calls[0].memory.includes('阿宁')); assert(f.calls[0].tools.some(tool => tool.name === 'wechat_role_card'));
   assert.deepEqual(reviewInput.speaker, f.calls[0].speaker); assert.equal(reviewInput.group, false);
   assert.equal(reviewInput.currentContext, '');
   for (const strategy of ['legacy', 'progressive-v1']) {
-    const prompt = buildWechatPrompt({ ...f.calls[0], promptStrategy: strategy, requestText: f.calls[0].text });
-    assert(prompt.includes('自然地直接回答')); assert(prompt.includes('会话角色卡'));
+    const prompt = buildWechatPrompt({ ...f.calls[0], capabilities: f.calls[0].tools, promptStrategy: strategy, requestText: f.calls[0].text });
+    assert(prompt.includes('人物角色卡')); assert(prompt.includes('wechat_role_card'));
   }
   assert.equal(f.sent.length, 1); assert.equal(f.store.conversationPersona(f.scope.accountId, 'private', 'bob').roleCard, undefined);
 });
 
-test('changing a role cancels a stale reply before sending and leaves its facts intact', async t => {
+test('changing person memory preserves the ongoing reply and its existing facts', async t => {
   const f = fixture(t); await f.write('我不吃香菜。');
-  const started = Promise.withResolvers();
-  f.runner.run = async input => { started.resolve(); await new Promise((resolve, reject) => input.signal.addEventListener('abort', () => reject(input.signal.reason), { once: true })); };
+  const started = Promise.withResolvers(), finish = Promise.withResolvers();
+  f.runner.run = async input => { started.resolve(input); await finish.promise; input.signal.throwIfAborted(); return { text: '不要香菜，谢谢。' }; };
   f.channel.receive(f.message('帮我写备注'), f.scope.accountId); await started.promise;
   await f.service.call('memory.role.save', { ...f.scope, card: { ...emptyRoleCard(), style: '少说一点' }, revision: 'empty' }, signal());
-  await f.channel.whenIdle(); assert.equal(f.sent.length, 0); assert.equal(facts(f).length, 1);
+  assert.equal((await started.promise).signal.aborted, false); finish.resolve();
+  await f.channel.whenIdle(); assert.equal(f.sent.length, 1); assert.equal(facts(f).length, 1);
 });
 
 test('reflection uses one tool-free request and removes rephrased unsupported exclusions', async () => {
   let count = 0;
   const input = { text: '我吃饭有什么忌口', memory: '{"text":"阿宁说：我不吃香菜。"}', persona: { name: '朋友' } };
-  const result = await reviewMemoryDraft({ run: async request => { count++; assert.deepEqual(request.tools, []); assert.equal(request.mode, 'long-memory');
+  const result = await reviewMemoryDraft({ run: async request => { count++; assert.deepEqual(request.tools, []); assert.equal(request.mode, 'reply-review');
     assert(!request.text.includes('expected')); return { text: '不放香菜，其他没什么要注意的。' }; } }, input, '不放香菜，其他你没提过。', { signal: signal() });
   assert.equal(count, 1); assert.equal(result.text, '不放香菜。'); assert.equal(result.audit.outcome, 'revised');
   assert.deepEqual(memoryReviewFlags({ text: '原样输出：你没说过' }, '你没说过'), []);

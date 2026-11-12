@@ -2,6 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { ChannelError } from "../../shared/contracts.mjs";
+import { authorizationEpoch, assertAuthorizationEpoch } from '../../shared/authorization.mjs';
+
+const snapshotEpoch = Symbol('authorizationEpoch');
 
 export const digest = (value) =>
   createHash('sha256')
@@ -61,6 +64,7 @@ export class WorkbenchStore {
     const file = this.path(accountId);
     if (!fs.existsSync(file))
       return {
+        [snapshotEpoch]: authorizationEpoch(this.store, accountId),
         version: 1,
         ownerStoreId: this.store.data.storeId,
         accountId,
@@ -83,6 +87,7 @@ export class WorkbenchStore {
         !this.validate(value)
       )
         throw Error();
+      value[snapshotEpoch] = authorizationEpoch(this.store, accountId);
       return value;
     } catch {
       fail('WORKBENCH_STORAGE_INVALID', '资料文件损坏或归属不匹配，原文保留，未用空白数据覆盖');
@@ -107,6 +112,7 @@ export class WorkbenchStore {
       key &&
       this.cached?.file === file &&
       this.cached.key === key &&
+      this.cached.value[snapshotEpoch] === authorizationEpoch(this.store, accountId) &&
       this.cached.value.ownerStoreId === this.store.data.storeId
     )
       return this.cached.value;
@@ -128,7 +134,9 @@ export class WorkbenchStore {
   snapshotId(value) {
     return this.snapshotIds.get(value);
   }
-  save(value, expected = value.revision) {
+  save(value, expected = value.revision, { authorizationCleanup = false } = {}) {
+    if (!authorizationCleanup && value[snapshotEpoch] !== undefined)
+      assertAuthorizationEpoch(this.store, value.accountId, value[snapshotEpoch]);
     if (!this.validate(value)) fail('WORKBENCH_STORAGE_INVALID', '资料结构无效，原文件保留，未写入不完整内容');
     const current = this.snapshot(value.accountId);
     if (current.revision !== expected) fail('WORKBENCH_CHANGED', '资料已变化，请重新读取；未覆盖新内容');

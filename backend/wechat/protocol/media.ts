@@ -7,6 +7,7 @@ import { bytes, fields, num, type Field } from "./wire.js";
 export interface ImageDescriptor {
   messageId: string;
   kind?: 'image' | 'emoji';
+  stickerMd5?: string;
   download?: { originalBytes?: number; fullBytes?: number };
   observedAt: number;
   inlineBytes: number;
@@ -71,6 +72,7 @@ export function observedImage(
   const descriptor: ImageDescriptor = {
     messageId,
     kind: emoji ? 'emoji' : 'image',
+    ...(emoji && /^[a-f0-9]{32}$/i.test(attrs.md5 || '') ? { stickerMd5: attrs.md5.toLowerCase() } : {}),
     observedAt: Date.now(),
     inlineBytes: 0,
     attributes: Object.keys(attrs),
@@ -131,7 +133,7 @@ export function observedImage(
           JSON.stringify(descriptor),
           { mode: 0o600 },
         );
-        return { type: emoji ? 'face' : "image", data: { file, resourceId: id } };
+        return { type: emoji ? 'face' : "image", data: { file, resourceId: id, ...(descriptor.stickerMd5 ? { stickerMd5: descriptor.stickerMd5 } : {}) } };
       } catch (e) {
         if (!(e instanceof BridgeError)) throw e;
       }
@@ -140,5 +142,5 @@ export function observedImage(
   writeFileSync(path.join(dir, id + ".json"), JSON.stringify(descriptor), {
     mode: 0o600,
   });
-  return { type: emoji ? 'face' : "image", data: { file: "unavailable", resourceId: id } };
+  return { type: emoji ? 'face' : "image", data: { file: "unavailable", resourceId: id, ...(descriptor.stickerMd5 ? { stickerMd5: descriptor.stickerMd5 } : {}) } };
 }

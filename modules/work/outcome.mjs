@@ -1,6 +1,7 @@
 import { remoteInspectionRequest, workExecutionError } from './commands.mjs';
 
 const failureMessages = {
+  wechat_file: '有一份微信附件未能完成指定操作，未取得的正文不能视为已读。',
   wechat_work_exec: '本机运行验证没有通过，已生成的文件保留。',
   wechat_work_ssh_exec: '有一项远端读取或执行没有成功，已取得的结果保留。',
   wechat_work_ssh_connect: '有一台服务器的 SSH 连接没有通过。',
@@ -25,11 +26,12 @@ const failureMessages = {
 };
 const sameHost = (left, right) => String(left.alias ?? left.result.alias ?? '').toLowerCase() === String(right.alias ?? right.result.alias ?? '').toLowerCase();
 const remoteTools = new Set(['wechat_work_ssh_connect', 'wechat_work_ssh_exec', 'wechat_work_vscode_connect']);
-const useful = op => op.result.ok && !['wechat_work_list', 'wechat_work_ssh_connect'].includes(op.tool);
+const useful = op => op.result.ok && !['wechat_work_list', 'wechat_work_ssh_connect'].includes(op.tool) && !(op.tool === 'wechat_file' && op.action === 'list');
 const sameAttempt = (left, right) => left.tool === right.tool && sameHost(left, right) &&
   (left.paths ? left.paths.every(file => right.result.artifacts?.some(artifact => artifact.path === file))
     : left.path ? left.path === right.path : left.command ? left.command === right.command
       : left.tool === 'wechat_work_status' ? left.action === right.action && left.id === right.id
+        : left.tool === 'wechat_file' ? ['action', 'messageId', 'name', 'offset', 'limit', 'revision'].every(key => left[key] === right[key])
         : ['wechat_moments_read', 'wechat_moments_comments', 'wechat_moments_audience'].includes(left.tool) ? ['action', 'userId', 'user', 'postId', 'cursor', 'search', 'labelId', 'offset'].every(key => left[key] === right[key])
         : left.tool.startsWith('wechat_moments_') ? left.inputHash === right.inputHash
         : left.tool !== 'wechat_work_output');
@@ -46,7 +48,7 @@ export function workOutcome(request, operations) {
       sameAttempt(op, next) ||
       op.tool === 'wechat_work_ssh_connect' && remoteTools.has(next.tool) && sameHost(op, next) ||
       remoteRead && op.tool === 'wechat_work_ssh_exec' && next.tool === op.tool && sameHost(op, next)));
-    const auxiliary = remoteRead && !localRequested && !remoteTools.has(op.tool) && !op.tool.startsWith('wechat_moments_');
+    const auxiliary = remoteRead && !localRequested && !remoteTools.has(op.tool) && op.tool !== 'wechat_file' && !op.tool.startsWith('wechat_moments_');
     return [{ operation: index + 1, tool: op.tool, recovered, auxiliary,
       message: op.result.message || failureMessages[op.tool] || '有一项工作操作没有成功。' }];
   });

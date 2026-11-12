@@ -1,6 +1,5 @@
 import { readInteractionPool, interactionOwnComment, readableInteractionText, interactionContentHash } from './interaction-read.mjs';
-import { readMomentsImageContext } from './image-context.mjs';
-import { publicError } from '../../shared/contracts.mjs';
+import { readMomentsImageContext, momentsCommentBasis, momentsImageFailure, recoverableMomentsImageError } from './image-context.mjs';
 
 /** Automatic quotas apply after eligibility checks. Manual latest-N semantics
  * remain positional; an automatic round scans its entire bounded candidate pool. */
@@ -27,19 +26,24 @@ export async function selectAutomaticInteractions(manager, record, context, sign
       comment = false; selection.skippedCommented++;
     }
     if (comment && settings.commentMode === 'generated' && !readableInteractionText(post.text) && !post.imageCount) { comment = false; selection.unreadable++; }
-    let imageContext, commentSkipReason = '';
+    let imageContext, imageReadError, commentSkipReason = '';
     if (comment && settings.commentMode === 'generated' && post.imageCount > 0) {
       record.phase = 'reading-images'; manager.save();
       try {
         imageContext = await readMomentsImageContext(manager.channel, { accountId: context.accountId, scopeKey: context.scopeKey,
           postId: post.id, expectedHash: interactionContentHash(post) }, signal, check);
-        if (!imageContext.complete) commentSkipReason = '部分图片看不清，已跳过自动评论';
-      } catch (error) { check(); commentSkipReason = publicError(error, '图片读取未完成，已跳过自动评论').message; }
-      if (commentSkipReason) { comment = false; selection.unreadable++; selection.imageFailures++; }
+      } catch (error) {
+        check(); imageReadError = momentsImageFailure(error);
+        if (!recoverableMomentsImageError(error)) commentSkipReason = imageReadError.message;
+      }
+      if (!imageContext?.complete) selection.imageFailures++;
+      if (!commentSkipReason && !momentsCommentBasis(post.text, imageContext))
+        commentSkipReason = '配图未读到可用内容，且没有可回复的正文，已跳过自动评论';
+      if (commentSkipReason) { comment = false; selection.unreadable++; }
     }
     check();
     if (!like && !comment) continue;
-    chosen.push({ post, like, comment, imageContext, commentSkipReason });
+    chosen.push({ post, like, comment, imageContext, imageReadError, commentSkipReason });
     if (like) selection.plannedLikes++; if (comment) selection.plannedComments++;
     friends.set(post.author.userId, (friends.get(post.author.userId) ?? 0) + 1);
   }

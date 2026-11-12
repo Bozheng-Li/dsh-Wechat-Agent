@@ -7,18 +7,22 @@ import { spawn } from 'node:child_process';
 import { deflateSync } from 'node:zlib';
 import { rolldown } from 'rolldown';
 import { uiFixtureModels } from '../tests/fixtures/model-catalog.mjs';
-import { StateStore, WechatChannel, TaskScheduler, AgentIdentity, VERSION, identity, createPluginService, rpcHandler, ChannelError, describeWorkspace, migrateWorkspaceRoot, SearchService, REPLY_STYLE_REVIEW_NOTE, readWorkArtifact, archiveWorkImages, resolveMessageReferences } from '../lib/testing.js';
+import { stickerGif } from '../tests/fixtures/stickers.mjs';
+import { seedExecutionTraceFixture } from '../tests/fixtures/execution-traces.mjs';
+import { StateStore, WechatChannel, TaskScheduler, AgentIdentity, VERSION, identity, createPluginService, rpcHandler, ChannelError, describeWorkspace, migrateWorkspaceRoot, SearchService, REPLY_STYLE_REVIEW_NOTE, readWorkArtifact, archiveWorkImages } from '../lib/testing.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const electron = process.argv[2] || process.env.ELECTRON_PATH;
 if (!electron || !path.isAbsolute(electron) || !fs.existsSync(electron)) throw new Error('Pass an Electron executable: npm run test:ui -- <absolute path to electron.exe>');
 const authorizationFixture = process.env.WECHAT_UI_TEST_AUTHORIZATION_ONLY === '1';
 const generatedImagesFixture = process.env.WECHAT_UI_TEST_GENERATED_IMAGES_ONLY === '1';
-const out = path.resolve(process.env.WECHAT_UI_TEST_OUTPUT || path.join(root, 'storage/logs', generatedImagesFixture ? 'generated-images-preview' : authorizationFixture ? 'authorization-preview' : process.env.WECHAT_UI_TEST_INTERACTIONS_ONLY === '1' ? 'moments-interactions-preview' : process.env.WECHAT_UI_TEST_LIKES_ONLY === '1' ? 'moments-likes-preview' : process.env.WECHAT_UI_TEST_NATURAL_ONLY === '1' ? 'natural-chat-preview' : process.env.WECHAT_UI_TEST_VISUALS_ONLY === '1' ? 'visual-refresh-preview' : process.env.WECHAT_UI_TEST_TASKS_ONLY === '1' ? 'tasks-layout-preview' : 'ui-preview'));
+const stickerFixture = process.env.WECHAT_UI_TEST_STICKERS_ONLY === '1';
+const executionTraceFixture = process.env.WECHAT_UI_TEST_TRACES_ONLY === '1';
+const automationFixture = process.env.WECHAT_UI_TEST_AUTOMATION_ONLY === '1';
+const out = path.resolve(process.env.WECHAT_UI_TEST_OUTPUT || path.join(root, 'storage/logs', automationFixture ? 'automation-settings-preview' : generatedImagesFixture ? 'generated-images-preview' : authorizationFixture ? 'authorization-preview' : process.env.WECHAT_UI_TEST_INTERACTIONS_ONLY === '1' ? 'moments-interactions-preview' : process.env.WECHAT_UI_TEST_LIKES_ONLY === '1' ? 'moments-likes-preview' : process.env.WECHAT_UI_TEST_NATURAL_ONLY === '1' ? 'natural-chat-preview' : process.env.WECHAT_UI_TEST_VISUALS_ONLY === '1' ? 'visual-refresh-preview' : process.env.WECHAT_UI_TEST_TASKS_ONLY === '1' ? 'tasks-layout-preview' : 'ui-preview'));
 fs.mkdirSync(out, { recursive: true });
-const fixtureParent = path.resolve(process.env.WECHAT_UI_TEST_TMPDIR || path.join(root, 'storage/tmp'));
-fs.mkdirSync(fixtureParent, { recursive: true });
-const fixture = fs.mkdtempSync(path.join(fixtureParent, 'ui-preview-'));
+fs.mkdirSync(path.join(root, 'storage/tmp'), { recursive: true });
+const fixture = fs.mkdtempSync(path.join(root, 'storage/tmp/ui-preview-'));
 const bootstrap = path.join(fixture, 'initial');
 const paths = { bootstrap, basePath: path.join(fixture, 'relocated'), workspacePath: path.join(fixture, 'custom-workspace'), recordsPath: path.join(fixture, 'custom-records'), conversationPath: path.join(fixture, 'custom-alpha') };
 const token = randomBytes(24).toString('hex');
@@ -106,6 +110,26 @@ const worker = {
   },
   async send() { throw new Error('The UI fixture must never send a WeChat message'); }
 };
+const stickerSamples = [fixturePng([224, 154, 45], 0, 180, 140), stickerGif, fixturePng([76, 150, 207], 0, 160, 160)].map(content => ({ content, md5: createHash('md5').update(content).digest('hex') }));
+const stickerFavorites = new Set(stickerSamples.slice(0, 2).map(item => item.md5)), stickerSends = [];
+let stickerReadFailure = false, stickerSendUnknown = false;
+if (stickerFixture) {
+  state.nativeStickersReady = true;
+  worker.readStickers = async ({ accountId: id }) => {
+    if (stickerReadFailure) throw new ChannelError('STICKER_UNAVAILABLE', '合成微信收藏暂不可用，原有表情保留');
+    return { complete: true, items: id === accountId ? [...stickerFavorites].map(md5 => ({ md5, previewAvailable: true })) : [] };
+  };
+  worker.readStickerContent = async ({ md5 }) => ({ stickerMd5: md5, data: stickerSamples.find(item => item.md5 === md5).content.toString('base64'), quality: 'original' });
+  worker.recentStickers = async ({ accountId: id }) => id !== accountId ? [] : [{ id: 'ui-sticker-chat', serverMessageId: '1701', time: Math.floor(Date.now() / 1000),
+    direction: 'incoming', source: 'longlink:NewSync', peerId: 'group_alpha@chatroom', chatType: 'group', sender: { id: 'wxid_alice' },
+    message: [{ type: 'face', data: { resourceId: 'ui-chat-sticker', stickerMd5: stickerSamples[2].md5 } }] }];
+  worker.favoriteSticker = async ({ md5 }) => { stickerFavorites.add(md5); return { saved: true, alreadyFavorite: false }; };
+  worker.send = async args => {
+    if (args.peerId !== 'filehelper' || args.accountId !== accountId) throw Error('Synthetic sticker tests may only target filehelper');
+    stickerSends.push({ accountId: args.accountId, peerId: args.peerId, native: !!args.message[0]?.data?.nativeSticker });
+    return { delivery: 'server-ack', serverMessageIds: stickerSendUnknown ? [] : [String(9000 + stickerSends.length)], messageType: args.message[0]?.data?.nativeSticker ? 47 : 3 };
+  };
+}
 const fixtureMoments = [{ id: '9007199254740997', author: { userId: accountId }, createdAt: Math.floor(Date.now() / 1000), text: '合成朋友圈：性格随和，笑点不高。', imageCount: 0, deleted: false }];
 const fixtureComments = [{ id: '3', userId: 'wxid_alice', nickname: 'Alice', text: '这个笑话有点冷！', createdAt: Math.floor(Date.now() / 1000), deleted: false }];
 const likesFixture = process.env.WECHAT_UI_TEST_LIKES_ONLY === '1';
@@ -184,8 +208,11 @@ worker.readMoments = async (args, signal) => {
     const items = otherAccount ? [] : args.query.action === 'user' ? fixtureFriendMoments.filter(post => post.author.userId === args.query.userId) : args.query.cursor ? [fixtureFriendMoments[0], ...fixtureFriendMoments.slice(3)] : [fixtureMoments[0], ...fixtureFriendMoments.slice(0, 3)];
     return { accountId: args.accountId, action: args.query.action, ...(args.query.action === 'user' ? { userId: args.query.userId } : {}), source: 'wechat-sns-live', items: structuredClone(items), nextCursor: !otherAccount && args.query.action === 'timeline' && !args.query.cursor ? 'fixture-friends-page-2' : null };
   }
-  const items = args.query.action === 'comments' ? fixtureComments : args.query.action === 'detail' ? fixtureMoments.filter(post => post.id === args.query.postId) : fixtureMoments;
-  return { accountId, action: args.query.action, items: structuredClone(items), visibleCommentEntries: fixtureComments.length, nextCursor: null };
+  const items = args.query.action === 'comments' ? fixtureComments : args.query.action === 'detail' ? fixtureMoments.filter(post => post.id === args.query.postId) :
+    args.query.action === 'user' ? fixtureMoments.filter(post => post.author.userId === args.query.userId) : fixtureMoments;
+  return { accountId: args.accountId, action: args.query.action, source: 'wechat-sns-live',
+    ...(args.query.action === 'user' ? { userId: args.query.userId } : {}), ...(args.query.action === 'comments' ? { postId: args.query.postId } : {}),
+    items: structuredClone(items), visibleCommentEntries: fixtureComments.length, nextCursor: null };
 };
 worker.writeMoments = async (args, signal) => {
   signal.throwIfAborted(); if (args.accountId !== accountId) throw new ChannelError('ACCOUNT_CHANGED', '账号已变化');
@@ -224,6 +251,7 @@ worker.writeMoments = async (args, signal) => {
 const assetAnalysisRequests = [];
 let memoryImageReadsReady = false;
 worker.media = async ({ resourceId }) => {
+  if (stickerFixture && resourceId === 'ui-chat-sticker') return { data: stickerSamples[2].content.toString('base64'), stickerMd5: stickerSamples[2].md5, quality: 'original' };
   if (resourceId === 'c'.repeat(64)) return { data: fixturePng([200, 200, 200]).toString('base64'), mediaType: 'image/png', quality: 'thumbnail', fixtureMemoryImage: true };
   if (!memoryImageReadsReady) throw new ChannelError('IMAGE_URL_INVALID', '图片资源地址不是可读取的微信媒体地址');
   return { data: fixturePng([200, 30, 30]).toString('base64'), mediaType: 'image/png', quality: 'original', fixtureMemoryImage: true };
@@ -232,6 +260,10 @@ const runner = { selection: () => store.modelChoice() || { provider: 'fixture', 
   async summarize(_material, _target, signal) { signal.throwIfAborted(); return '产品讨论组：周五带咖啡讨论产品。'; },
   async describeImage(_image, signal) { signal.throwIfAborted(); return '合成测试图片的笔记。'; },
   async describeImages(images, signal) { signal.throwIfAborted(); if (!images.every(image => image.fixtureMemoryImage)) assetAnalysisRequests.push(images.length); return images.map(() => '合成方块，用于表达赞同或让讨论冷静下来。'); },
+  async describeStickers(images, signal) { signal.throwIfAborted(); assetAnalysisRequests.push(images.length); return images.map(image => ({
+    name: '合成表情 ' + createHash('sha256').update(image.data).digest('hex').slice(0, 4), description: '用于界面验证的合成图片。',
+    usage: '适合轻松回应、表示赞同；严肃求助时先用文字。', tags: ['赞同', '轻松回应'],
+  })); },
   async run(input) {
     if (repliesFixture && input.mode === 'moments-reply') {
       const request = JSON.parse(input.text); replyGenerations.push(request);
@@ -282,6 +314,11 @@ const runner = { selection: () => store.modelChoice() || { provider: 'fixture', 
     return { text: JSON.stringify({ theme: request.themes[0] || '随手想法', text: request.research?.unavailable ? '合成纯文字草稿：给忙碌的一天留一点空白，仅本地验证。' : '合成 AI 草稿：冰箱里大家很冷静，仅本地验证。', imagePrompt: request.image ? '合成配图要求' : '',
       materialIds: request.materials.slice(0, 2).map(item => item.id), imageMaterialId: request.imageMode === 'library' ? request.materials.find(item => item.kind === 'image' && item.imageUse === 'publish')?.id || '' : '' }) }; } };
 let channel = new WechatChannel({ store, runner, transport: worker });
+const executionTraces = executionTraceFixture ? await seedExecutionTraceFixture(channel, accountId) : null;
+const fixturePython = process.env.WECHAT_TEST_PYTHON || path.join(root, 'storage/cache', 'dsh-plugin-python-3.13.9-' + createHash('sha256').update(fs.readFileSync(path.join(root, 'runtime/requirements.txt'))).digest('hex').slice(0, 16), 'python.exe');
+if (fs.existsSync(fixturePython)) channel.library.pythonPath = fixturePython;
+if (!stickerFixture) channel.library.configure(accountId, { ...channel.library.account(accountId).settings, autoDescribe: false });
+else store.setModelConfig({ ...store.modelConfig(), vision: true });
 if (interactionsFixture) channel.momentsAutomation.interactions.automation.start();
 // This fixture checks owner UI/RPC and durable files. Automatic extraction must not
 // drain its deliberately queued cancellation samples or call a real model.
@@ -357,6 +394,15 @@ const ctx = { llm: {
 runner.search = new SearchService(ctx, { fetchImpl: async () => { throw new Error('UI fixture must not call a real search endpoint'); } });
 runner.ctx = ctx; channel.work.imageGeneration.ctx = ctx;
 const service = createPluginService({ ctx, root: activeRoot, store, worker, runner, channel, scheduler, identity: agentIdentity, relocateWorkspace, dshSessionPath: path.join(fixture, 'host-sessions') });
+let authorizationCleanupPreview = null;
+if (authorizationFixture) {
+  const originalCall = service.call.bind(service);
+  service.call = (endpoint, ...args) => {
+    const value = originalCall(endpoint, ...args);
+    return endpoint === 'status' && authorizationCleanupPreview
+      ? { ...value, authorization: authorizationCleanupPreview } : value;
+  };
+}
 const rpc = rpcHandler(service), failures = new Set(), cancelRequests = [], assetUploadRequests = [], storageRequests = [], identityRequests = [], settingsRequests = [];
 const heldRequests = new Map();
 let globalMemoryFault = null;
@@ -371,7 +417,26 @@ function repairGlobalMemory() {
   globalMemoryFault = null;
 }
 let lastHistoryRequest = null;
-const build = await rolldown({ input: path.join(root, 'tests/fixtures/ui-entry.jsx'), platform: 'browser', transform: { define: { 'process.env.NODE_ENV': JSON.stringify('production') } } });
+const validatedClientFile = process.env.WECHAT_UI_TEST_CLIENT_BUNDLE;
+const clientPlugins = [];
+if (validatedClientFile) {
+  if (!path.isAbsolute(validatedClientFile) || !fs.statSync(validatedClientFile).isFile()) throw new Error('Pass an existing absolute client bundle path');
+  const bytes = fs.readFileSync(validatedClientFile, 'utf8');
+  fs.writeFileSync(path.join(out, 'client-bundle-verification.json'), JSON.stringify({
+    file: validatedClientFile, sha256: createHash('sha256').update(bytes).digest('hex'), loadedProductionBundle: true,
+  }, null, 2) + '\n');
+  clientPlugins.push({ name: 'validated-client-bundle', onLoad: {
+    filter: { id: /[\\/]frontend[\\/]panel\.jsx$/ },
+    handler: () => ({ code: `import * as React from 'react'; import * as jsxRuntime from 'react/jsx-runtime';
+      let captured; window.__ModuleLoader__ = { load({ factory }) { captured = factory(name => {
+        if (name === 'react') return React; if (name === 'react/jsx-runtime') return jsxRuntime;
+        throw new Error('Unexpected client dependency: ' + name);
+      }); } }; new Function(${JSON.stringify(bytes)})();
+      export const WechatPanel = captured.WechatPanel;`, loader: 'js' }),
+  } });
+}
+const build = await rolldown({ input: path.join(root, 'tests/fixtures/ui-entry.jsx'), platform: 'browser',
+  plugins: clientPlugins, transform: { define: { 'process.env.NODE_ENV': JSON.stringify('production') } } });
 let script;
 try { script = (await build.generate({ format: 'iife' })).output.find(item => item.type === 'chunk').code; }
 finally { await build.close(); }
@@ -387,6 +452,20 @@ const server = http.createServer(async (req, res) => {
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     if (req.url === '/fixture') {
       if (body.command === 'state') { json(res, service.call('status')); return; }
+      if (body.command === 'authorizationCleanupState' && authorizationFixture) {
+        const pendingCount = body.payload?.pendingCount;
+        if (!Number.isInteger(pendingCount) || pendingCount < 0 || pendingCount > 10) throw new Error('Choose a synthetic cleanup count');
+        authorizationCleanupPreview = pendingCount || body.payload.error
+          ? { pendingCount, error: body.payload.error || null } : null;
+        json(res, { ok: true }); return;
+      }
+      if (body.command === 'automationState' && automationFixture) {
+        const id = state.account.id;
+        const views = await Promise.all(['moments.list', 'moments.likes.list', 'moments.interactions.list', 'moments.materials.list']
+          .map(endpoint => service.call(endpoint, { accountId: id })));
+        json(res, { status: service.call('status'), role: store.roleCardSettingsView(), media: channel.library.list(id).settings,
+          moments: views[0], likes: views[1], interactions: views[2], materials: views[3] }); return;
+      }
       if (visualFixture && body.command === 'visualLogin') {
         const loginState = body.payload?.state;
         if (!['online', 'offline', 'logged-out', 'qrcode', 'scanned', 'error'].includes(loginState)) throw new Error('Unsupported synthetic login state');
@@ -564,7 +643,12 @@ const server = http.createServer(async (req, res) => {
         fs.writeFileSync(agentIdentity.file, markdown, 'utf8'); json(res, agentIdentity.view()); return;
       }
       if (body.command === 'assetZip') { json(res, { name: '界面测试表情.zip', data: assetZip.toString('base64'), bytes: assetZip.length }); return; }
-      if (body.command === 'assets') { json(res, channel.library.list(state.account.id)); return; }
+      if (body.command === 'assets') { json(res, { ...channel.library.list(state.account.id), stickers: channel.stickers.view(state.account.id) }); return; }
+      if (body.command === 'traceFixture' && executionTraces) { json(res, { ids: executionTraces.ids }); return; }
+      if (body.command === 'completeTraceFixture' && executionTraces) { executionTraces.complete(); json(res, { ok: true }); return; }
+      if (body.command === 'stickerState' && stickerFixture) { json(res, { sends: stickerSends, favorites: [...stickerFavorites], analysis: assetAnalysisRequests, records: store.data.records.filter(record => record.mode === 'sticker-test') }); return; }
+      if (body.command === 'stickerFailure' && stickerFixture) { stickerReadFailure = body.payload?.read === true; stickerSendUnknown = body.payload?.send === true; json(res, { ok: true }); return; }
+      if (body.command === 'seedAssets') { json(res, channel.library.import(accountId, { name: '界面测试表情.zip', data: assetZip.toString('base64'), kind: 'sticker' })); return; }
       if (body.command === 'seedWork') {
         const timestamp = Date.now();
         for (const [id, jobState] of [['aaaaaaaaaaaa', 'succeeded'], ['bbbbbbbbbbbb', 'queued']]) {
@@ -591,7 +675,77 @@ const server = http.createServer(async (req, res) => {
         json(res, channel.work.list({ accountId })); return;
       }
       if (body.command === 'globalMemory') { json(res, channel.longMemory.view(state.account.id)); return; }
-      if (body.command === 'roleCard') { json(res, store.roleCards.view({ accountId: state.account.id, chatType: body.payload.chatType, peerId: body.payload.peerId })); return; }
+      if (body.command === 'roleCard') { json(res, store.roleCards.view({ ...body.payload, accountId: state.account.id })); return; }
+      if (body.command === 'roleCardSettings') { json(res, store.roleCardSettingsView()); return; }
+      if (body.command === 'roleCardsOffline' && process.env.WECHAT_UI_TEST_ROLE_CARDS_ONLY === '1') {
+        state = { ...state, account: null, online: false, state: 'offline' }; json(res, { ok: true }); return;
+      }
+      if (body.command === 'seedPersonCards') {
+        const settings = store.settings(accountId);
+        store.configure(accountId, { ...settings, privatePeers: [...new Set([...settings.privatePeers, 'wxid_role_alice', 'wxid_role_group_only'])] });
+        const group = { accountId, chatType: 'group', peerId: 'group_alpha@chatroom' };
+        const add = (scope, id, name, text, key) => channel.memory.append(scope, {
+          key, messageId: key, direction: 'incoming', senderId: id, senderName: name, text, time: Date.now(),
+        });
+        add(group, 'wxid_role_alice', 'Alice 角色测试', '叫我 Alice，我喜欢红茶。', 'ui-role-group-alice');
+        add({ accountId, chatType: 'private', peerId: 'wxid_role_alice' }, 'wxid_role_alice', 'Alice 角色测试', '我喜欢红茶。', 'ui-role-private-alice');
+        add(group, 'wxid_role_group_only', '小禾 仅群聊', '叫我小禾，我喜欢骑行。', 'ui-role-group-only');
+        runner.extractRoleCard = async input => {
+          const data = JSON.parse(input.text), isAlice = data.person.personId === 'wxid_role_alice',
+            source = data.sources.find(row => row.text.includes(isAlice ? '叫我 Alice' : '叫我小禾'));
+          if (!source) return { text: '{"updates":[],"conflicts":[]}' };
+          return { text: JSON.stringify({ updates: [
+            { field: 'addressAs', value: isAlice ? 'Alice' : '小禾', evidence: [{ sourceId: source.id, quote: source.text }] },
+            { field: 'preferences', value: isAlice ? '喜欢红茶' : '喜欢骑行', evidence: [{ sourceId: source.id, quote: source.text }] },
+          ], conflicts: [] }) };
+        };
+        for (const personId of ['wxid_role_alice', 'wxid_role_group_only'])
+          await channel.personMemory.update({ accountId, personId });
+        json(res, { people: store.roleCards.list(accountId).map(row => row.personId) }); return;
+      }
+      if (body.command === 'seedRoleCardGallery' && process.env.WECHAT_UI_TEST_ROLE_CARDS_ONLY === '1') {
+        const rows = [
+          ['wxid_gallery_books', '林间', '阿林', '读书群里认识的朋友', '喜欢散文和旧书，周末常去逛书店。'],
+          ['wxid_gallery_photo', '林间', '小林', '一起讨论摄影的朋友', '喜欢胶片摄影，偏爱安静的街道与自然光。'],
+          ['wxid_gallery_long', '周末还在写代码的朋友', '周末', '一起做项目的同事', '喜欢把复杂的问题拆开讨论，先讲结论，再慢慢补充细节。'.repeat(12)],
+          ['wxid_gallery_riley', 'Riley', 'Riley', '', ''],
+        ];
+        const settings = store.settings(accountId);
+        store.configure(accountId, { ...settings, privatePeers: [...new Set([...settings.privatePeers, ...rows.map(row => row[0]),
+          'wxid_gallery_empty', 'wxid_gallery_name_only'])] });
+        for (const [personId, name, addressAs, relationship, preferences] of rows) {
+          const scope = { accountId, personId };
+          channel.memory.append({ accountId, chatType: 'group', peerId: 'group_alpha@chatroom' }, {
+            key: 'gallery-' + personId, messageId: 'gallery-' + personId, direction: 'incoming', senderId: personId,
+            senderName: name, text: '叫我' + addressAs + '。' + preferences, time: Date.now(),
+          });
+          if (addressAs) {
+            const view = store.roleCards.view(scope);
+            store.roleCards.save(scope, { ...view.card, addressAs, relationship, preferences }, view.revision);
+          }
+        }
+        for (const personId of ['wxid_gallery_empty', 'wxid_gallery_name_only']) {
+          channel.memory.append({ accountId, chatType: 'group', peerId: 'group_alpha@chatroom' }, {
+            key: 'gallery-' + personId, messageId: 'gallery-' + personId, direction: 'incoming', senderId: personId,
+            senderName: '暂无资料', text: '大家好。', time: Date.now(),
+          });
+          if (personId.endsWith('name_only')) {
+            const view = store.roleCards.view({ accountId, personId });
+            store.roleCards.save(view.scope, { ...view.card, label: '只有名称' }, view.revision);
+          }
+        }
+        fixtureAudience.contacts = [
+          { id: 'wxid_role_alice', labelIds: ['1'] }, { id: 'wxid_gallery_books', labelIds: ['1'] },
+          { id: 'wxid_gallery_photo', labelIds: ['2'] }, { id: 'wxid_gallery_long', labelIds: ['1', '2'] },
+          { id: 'wxid_gallery_riley', labelIds: [] }, { id: 'wxid_gallery_empty', labelIds: ['1'] },
+        ];
+        fixtureAudience.labels = [
+          { id: '1', name: '计实一班', userIds: ['wxid_role_alice', 'wxid_gallery_books', 'wxid_gallery_long', 'wxid_gallery_empty'], memberCount: 4 },
+          { id: '2', name: '摄影朋友', userIds: ['wxid_gallery_photo', 'wxid_gallery_long'], memberCount: 2 },
+          { id: '3', name: '空标签', userIds: [], memberCount: 0 },
+        ];
+        json(res, { people: store.roleCards.list(accountId).length }); return;
+      }
       if (body.command === 'imageMemory') { json(res, channel.imageMemory.list({ accountId: state.account.id, chatType: body.payload?.chatType || 'group', peerId: body.payload?.peerId || 'group_alpha@chatroom', collection: body.payload?.collection })); return; }
       if (generatedImagesFixture && body.command === 'seedQuotedRecords') {
         const scope = { accountId, chatType: 'group', peerId: 'group_alpha@chatroom', senderId: 'wxid_alice' },
@@ -610,7 +764,11 @@ const server = http.createServer(async (req, res) => {
             record = { ...scope, key, messageId: id, contextKey: key, sender: 'Alice', question: '引用记录预览 ' + index,
               state: 'skipped', mode: 'default', reason: '隔离界面样本', createdAt: now, updatedAt: now };
           store.remember(key, now, record, { accountId, message });
-          await resolveMessageReferences(channel, scope, store.history(accountId, scope.chatType, scope.peerId, 1000).find(entry => entry.key === key), new AbortController().signal);
+          // Historical reference records remain readable; new messages no longer create or enrich them.
+          const image = index === 1 ? received : index === 2 ? generated : null;
+          store.update(record, { references: [{ ...data, messageId: data.id,
+            ...(image ? { images: [{ id: image.id, collection: index === 1 ? 'conversation' : 'generated',
+              description: index === 2 ? '已查看：这张生成图实际为蓝色方块。' : image.description, quality: image.quality }] } : {}) }] });
           keys.push(key);
         }
         channel.imageMemory.describe({ ...scope, collection: 'generated' }, generated.id, '已查看：这张生成图实际为蓝色方块。');
@@ -685,7 +843,7 @@ const server = http.createServer(async (req, res) => {
         json(res, channel.memory.view(scope)); return;
       }
       if (body.command === 'holdNext') {
-        if (!['memory.edit', 'memory.compress', 'memory.role.get', 'model.info', ...(authorizationFixture ? ['settings'] : []), ...(visualFixture ? ['status'] : []), ...(likesFixture ? ['moments.read', 'moments.write', 'moments.likes.run'] : []), ...(interactionsFixture ? ['moments.interactions.preview'] : [])].includes(body.payload?.endpoint) || heldRequests.has(body.payload.endpoint)) throw new Error('Only one isolated request per supported endpoint can be held');
+        if (!['memory.edit', 'memory.compress', 'memory.role.get', 'model.info', ...(executionTraceFixture ? ['traces.export', 'traces.get'] : []), ...(authorizationFixture ? ['settings'] : []), ...(visualFixture ? ['status'] : []), ...(likesFixture ? ['moments.read', 'moments.write', 'moments.likes.run'] : []), ...(interactionsFixture ? ['moments.interactions.preview'] : [])].includes(body.payload?.endpoint) || heldRequests.has(body.payload.endpoint)) throw new Error('Only one isolated request per supported endpoint can be held');
         let release; const wait = new Promise(resolve => { release = resolve; });
         heldRequests.set(body.payload.endpoint, { wait, release, started: false, payload: null }); json(res, { ok: true }); return;
       }
@@ -782,7 +940,7 @@ const origin = `http://127.0.0.1:${server.address().port}`;
 try {
   const runId = randomBytes(16).toString('hex');
   const env = { ...process.env, WECHAT_UI_TEST_ORIGIN: origin, WECHAT_UI_TEST_RUN_ID: runId }; delete env.ELECTRON_RUN_AS_NODE;
-  const driver = repliesFixture ? 'test-moments-replies-ui.cjs' : interactionsFixture ? 'test-moments-interactions-ui.cjs' : process.env.WECHAT_UI_TEST_VISUAL_SYSTEM === '1' ? 'test-visual-system.cjs' : 'test-ui-driver.cjs';
+  const driver = process.env.WECHAT_UI_TEST_TIME_ONLY === '1' ? 'test-time-settings-ui.cjs' : repliesFixture ? 'test-moments-replies-ui.cjs' : interactionsFixture ? 'test-moments-interactions-ui.cjs' : process.env.WECHAT_UI_TEST_VISUAL_SYSTEM === '1' ? 'test-visual-system.cjs' : 'test-ui-driver.cjs';
   const child = spawn(electron, [path.join(root, 'scripts', driver), 'ui-fixture', out], { cwd: root, windowsHide: true, stdio: 'inherit', env });
   const exit = await new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', code => resolve(code)); });
   if (exit !== 0) throw new Error(`UI verification failed (${exit}); see ${path.join(out, 'report.json')}`);

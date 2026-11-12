@@ -1,5 +1,6 @@
 import { ChannelError, publicError } from '../../shared/contracts.mjs';
-import { materialFields, materialSourceKey, MATERIAL_ORGANIZE_TIMEOUT_MS } from '../../shared/moments-materials.mjs';
+import { materialFields, materialSourceKey } from '../../shared/moments-materials.mjs';
+import { timeLimitMs, timeDurationLabel } from '../../shared/time-settings.mjs';
 import { readPrompt } from '../../prompts/loader.mjs';
 import { MomentsMaterialStore, materialHash, materialRevision } from './material-store.mjs';
 import { materialJSON, materialTextIsPublic, redactMaterialInput, reviewMaterialText } from './material-privacy.mjs';
@@ -96,7 +97,8 @@ export class MomentsMaterials extends MomentsMaterialStore {
   async operation(accountId, signal, work, kind = 'organize') {
     this.check(accountId, signal); if (this.pending) throw new ChannelError('MOMENTS_MATERIAL_BUSY', '已有素材正在整理或识别，请稍后再试');
     this.activeAccount = accountId; this.activeKind = kind; this.controller = new AbortController();
-    this.operationTimeout = AbortSignal.timeout(kind === 'organize' ? MATERIAL_ORGANIZE_TIMEOUT_MS : 300000);
+    this.operationTimeoutMs = timeLimitMs(this.channel.store, kind === 'organize' ? 'momentsMaterialTimeoutMinutes' : 'momentsImageTimeoutMinutes');
+    this.operationTimeout = AbortSignal.timeout(this.operationTimeoutMs);
     const combined = AbortSignal.any([this.controller.signal, ...(signal ? [signal] : []), this.operationTimeout]);
     this.pending = Promise.resolve().then(() => work(combined)).finally(() => { this.activeAccount = null; this.activeKind = null; this.controller = null; this.pending = null; this.operationTimeout = null; });
     return this.pending;
@@ -204,7 +206,7 @@ export class MomentsMaterials extends MomentsMaterialStore {
         for (const record of records) account.seen[record.key] = true;
         Object.assign(account.lastRun, { state: 'done', rejected: result.items.length - safe.size, processed: records.length });
       } catch (error) {
-        Object.assign(account.lastRun, { state: 'failed', error: error?.name === 'TimeoutError' ? this.operationTimeout?.aborted ? '整理达到 30 分钟上限，原素材保留' : '素材整理请求超时，原素材保留' : error?.name === 'AbortError' ? '本次整理已取消，原素材保留' : publicError(error, '素材整理失败，原素材保留').message });
+        Object.assign(account.lastRun, { state: 'failed', error: error?.name === 'TimeoutError' ? this.operationTimeout?.aborted ? '整理达到 ' + timeDurationLabel(this.operationTimeoutMs) + ' 上限，原素材保留' : '素材整理请求超时，原素材保留' : error?.name === 'AbortError' ? '本次整理已取消，原素材保留' : publicError(error, '素材整理失败，原素材保留').message });
         throw new ChannelError('MOMENTS_MATERIAL_ORGANIZE', account.lastRun.error);
       } finally { account.nextRunAt = account.settings.enabled ? this.now() + account.settings.intervalMinutes * 60000 : 0; if (!this.error) this.save(); }
       return this.list(accountId);

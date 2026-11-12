@@ -17,7 +17,9 @@ export function SettingsIndex({ status, onNavigate }) {
       title: '运行与数据',
       description: '管理权限、保存位置与运行状态。',
       items: [
+        { page: 'automation', icon: 'spark', title: '自动功能', text: '自动回复、朋友圈、记忆与素材的开关和规则', value: status.settings?.enabled ? '回复已开启' : '回复已暂停' },
         { page: 'administrators', icon: 'shield', title: '管理员', text: '远程查询与工作权限', value: (status.remote?.globalAdminIds?.length || 0) + ' 位管理员' },
+        { page: 'time', icon: 'clock', title: '时间设置', text: '所有超时、执行间隔、活跃时段与保存期限' },
         { page: 'storage', icon: 'folder', title: '工作目录', text: '记录、记忆与任务的保存位置' },
         { page: 'diagnostics', icon: 'spark', title: '运行检查', text: '连接、模型与发送能力的检查结果' },
         { page: 'changelog', icon: 'history', title: '更新日志', text: '查看版本与更新内容', value: status.version || '' },

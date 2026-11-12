@@ -34,10 +34,9 @@ function xmlText(text: string) {
   });
 }
 
-// Only the type-57 reply envelope is promoted from AddMsg type 49. Attachments,
-// mini-apps and arbitrary XML remain unsupported; quoted image XML/keys are never
-// forwarded to a model. A quote cannot manufacture an @ mention.
-export function quotedMessage(content: string, peerId: string, saveImage?: (content: string) => string): Segment[] | undefined {
+// Preserve the existing reply envelope and current text without looking up or
+// downloading its referenced content. A quote cannot manufacture an @ mention.
+export function quotedMessage(content: string, peerId: string): Segment[] | undefined {
   if (Buffer.byteLength(content) > 65536) return;
   let xml = content.trim();
   for (let n = 0; n < 2 && xml.startsWith("&lt;"); n++) xml = xmlText(xml);
@@ -50,7 +49,6 @@ export function quotedMessage(content: string, peerId: string, saveImage?: (cont
   const type = Number(ref?.type);
   const quotedText = type === 1 ? xmlText(ref?.content ?? "").slice(0, 6000) : undefined;
   const senderId = ref?.chatusr || ref?.fromusr;
-  const image = type === 3 && ref?.content && saveImage ? { resourceId: saveImage(ref.content) } : undefined;
   message.push({
       type: "reply",
       data: {
@@ -59,7 +57,6 @@ export function quotedMessage(content: string, peerId: string, saveImage?: (cont
         ...(senderId && /^[\w@.:-]{1,256}$/.test(senderId) ? { senderId } : {}),
         ...(ref?.displayname ? { senderName: xmlText(ref.displayname).slice(0, 256) } : {}),
         ...(quotedText ? { content: quotedText } : {}),
-        ...(image ? { image } : {}),
       },
   });
   message.push({ type: "text", data: { text: xmlText(app.title).slice(0, 8000) } });

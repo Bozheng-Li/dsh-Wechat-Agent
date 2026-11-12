@@ -190,8 +190,13 @@ export class MomentsWriter {
     assertCurrent(); signal.throwIfAborted();
     return { accountId: account.wxid, ...snsPublicationResponse(body, account.wxid, query.postId!) };
   }
-  async write(account: Credential, raw: unknown, clientId: string, signal: AbortSignal, assertCurrent: () => void) {
+  async write(account: Credential, raw: unknown, clientId: string, signal: AbortSignal, assertCurrent: () => void, authorizedUserIds?: string[]) {
     const query = validateSnsWrite(raw), time = Math.floor(this.now() / 1000);
+    const assertTarget = (userId: string) => {
+      assertCurrent(); signal.throwIfAborted();
+      if (authorizedUserIds && userId !== account.wxid && !authorizedUserIds.includes(userId))
+        throw new BridgeError('OBJECT_NOT_AUTHORIZED', '实际朋友圈作者或回复对象未授权，未提交微信', { delivery: 'not-sent' });
+    };
     if (query.blockedLabelIds?.length) throw new BridgeError('ERR_MOMENTS_AUDIENCE', '屏蔽标签尚未展开为真实成员，未上传或发布', { delivery: 'not-sent' });
     assertCurrent(); signal.throwIfAborted();
     if (query.action !== 'publish') {
@@ -200,6 +205,7 @@ export class MomentsWriter {
       const page = momentsResponse(detailBody, target); assertCurrent(); signal.throwIfAborted();
       const post = page.items[0];
       if (!post?.contentAvailable || post.deleted) throw new BridgeError('ERR_MOMENTS_TARGET_UNAVAILABLE', '目标动态不可见或已删除，未执行互动', { delivery: 'not-sent' });
+      assertTarget(post.author.userId);
       if (query.action === 'delete') {
         if (post.author.userId !== account.wxid) throw new BridgeError('ERR_MOMENTS_TARGET_UNAVAILABLE', '只能删除当前扫码登录账号自己发布的动态，未执行删除', { delivery: 'not-sent' });
         const response = await this.request(account, 218, 'mmsnsobjectop', base => snsDeleteRequest(base, post.id), signal);
@@ -232,7 +238,9 @@ export class MomentsWriter {
         const userId = row && bytes(row, 1).toString('utf8');
         if (!row || !userId || !/^[\w.:-]{1,256}$/.test(userId)) throw new BridgeError('ERR_MOMENTS_TARGET_UNAVAILABLE', '原评论不可见、已删除或作者无效，未提交回复', { delivery: 'not-sent' });
         reply = { id: query.replyToCommentId, userId, legacyId: num(row, 7) };
+        assertTarget(userId);
       }
+      assertTarget(post.author.userId);
       const response = await this.request(account, 213, 'mmsnscomment', base => snsInteractionRequest(base, account.wxid, post.author.userId, query, clientId, time, reply), signal);
       const receipt = snsInteractionResponse(response, account.wxid, query, previousIds, reply);
       return { accountId: account.wxid, action: query.action, ...receipt, delivery: 'server-ack' };

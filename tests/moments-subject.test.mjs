@@ -3,18 +3,16 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {
-  StateStore, WechatChannel, resolveMomentsQuery, momentsTool, momentsWriteTools, momentsLikeRequestTool
-} from '../lib/testing.js';
-
-
-
-
+import { StateStore } from '../backend/storage/state-store.mjs';
+import { WechatChannel } from '../modules/conversation/channel.mjs';
+import { resolveMomentsQuery } from '../modules/moments/service.mjs';
+import { momentsTool, momentsWriteTools } from '../modules/tools/moments.mjs';
+import { momentsLikeRequestTool } from '../modules/tools/moments-likes.mjs';
 
 const scope = { accountId:'subject-bot', chatType:'private', peerId:'subject-speaker', senderId:'subject-speaker', senderName:'当前朋友' };
 function fixture(t) {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'wechat-moments-subject-')), store=new StateStore(root);
-  store.configure(scope.accountId,{enabled:true,privatePeers:[scope.peerId],groups:[],prompt:''});
+  store.configure(scope.accountId,{enabled:true,privatePeers:[scope.peerId,'subject-li'],groups:[],prompt:''});
   const config=store.config.snapshot(store.data); config.remote={globalAdminIds:[scope.senderId]}; store.config.commit(config);
   store.setConversationSettings(scope.accountId,scope.chatType,scope.peerId,{...store.conversationSettings(scope.accountId,scope.chatType,scope.peerId),remoteEnabled:true});
   const reads=[],writes=[], status={online:true,account:{id:scope.accountId,nickname:'机器人名字'},momentsReadReady:true,momentsWriteReady:true};

@@ -1,10 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import { MATERIAL_ORGANIZE_TIMEOUT_MS } from '../../shared/moments-materials.mjs';
-import { MOMENTS_PUBLISH_RPC_TIMEOUT_MS } from '../../shared/moments-publishing.mjs';
+import { timeOperationTimeoutMs } from '../../shared/time-settings.mjs';
 
-const publishingOperations = new Set(['moments.plans.preview', 'moments.drafts.publish', 'moments.drafts.reconcile', 'moments.write']);
-
-export function useWorkbench(rpc, accountId, endpoint, refreshKey = '', pollMs = 0) {
+export function useWorkbench(rpc, accountId, endpoint, refreshKey = '', pollMs = 0, timeSettings) {
   const [data, setData] = useState(null),
     [error, setError] = useState(''),
     [notice, setNotice] = useState(''),
@@ -80,8 +77,7 @@ export function useWorkbench(rpc, accountId, endpoint, refreshKey = '', pollMs =
       const value = await api.current(
         method,
         { ...payload, accountId },
-        AbortSignal.any([controller.signal, AbortSignal.timeout(publishingOperations.has(method) ? MOMENTS_PUBLISH_RPC_TIMEOUT_MS
-          : method === 'moments.materials.organize' ? MATERIAL_ORGANIZE_TIMEOUT_MS + 15000 : 300000)])
+        AbortSignal.any([controller.signal, AbortSignal.timeout(timeOperationTimeoutMs(timeSettings, method))])
       );
       if (controller.signal.aborted || !owns()) return null;
       if (reload) await load(controller.signal, epoch);

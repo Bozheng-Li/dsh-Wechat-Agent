@@ -11,8 +11,10 @@ import { validateAudienceSelection, audienceUserId } from '../../shared/moments-
 import { MomentsLikeRequests } from './like-requests.mjs';
 import { momentsSubjectContext } from '../../shared/moments-subject.mjs';
 import { readMomentsImageContext } from './image-context.mjs';
-import { matchingMomentPublication } from '../../shared/moments-publication.mjs';
+import { matchingMomentPublication, assertPublicationAuthorization } from '../../shared/moments-publication.mjs';
 import { ownerPublicationRecord, recoverOwnerPublication } from './publication-recovery.mjs';
+import { readMomentsWithMemory, assertMomentTargetAuthorized } from './read.mjs';
+import { authorizationEpoch, assertAuthorizationEpoch, assertPersonAuthorized, personAuthorized } from '../../shared/authorization.mjs';
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
 export async function resolveMomentsQuery(transport, raw, scope, signal, check) {
@@ -60,6 +62,7 @@ export async function resolveMomentsQuery(transport, raw, scope, signal, check) 
 export class MomentsService {
   constructor(channel) {
     this.channel = channel; this.writes = new Map();
+    this.validateReceipt = (result, query, accountId) => validateReceipt(result, query, accountId, channel.store);
     this.requestLikes = new MomentsLikeRequests(channel, {
       resolve: (query, scope, signal, check) => resolveMomentsQuery(channel.transport, query, scope, signal, check),
       // The narrow request service has already bound this immutable post to
@@ -122,8 +125,8 @@ export class MomentsService {
       const target = await resolveMomentsQuery(this.channel.transport, { action: 'user', subject,
         ...(user === undefined ? {} : { user }), ...(userId === undefined ? {} : { userId }) }, scope, signal, check);
       check();
-      const result = await this.channel.transport.readMoments({ accountId: scope.accountId,
-        scopeKey: identity([scope.accountId, scope.chatType, scope.peerId, scope.senderId]), query: { action: 'detail', postId: write.postId } }, signal);
+      const result = await readMomentsWithMemory(this.channel, { accountId: scope.accountId,
+        scopeKey: identity([scope.accountId, scope.chatType, scope.peerId, scope.senderId]), query: { action: 'detail', postId: write.postId } }, signal, check);
       check();
       if (result?.accountId !== scope.accountId || result.action !== 'detail' || !Array.isArray(result.items) || result.items.length !== 1 ||
           result.items[0].id !== write.postId || result.items[0].author?.userId !== target.userId)
@@ -146,7 +149,7 @@ export class MomentsService {
     if (record.version !== 1 || record.clientId !== clientId || record.ownerStoreId !== this.channel.store.data.storeId || record.scopeKey !== scopeKey || record.inputHash !== digest(query) || record.action !== 'publish' ||
         !['pending', 'succeeded', 'rejected', 'unknown'].includes(record.state)) throw new ChannelError('MOMENTS_STATE_INVALID', '发布回执与当前账号或内容不符，未重新提交');
     if (record.state !== 'succeeded') return null;
-    validateReceipt(record.result, query, accountId); return { ...record.result, reusedReceipt: true };
+    this.validateReceipt(record.result, query, accountId); return { ...record.result, reusedReceipt: true };
   }
   async managePublishing(args, scope, requestId, signal, assertAllowed = () => {}, operationKey) {
     const check = () => { assertAllowed(); assertRemoteAuthorized(this.channel, scope, signal); }; check();
@@ -176,11 +179,16 @@ export class MomentsService {
   }
   async performWrite(query, scope, requestId, signal, assertAllowed, operationKey, owner = false) {
     validateAudienceSelection(query);
+    const epoch = authorizationEpoch(this.channel.store, scope.accountId);
+    signal = this.channel.authorization?.combine(scope.accountId, signal) ?? signal;
     const channel = this.channel, check = () => { assertAllowed(); assertRemoteAuthorized(channel, scope, signal); };
     const verify = owner ? () => { assertAllowed(); signal?.throwIfAborted(); const status = channel.transport.status();
       if (channel.closed || channel.fault || !status.online || status.account?.id !== scope.accountId)
         throw new ChannelError('ACCOUNT_CHANGED', '微信连接、账号或运行状态已变化，未继续朋友圈操作'); } : check;
-    verify();
+    const verifyAccount = verify;
+    const verifyAuthorization = () => { verifyAccount(); assertAuthorizationEpoch(channel.store, scope.accountId, epoch); };
+    verifyAuthorization();
+    if (query.action !== 'publish') await assertMomentTargetAuthorized(channel, scope.accountId, query.postId, signal, verifyAuthorization);
     if (owner ? typeof channel.transport.writeMoments !== 'function' || channel.transport.status().momentsWriteReady !== true : !this.writeAvailable(scope))
       throw new ChannelError('MOMENTS_WRITE_UNAVAILABLE', '当前微信组件尚未支持朋友圈互动或发布');
     if (typeof requestId !== 'string' || !requestId || requestId.length > 2000 || operationKey !== undefined && (typeof operationKey !== 'string' || !operationKey || operationKey.length > 80))
@@ -205,22 +213,29 @@ export class MomentsService {
       if (existing.version !== 1 || existing.clientId !== clientId || existing.ownerStoreId !== channel.store.data.storeId || existing.scopeKey !== scopeKey || existing.inputHash !== inputHash ||
           !['pending', 'succeeded', 'rejected', 'unknown'].includes(existing.state))
         throw new ChannelError('MOMENTS_STATE_INVALID', '朋友圈操作记录或请求内容不匹配，未重新执行');
-      if (existing.state === 'succeeded') { validateReceipt(existing.result, query, scope.accountId); verify(); return { ...existing.result, reusedReceipt: true }; }
+      if (existing.state === 'succeeded') { this.validateReceipt(existing.result, query, scope.accountId); verify(); return { ...existing.result, reusedReceipt: true }; }
       if (existing.state === 'rejected') throw new ChannelError(existing.error.code, existing.error.message);
       throw new ChannelError('MOMENTS_RESULT_UNKNOWN', '这项朋友圈操作未取得最终确认，结果不明，未自动重试；请先在微信核对');
     }
-    const record = { version: 1, ownerStoreId: channel.store.data.storeId, scopeKey, inputHash, clientId, action: query.action, state: 'pending', createdAt: channel.now() };
+    const record = { version: 1, ownerStoreId: channel.store.data.storeId, scopeKey, inputHash, clientId, action: query.action,
+      accountId: scope.accountId, scope, postId: query.postId, targetUserId: channel.momentOwners?.get(scope.accountId + ':' + query.postId),
+      state: 'pending', createdAt: channel.now() };
     save(record); verify();
     const pending = (async () => {
       let recordedSuccess = false;
       try {
-        const result = await channel.transport.writeMoments({ accountId: scope.accountId, clientId, query }, signal);
-        validateReceipt(result, query, scope.accountId);
+        verifyAuthorization();
+        const result = await channel.transport.writeMoments({ accountId: scope.accountId, clientId, query,
+          authorizedUserIds: [...channel.store.settings(scope.accountId).privatePeers] }, signal);
+        this.validateReceipt(result, query, scope.accountId);
+        // Cancellation stops further work, but an already confirmed write is
+        // still needed for deduplication. Revocation must never restore it.
+        assertAuthorizationEpoch(channel.store, scope.accountId, epoch);
         save({ ...record, state: 'succeeded', result, finishedAt: channel.now() }); recordedSuccess = true;
         channel.momentsAutomation?.recordReceipt(result);
         verify(); return result;
       } catch (error) {
-        if (!recordedSuccess && error?.code !== 'STATE_WRITE_FAILED') {
+        if (!recordedSuccess && error?.code !== 'STATE_WRITE_FAILED' && authorizationEpoch(channel.store, scope.accountId) === epoch) {
           const rejected = ['not-sent', 'rejected'].includes(error?.details?.snsDelivery);
           const publication = query.action === 'publish' ? matchingMomentPublication(error?.details?.publication, query, scope.accountId) : null;
           save({ ...record, state: rejected ? 'rejected' : 'unknown', error: publicError(error, '朋友圈操作未取得最终确认'),
@@ -229,7 +244,7 @@ export class MomentsService {
         verify(); throw error;
       }
     })();
-    this.writes.set(clientId, { inputHash, promise: pending });
+    this.writes.set(clientId, { inputHash, promise: pending, accountId: scope.accountId });
     try { return await pending; } finally { this.writes.delete(clientId); }
   }
   async read(query, scope, signal, assertAllowed = () => {}) {
@@ -238,8 +253,8 @@ export class MomentsService {
     check();
     if (typeof channel.transport.readMoments !== 'function') throw new ChannelError('MOMENTS_UNAVAILABLE', '当前微信组件尚未支持朋友圈读取，请更新组件');
     const resolved = await resolveMomentsQuery(channel.transport, query, scope, signal, check); check();
-    const result = await channel.transport.readMoments({ accountId: scope.accountId,
-      scopeKey: identity([scope.accountId, scope.chatType, scope.peerId, scope.senderId]), query: resolved }, signal);
+    const result = await readMomentsWithMemory(channel, { accountId: scope.accountId,
+      scopeKey: identity([scope.accountId, scope.chatType, scope.peerId, scope.senderId]), query: resolved }, signal, check);
     check();
     if (result?.accountId !== scope.accountId) throw new ChannelError('ACCOUNT_CHANGED', '朋友圈结果与当前微信账号不匹配，未返回');
     this.channel.momentsAutomation?.remember(scope.accountId, result.items);
@@ -250,7 +265,7 @@ export class MomentsService {
     return stored && matchingMomentPublication(stored.record.publication, query, accountId);
   }
   async reconcileOwnerPublication(query, accountId, requestId, signal, check) {
-    const result = await recoverOwnerPublication(this.channel, query, accountId, requestId, signal, check, validateReceipt);
+    const result = await recoverOwnerPublication(this.channel, query, accountId, requestId, signal, check, this.validateReceipt);
     check();
     if (result.kind === 'published') this.channel.momentsAutomation?.recordReceipt(result.receipt);
     return result;
@@ -277,7 +292,7 @@ export class MomentsService {
   }
 }
 
-function validateReceipt(result, query, accountId) {
+function validateReceipt(result, query, accountId, store) {
   const id = value => typeof value === 'string' && /^[1-9][0-9]{0,19}$/.test(value) && BigInt(value) <= 0xffffffffffffffffn;
   if (result?.accountId !== accountId || result.action !== query.action || !['server-ack', 'verified-existing'].includes(result.delivery) || !id(result.postId) ||
       query.action !== 'publish' && result.postId !== query.postId || query.action === 'like' && result.liked !== true ||
@@ -286,6 +301,8 @@ function validateReceipt(result, query, accountId) {
       query.action === 'delete' && result.deleted !== true ||
       query.action === 'publish' && (result.text !== query.text || result.imageCount !== (query.images?.length ?? 0)))
     throw new ChannelError('MOMENTS_RESULT_UNKNOWN', '朋友圈操作回执与当前账号、目标或内容不匹配，未报告成功');
+  if (query.action === 'publish') assertPublicationAuthorization(result, accountId,
+    store.settings(accountId).privatePeers.filter(id => personAuthorized(store, accountId, id)));
   if (query.action === 'publish' && (query.blockedUserIds?.length || query.blockedLabelIds?.length)) {
     const selection = validateAudienceSelection(query), same = (a, b) => Array.isArray(a) && JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
     const verifiedRead = result.audienceSource === 'wechat-sns-live' && result.delivery === 'verified-existing' && result.readbackConfirmed === true;

@@ -8,7 +8,7 @@ function fixture() {
     const tools = [];
     const scope = {
       tools: { restrict() {}, guard() {}, register: tool => tools.push(tool.name) },
-      systemPrompt: { suppressRuntimeContext() {}, section: section => prompts.push(section.text) },
+      systemPrompt: { suppressRuntimeContext() {}, section: section => { if (section.name === 'wechat-agent') prompts.push(section.text); } },
       on() {},
     };
     options.setup(scope); allowedTools.push(tools);

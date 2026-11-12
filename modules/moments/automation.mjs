@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { timeLimitMs, assertOnlyTimeChanges } from '../../shared/time-settings.mjs';
 import { randomUUID } from 'node:crypto';
 import { atomicJson } from '../../backend/storage/atomic-json.ts';
 import { workPath } from '../work/policy.mjs';
@@ -7,12 +8,15 @@ import { identity } from '../../backend/storage/keys.mjs';
 import { momentsId, momentsSettings, momentsReplyEnabled } from '../../shared/moments.mjs';
 import { readPrompt } from '../../prompts/loader.mjs';
 import { personaInstructions } from '../../prompts/reply/compose.mjs';
+import { momentsPersonMemory } from '../memory/roles/tool.mjs';
+import { ROLE_CARD_READING_PROMPT } from '../../prompts/memory/role-card.mjs';
 import { MomentsPublishing } from './publishing.mjs';
 import { MomentsMaterials } from './materials.mjs';
 import { MomentsLikes } from './likes.mjs';
 import { MomentsInteractions } from './interactions.mjs';
 import { runFriendReplies, validateFriendReplies } from './friend-replies.mjs';
 import { unavailableMoment, nextMomentReadFailure } from './read-state.mjs';
+import { readMomentsWithMemory } from './read.mjs';
 
 const key = (accountId, postId, commentId) => identity([accountId, postId, commentId ?? '']);
 const clone = value => structuredClone(value);
@@ -56,10 +60,10 @@ export class MomentsAutomation {
     catch { this.error = '朋友圈记录保存失败，已停止定时操作，请检查目录权限'; this.controller?.abort();
       throw new ChannelError('STATE_WRITE_FAILED', this.error); }
   }
-  check(accountId, signal) {
+  check(accountId, signal, allowOffline = false) {
     signal?.throwIfAborted(); const status = this.channel.transport.status();
     if (this.error) throw new ChannelError('MOMENTS_STATE_INVALID', this.error);
-    if (this.channel.closed || this.channel.fault || !status.online || status.account?.id !== accountId)
+    if (this.channel.closed || this.channel.fault || !allowOffline && !status.online || status.account?.id !== accountId)
       throw new ChannelError('ACCOUNT_CHANGED', '微信连接、账号或运行状态已变化，未继续朋友圈操作');
   }
   rule(accountId) { return this.data.accounts[accountId] ?? { settings: momentsSettings(), enabledAt: 0, friendEnabledAt: 0, nextRunAt: 0, revision: '' }; }
@@ -68,9 +72,10 @@ export class MomentsAutomation {
       posts: Object.values(this.data.posts).filter(post => post.accountId === accountId).sort((a, b) => b.createdAt - a.createdAt).slice(0, 100).map(clone),
       replies: Object.values(this.data.replies).filter(reply => reply.accountId === accountId && !reply.historyDeleted).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 100).map(clone) };
   }
-  configure(accountId, input) {
-    this.check(accountId); momentsSettings(input, { partial: true });
+  configure(accountId, input, { timeOnly = false } = {}) {
+    this.check(accountId, undefined, timeOnly); momentsSettings(input, { partial: true });
     const previous = this.rule(accountId), settings = momentsSettings({ ...previous.settings, ...input });
+    if (timeOnly) assertOnlyTimeChanges('replies', settings, previous.settings);
     if (settings.enabled && settings.scope === 'selected') for (const id of settings.selectedPostIds) {
       const post = this.data.posts[key(accountId, id)];
       if (!post || post.deleted) throw new ChannelError('MOMENTS_TARGET_INVALID', '请先读取并选择当前账号自己发布且未删除的朋友圈');
@@ -124,7 +129,8 @@ export class MomentsAutomation {
   }
   async read(accountId, query, signal) {
     this.check(accountId, signal);
-    const result = await this.channel.transport.readMoments({ accountId, scopeKey: 'moments-owner:' + accountId, query }, signal);
+    const result = await readMomentsWithMemory(this.channel, { accountId, scopeKey: 'moments-owner:' + accountId, query }, signal,
+      () => this.check(accountId, signal));
     this.check(accountId, signal);
     if (result?.accountId !== accountId) throw new ChannelError('ACCOUNT_CHANGED', '朋友圈结果与当前账号不匹配');
     this.remember(accountId, result.items);
@@ -162,7 +168,7 @@ export class MomentsAutomation {
     if (this.stopped || this.error || !accountId || !status.online || !status.momentsReadReady || !status.momentsWriteReady ||
         !this.channel.store.settings(accountId).enabled || !momentsReplyEnabled(rule.settings) || rule.nextRunAt > this.now()) return Promise.resolve();
     this.activeAccount = accountId; this.controller = new AbortController();
-    this.pending = this.run(accountId, clone(rule), AbortSignal.any([this.controller.signal, AbortSignal.timeout(300000)]))
+    this.pending = this.run(accountId, clone(rule), AbortSignal.any([this.controller.signal, AbortSignal.timeout(timeLimitMs(this.channel.store, 'momentsReplyTimeoutMinutes'))]))
       .finally(() => { this.pending = undefined; this.controller = undefined; this.activeAccount = undefined; });
     return this.pending;
   }
@@ -204,9 +210,12 @@ export class MomentsAutomation {
             commentText: comment.text, state: 'generating', updatedAt: this.now() }; this.data.replies[id] = record; this.save();
           let submitting = false;
           try {
+            const personMemory = momentsPersonMemory(this.channel, accountId, [{ id: comment.userId, name: comment.nickname }], check, comment.text);
             const generated = await this.channel.runner.run({ mode: 'moments-reply', text: JSON.stringify({ post: { text: post.text, createdAt: post.createdAt },
-              comment: { text: comment.text, nickname: comment.nickname, replyToCommentId: comment.replyToCommentId }, instruction: rule.settings.replyInstructions }),
-              systemOverride: [readPrompt('moments/reply.md'), personaInstructions(this.channel.store.persona())].join('\n\n'), tools: [],
+              comment: { text: comment.text, userId: comment.userId, nickname: comment.nickname, replyToCommentId: comment.replyToCommentId },
+              personMemory: personMemory.context, instruction: rule.settings.replyInstructions }),
+              systemOverride: [readPrompt('moments/reply.md'), personaInstructions(this.channel.store.persona()), ROLE_CARD_READING_PROMPT].join('\n\n'),
+              tools: personMemory.tools, assertAllowed: check,
               signal: AbortSignal.any([signal, AbortSignal.timeout(30000)]) });
             check(); const text = generated?.text?.trim();
             if (!text || text.length > 2000) throw new ChannelError('MOMENTS_REPLY_EMPTY', '模型未返回有效评论回复，未提交微信');

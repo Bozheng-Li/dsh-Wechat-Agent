@@ -24,11 +24,11 @@ export function fileUploadResponse(body: Buffer, upload: FileUpload, start: numb
   const position = num(fs, 7), dataLength = num(fs, 8);
   const echoedChunk = position === BigInt(start) && dataLength === BigInt(length);
   const consumedChunk = position === BigInt(start + length) && (dataLength === 0n || dataLength === BigInt(length));
-  // PC replies can advertise the next upload window, capped at 64 KiB,
-  // rather than the length of the chunk just consumed. Keep the exact cursor
+  // PC replies advertise either the next 64 KiB window or all remaining
+  // bytes, rather than the chunk just consumed. Keep the exact cursor
   // and request identity checks; this value never confirms a file message.
   const nextWindow = position === BigInt(start + length) &&
-    dataLength === BigInt(Math.min(65_536, upload.total - start - length));
+    (dataLength === BigInt(Math.min(65_536, upload.total - start - length)) || dataLength === BigInt(upload.total - start - length));
   if (bytes(fs, 4).toString('utf8') !== upload.clientId || bytes(fs, 5).toString('utf8') !== upload.from ||
       num(fs, 6) !== BigInt(upload.total) || !(echoedChunk || consumedChunk || nextWindow))
     fail('文件上传回执的账号、客户端标识、长度或分片位置不匹配，未发送文件消息');

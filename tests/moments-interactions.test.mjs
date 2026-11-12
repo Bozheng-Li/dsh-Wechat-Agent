@@ -1,25 +1,23 @@
+import { stickerPng } from './fixtures/stickers.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {
-  MomentsInteractions, MomentsService, interactionOptions, readableInteractionText, momentsInteractionTool, planProgressiveTools, ChannelError, momentsLikeRequestArgs, readMomentsImageContext, momentsImagesTool
-} from '../lib/testing.js';
-
-
-
-
-
-
-
+import { MomentsInteractions } from '../lib/testing.js';
+import { MomentsService } from '../lib/testing.js';
+import { interactionOptions } from '../lib/testing.js';
+import { readableInteractionText } from '../modules/moments/interaction-read.mjs';
+import { momentsInteractionTool } from '../lib/testing.js';
+import { planProgressiveTools } from '../modules/tools/progressive.mjs';
+import { ChannelError } from '../lib/testing.js';
+import { momentsLikeRequestArgs } from '../shared/moments-like-request.mjs';
 import { createHash } from 'node:crypto';
-
-
+import { readMomentsImageContext } from '../lib/testing.js';
+import { momentsImagesTool } from '../lib/testing.js';
 
 function enableImageReading(f, { count = 2 } = {}) {
-  const files = fs.readdirSync(path.join(import.meta.dirname, '../assets/stickers'), { recursive: true });
-  const bytes = fs.readFileSync(path.join(import.meta.dirname, '../assets/stickers', files.find(file => file.endsWith('.png'))));
+  const bytes = stickerPng();
   const calls = [], visions = [], run = f.channel.runner.run;
   f.channel.transport.readMomentsImages = async ({ accountId, scopeKey, query }) => {
     calls.push({ accountId, scopeKey, postId: query.postId }); const post = structuredClone(f.posts.find(row => row.id === query.postId));
@@ -75,22 +73,45 @@ test('disabled vision is respected and cancellation discards a late image descri
   assert.equal(f.manager.list(f.accountId, round.id).current.rows[0].commentText, ''); assert.equal(f.writes.length, 0);
 });
 
-test('failed image reading skips only the generated comment and still allows its requested like', async t => {
-  const f = fixture(t), media = enableImageReading(f); f.add(1, media.photo);
-  f.channel.transport.readMomentsImages = async () => { throw new ChannelError('MOMENTS_IMAGE_UNAVAILABLE', '图片已过期'); };
-  const round = await f.preview({ action: 'both' }), generated = await f.manager.generate(f.accountId, round.id, round.revision);
-  assert.equal(f.models.length, 0); assert.equal(generated.rows[0].commentText, ''); assert.match(generated.rows[0].commentSkipReason, /过期/);
-  const done = await f.run(generated); assert.equal(done.counts.liked, 1); assert.equal(done.counts.commented, 0);
+test('failed image reading falls back to verified text; without a text topic it keeps only the requested like', async t => {
+  for (const text of ['今天试了新的咖啡。','', '[微笑]', 'https://example.com/image']) await t.test(text||'no text',async t=>{
+    const f = fixture(t), media = enableImageReading(f); f.add(1, { ...media.photo, text });
+    f.channel.transport.readMomentsImages = async () => { throw new ChannelError('MOMENTS_IMAGE_UNAVAILABLE', '图片已过期'); };
+    const round = await f.preview({ action: 'both' }), generated = await f.manager.generate(f.accountId, round.id, round.revision),hasText=readableInteractionText(text);
+    assert.equal(f.models.length, hasText ? 1 : 0);assert.match(generated.rows[0].imageReadError.message,/过期/);
+    if(hasText){assert.equal(generated.rows[0].commentBasis,'text');assert.deepEqual(JSON.parse(f.models[0].text).posts[0].imageContext,[]);}
+    else assert.equal(generated.rows[0].commentText,'');
+    const done = await f.run(generated); assert.equal(done.counts.liked, 1); assert.equal(done.counts.commented, hasText?1:0);
+  });
 });
 
 test('image reading rejects wrong account, changed author, missing photos and corrupted bytes before vision', async t => {
   for (const mutate of [result => { result.accountId = 'another'; }, result => { result.post.author.userId = 'someone-else'; },
-    result => { result.items.pop(); }, result => { result.items[0].sha256 = 'a'.repeat(64); }, result => { result.items[0].mediaId = 'wrong'; }]) {
+    result => { result.items.pop(); }, result => { result.items[0].mediaId = 'wrong'; }]) {
     const f = fixture(t), media = enableImageReading(f); f.add(1, media.photo); const original = f.channel.transport.readMomentsImages;
     f.channel.transport.readMomentsImages = async input => { const result = await original(input); mutate(result); return result; };
     const round = await f.preview({ action: 'comment' }), generated = await f.manager.generate(f.accountId, round.id, round.revision);
     assert.equal(media.visions.length, 0); assert.equal(f.models.length, 0); assert.equal(generated.rows[0].commentText, ''); assert(generated.rows[0].commentSkipReason);
   }
+});
+
+test('a nine-image comment uses every successfully read image and survives persistence with partial evidence',async t=>{
+  for(const count of [2,9])await t.test(String(count),async t=>{
+    const f=fixture(t),media=enableImageReading(f,{count});f.add(1,{...media.photo,text:''});
+    const vision=f.channel.runner.run;f.channel.runner.run=async input=>{
+      const value=await vision(input);if(input.mode!=='moments-image-read')return value;
+      const decoded=JSON.parse(value.text);if(count===2){decoded.images[1].readable=false;decoded.images[1].description='看不清的内容不能用于评论';}
+      return {text:JSON.stringify(decoded)};
+    };
+    const round=await f.preview({action:'both'}),generated=await f.manager.generate(f.accountId,round.id,round.revision);
+    assert.equal(generated.rows[0].commentBasis,'images');assert.equal(generated.rows[0].imageContext.complete,count===9);
+    const evidence=JSON.parse(f.models[0].text).posts[0].imageContext;assert.equal(evidence.length,count===2?1:9);
+    assert(!JSON.stringify(evidence).includes('看不清的内容'));
+    if(count===9){assert.equal(media.visions.length,3);assert(media.visions.every(input=>input.images.length===3));}
+    const reloaded=f.create();reloaded.start(f.accountId,generated.id,generated.revision);
+    const done=await reloaded.wait(f.accountId,generated.id);
+    assert.equal(done.counts.liked,1);assert.equal(done.counts.commented,1);assert.equal(media.calls.length,1);
+  });
 });
 
 test('an old image comment without image evidence is blocked before a social write', async t => {
@@ -118,7 +139,7 @@ function fixture(t, dependencies = {}) {
   const status = { online: true, account: { id: accountId }, momentsReadReady: true, momentsWriteReady: true };
   const scope = { accountId, chatType: 'private', peerId: 'admin', senderId: 'admin' }, admins = ['admin', 'admin-b'];
   const channel = { now: () => now, store: { root, data: { storeId: 'interactions-fixture' }, persona: () => ({ name: '合成测试' }),
-    settings: () => ({ enabled: true, privatePeers: ['admin', 'admin-b', 'ordinary'], groups: [] }),
+    settings: () => ({ enabled: true, privatePeers: ['admin', 'admin-b', 'ordinary', 'friend-a', 'friend-b', 'friend-c'], groups: [] }),
     conversationSettings: () => ({ remoteEnabled: true, adminIds: admins }), config: { assertCurrent() {}, section: () => ({ globalAdminIds: [] }) } },
     runner: { run: async input => { models.push(input); return { text: JSON.stringify({ comments: JSON.parse(input.text).posts.map(post => ({ postId: post.postId, text: '回应：' + post.text, skipReason: '' })) }) }; } },
     transport: { status: () => status, call: async () => ({ privatePeers: ['friend-a', 'friend-b', accountId, ...admins].map(id => ({ id, name: id === 'friend-a' ? '朋友甲' : id })) }),
@@ -128,7 +149,7 @@ function fixture(t, dependencies = {}) {
         if (query.action === 'comments') return { accountId: args.accountId, source: 'wechat-sns-live', action: 'comments', postId: query.postId,
           items: structuredClone(posts.find(post => post.id === query.postId)?.comments ?? []), nextCursor: null };
         const offset = Number(query.cursor ?? 0), limit = query.limit ?? 20;
-        return { accountId: args.accountId, source: 'wechat-sns-live', action: query.action, items: structuredClone(selected.slice(offset, offset + limit)),
+        return { accountId: args.accountId, source: 'wechat-sns-live', action: query.action, userId: query.userId, items: structuredClone(selected.slice(offset, offset + limit)),
           nextCursor: selected.length > offset + limit ? String(offset + limit) : null };
       },
       writeMoments: async (args, signal) => {
@@ -203,7 +224,7 @@ test('specific friends use exact contact resolution and reject pronouns, self an
   for (const user of ['我', '你', '他']) await assert.rejects(f.preview({ source: 'user', user }, user), { code: 'MOMENTS_SUBJECT_INVALID' });
   await assert.rejects(f.preview({ source: 'user', user: f.accountId }, 'self'), { code: 'MOMENTS_INTERACTION_TARGET' });
   f.channel.transport.readMoments = async () => ({ accountId: f.accountId, action: 'user', source: 'wechat-sns-live', items: [f.posts[1]] });
-  await assert.rejects(f.preview({ source: 'user', user: '朋友甲' }, 'wrong-author'), { code: 'MOMENTS_INTERACTION_READ' }); assert.equal(f.writes.length, 0);
+  await assert.rejects(f.preview({ source: 'user', user: '朋友甲' }, 'wrong-author'), { code: 'MOMENTS_AUTHORIZATION_UNVERIFIED' }); assert.equal(f.writes.length, 0);
 });
 
 test('empty reconciliation pages continue but repeated cursors and untrusted responses fail', async t => {
@@ -214,7 +235,8 @@ test('empty reconciliation pages continue but repeated cursors and untrusted res
   await assert.rejects(f.preview({}, 'repeat'), { code: 'MOMENTS_INTERACTION_READ' });
   for (const patch of [{ accountId: 'other' }, { source: 'cache' }, { action: 'user' }, { items: [{ ...post, likedByCurrentAccount: undefined }] }]) {
     f.channel.transport.readMoments = async () => ({ accountId: f.accountId, source: 'wechat-sns-live', action: 'timeline', items: [post], ...patch });
-    await assert.rejects(f.preview({}, JSON.stringify(patch)), { code: 'MOMENTS_INTERACTION_READ' });
+    await assert.rejects(f.preview({}, JSON.stringify(patch)), {
+      code: patch.accountId || patch.source ? 'MOMENTS_AUTHORIZATION_UNVERIFIED' : 'MOMENTS_INTERACTION_READ' });
   }
 });
 

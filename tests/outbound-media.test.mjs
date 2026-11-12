@@ -11,6 +11,7 @@ import { nativeQrSession, writeNativeQrRound } from './fixtures/native-qr-sessio
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const entry = `export * from ${JSON.stringify(path.join(root, 'backend/wechat/protocol/backend.ts'))};
 export * from ${JSON.stringify(path.join(root, 'backend/wechat/protocol/wire.ts'))};
+export * from ${JSON.stringify(path.join(root, 'backend/wechat/protocol/stickers.ts'))};
 export * from ${JSON.stringify(path.join(root, 'backend/wechat/protocol/file-upload.ts'))};
 export * from ${JSON.stringify(path.join(root, 'backend/wechat/types.ts'))};`;
 const build = await rolldown({ input: 'virtual:outbound-test', platform: 'node', resolve: { alias: { '@napcat-wechat/protocol': path.join(root, 'backend/wechat/types.ts') } }, plugins: [{ name: 'outbound-test', resolveId: id => id === 'virtual:outbound-test' ? id : null, load: id => id === 'virtual:outbound-test' ? entry : null }] });
@@ -70,6 +71,7 @@ function fixture(t, respond = (cmd, body) => cmd === 110 ? imageAck(body) : cmd 
   backend.controller = new AbortController(); backend.online = true;
   backend.transport = { connected: true, tx: 0, rx: 0, request: async (cmd, body) => { calls.push({ cmd, body }); return respond(cmd, body, calls.length, backend); }, close() { this.connected = false; } };
   backend.fileRequest = async (_account, cmd, body) => { calls.push({ cmd, body }); return respond(cmd, body, calls.length, backend); };
+  backend.stickerRequest = async (_account, cmd, body) => { calls.push({ cmd, body }); return respond(cmd, body, calls.length, backend); };
   backend.subscribe(event => { if (event.type === 'event.message') events.push(event.payload); });
   t.after(async () => { await backend.close(); assert.equal(path.dirname(dir), tempRoot); assert.match(path.basename(dir), /^wechat-outbound-test-/); fs.rmSync(dir, { recursive: true, force: true }); });
   return { backend, calls, events, cache: () => fs.readFileSync(path.join(cacheDir, `${backend.session.value.uin}.json`), 'utf8') };
@@ -177,6 +179,20 @@ for (const override of [{ offset: 49_999, length: 469 }, { length: 470 }, { clie
       error.code === 'ERR_FILE_PROTOCOL' && error.details.deliveryParts[0].state === 'not-sent');
     assert.deepEqual(f.calls.map(call => call.cmd), [220]); assert.equal(f.events.length, 0);
   });
+
+test('PC file upload accepts the full remaining length from the live 151135-byte Word response', async t => {
+  const content = Buffer.alloc(151135, 0xa7), f = fixture(t, (cmd, body) => {
+    if (cmd !== 220) return appAck(body);
+    const input = fields(body), end = Number(num(input, 7)) + Number(num(input, 8)), remaining = content.length - end;
+    return attachAck(body, { length: remaining, mediaId: remaining ? '' : 'fixture-media-id' });
+  });
+  const result = await f.backend.sendMessage(message({ type: 'file', data: { name: 'roundtrip.docx', base64: content.toString('base64') } }));
+  assert.equal(result.delivery, 'server-ack'); assert.deepEqual(f.calls.map(call => call.cmd), [220, 220, 220, 220, 222]);
+  const upload = { clientId: 'fixture-upload', from: 'fixture-self', total: content.length, md5: 'a'.repeat(32), baseRequest: fv(2, 123) };
+  const body = fileUploadRequest(upload, 0, content.subarray(0, FILE_CHUNK_BYTES));
+  for (const override of [{ length: 101134 }, { length: 101136 }, { offset: 49999, length: 101135 }])
+    assert.throws(() => fileUploadResponse(attachAck(body, override), upload, 0, FILE_CHUNK_BYTES), { code: 'ERR_FILE_PROTOCOL' });
+});
 
 test('files above 20 MiB, aggregate replies above 20 MiB and queues above 64 MiB preserve all bytes and final ACKs', async t => {
   const f = fixture(t), content = Buffer.alloc(22 * 1024 * 1024 + 13, 0xa7);
@@ -396,4 +412,104 @@ test('too many images rejects all segments before sending anything', async t => 
   const f = fixture(t);
   await assert.rejects(async () => f.backend.sendMessage(message(text('do not send first'), ...Array.from({ length: 9 }, () => media()))), { code: 'ERR_INVALID_PARAMS' });
   assert.equal(f.calls.length, 0);
+});
+
+const nativeMd5 = 'a'.repeat(32), nativeFace = (fallback = true) => ({ type: 'face', data: { nativeSticker: { md5: nativeMd5 }, ...(fallback ? media().data : {}) } });
+function stickerAck(body, overrides = {}) {
+  const item = fields(bytes(fields(body), 3));
+  const value = { ret: 0, md5: bytes(item, 1).toString(), start: 1, total: 1, id: '9007199254740998', ...overrides };
+  return Buffer.concat([ld(1, fv(1, 0)), fv(2, 1), ld(3, Buffer.concat([fv(1, value.ret), fv(2, value.start), fv(3, value.total), ld(4, value.md5), ...(value.id ? [fv(6, BigInt(value.id))] : [])]))]);
+}
+function stickerPage(md5s, index = md5s.length, complete = true) {
+  return Buffer.concat([ld(1, fv(1, 0)), fv(2, index), ...md5s.map(md5 => ld(3, md5)), fv(4, complete ? 1 : 0),
+    ...md5s.map(md5 => ld(5, Buffer.concat([ld(1, md5), ld(2, 'https://weixin.qq.com/private-sticker-token/' + md5)])))]);
+}
+test('native favorite sends a real type-47 sticker with a matching full ACK and no image upload', async t => {
+  const f = fixture(t, (cmd, body) => { assert.equal(cmd, 175); return stickerAck(body); });
+  const result = await f.backend.sendMessage(message(nativeFace()));
+  assert.deepEqual(f.calls.map(call => call.cmd), [175]); assert.equal(result.messageType, 47);
+  assert.equal(result.source, 'shortlink:SendEmoji'); assert.equal(result.deliveryParts[0].type, 'face');
+  assert.equal(result.deliveryParts[0].state, 'acknowledged'); assert.equal(result.serverMessageIds[0], '9007199254740998');
+  assert(!f.cache().includes('base64')); assert.equal(f.backend.queuedMediaBytes, 0);
+});
+test('explicit native rejection falls back to one saved image without repeating acknowledged text', async t => {
+  const f = fixture(t, (cmd, body) => cmd === 175 ? stickerAck(body, { ret: -2 }) : cmd === 110 ? imageAck(body) : textAck(body));
+  const result = await f.backend.sendMessage(message(text('好呀'), nativeFace()));
+  assert.deepEqual(f.calls.map(call => call.cmd), [522, 175, 110]);
+  assert.deepEqual(result.deliveryParts.map(part => part.type), ['text', 'image']);
+  assert.equal(result.deliveryParts[1].nativeFallback, true); assert.deepEqual(f.events.map(event => event.messageType), [1, 3]);
+});
+for (const [label, overrides] of [['wrong digest', { md5: 'b'.repeat(32) }], ['incomplete transfer', { start: 0 }], ['missing ID', { id: undefined }], ['overflow ID', { id: '18446744073709551616' }]])
+  test(`native ${label} never falls back or retries an uncertain send`, async t => {
+    const f = fixture(t, (_cmd, body) => stickerAck(body, overrides));
+    await assert.rejects(() => f.backend.sendMessage(message(nativeFace())), error => error.details.deliveryParts[0].state === 'unknown');
+    assert.deepEqual(f.calls.map(call => call.cmd), [175]); assert.equal(f.events.length, 0);
+  });
+test('native timeout never becomes an image retry and preserves preceding text confirmation', async t => {
+  const f = fixture(t, (cmd, body) => { if (cmd === 522) return textAck(body); throw new BridgeError('ERR_ACK_TIMEOUT', 'fixture timeout'); });
+  await assert.rejects(() => f.backend.sendMessage(message(text('先回一句'), nativeFace())), error => error.details.delivery === 'partially-acknowledged' && error.details.acknowledgedMessageIds.length === 1);
+  assert.deepEqual(f.calls.map(call => call.cmd), [522, 175]);
+});
+test('native-only references work without preview bytes and explicit rejection is reported without fabricating an image', async t => {
+  const f = fixture(t, (_cmd, body) => stickerAck(body));
+  assert.equal((await f.backend.sendMessage(message(nativeFace(false)))).messageType, 47);
+  const rejected = fixture(t, (_cmd, body) => stickerAck(body, { ret: -2 }));
+  await assert.rejects(() => rejected.backend.sendMessage(message(nativeFace(false))), { code: 'ERR_STICKER_REJECTED' });
+  assert.deepEqual(rejected.calls.map(call => call.cmd), [175]);
+});
+test('native ACK that races cancellation is retained, while cancellation after rejection prevents image fallback', async t => {
+  const cancel = new AbortController(), f = fixture(t, (_cmd, body) => { cancel.abort(); return stickerAck(body); });
+  assert.equal((await f.backend.sendMessage(message(nativeFace()), cancel.signal)).delivery, 'server-ack');
+  const abort = new AbortController(), rejected = fixture(t, (_cmd, body) => { abort.abort(); return stickerAck(body, { ret: -2 }); });
+  await assert.rejects(() => rejected.backend.sendMessage(message(nativeFace()), abort.signal));
+  assert.deepEqual(rejected.calls.map(call => call.cmd), [175]);
+});
+test('native favorites paginate completely while keeping private resource URLs inside the backend', async t => {
+  const other = 'b'.repeat(32), f = fixture(t, (cmd, body) => { assert.equal(cmd, 697); return num(fields(body), 1) === 0n ? stickerPage([nativeMd5], 1, false) : stickerPage([other], 2); });
+  const list = await f.backend.readStickers(new AbortController().signal);
+  assert.equal(list.complete, true); assert.equal(list.items.length, 2); assert.equal(list.items[0].previewAvailable, true);
+  assert(!JSON.stringify(list).includes('private-sticker-token')); assert.deepEqual(f.calls.map(call => Number(num(fields(call.body), 1))), [0, 1]);
+  const saved = f.backend.stickerResources;
+  f.backend.stickerRequest = async () => stickerPage([nativeMd5], 0, false);
+  await assert.rejects(() => f.backend.readStickers(new AbortController().signal), { code: 'ERR_STICKER_PROTOCOL' });
+  assert.equal(f.backend.stickerResources, saved);
+});
+test('favorite read rejects a changed account before committing its private URL map', async t => {
+  const f = fixture(t, (_cmd, _body, _n, backend) => { backend.session.value.wxid = 'changed-account'; return stickerPage([nativeMd5]); });
+  await assert.rejects(() => f.backend.readStickers(new AbortController().signal), { code: 'ERR_STICKER_ACCOUNT_CHANGED' });
+  assert.equal(f.backend.stickerResources.size, 0);
+});
+test('native collection rereads favorites before claiming success and does not call a deletion opcode', async t => {
+  let reads = 0;
+  const f = fixture(t, cmd => cmd === 697 ? stickerPage(++reads === 1 ? [] : [nativeMd5]) : ld(1, fv(1, 0)));
+  assert.deepEqual(await f.backend.favoriteSticker(nativeMd5, new AbortController().signal), { saved: true, alreadyFavorite: false });
+  assert.deepEqual(f.calls.map(call => call.cmd), [697, 696, 697]); assert.equal(bytes(fields(f.calls[1].body), 1).toString(), nativeMd5);
+  const already = fixture(t, () => stickerPage([nativeMd5]));
+  assert.equal((await already.backend.favoriteSticker(nativeMd5, new AbortController().signal)).alreadyFavorite, true);
+  assert.deepEqual(already.calls.map(call => call.cmd), [697]);
+});
+for (const needsUpload of [true, false]) test(`unconfirmed collection reports ${needsUpload ? 'needs upload' : 'unknown'} instead of pretending to save`, async t => {
+  const f = fixture(t, cmd => cmd === 697 ? stickerPage([]) : Buffer.concat([ld(1, fv(1, 0)), ...(needsUpload ? [ld(2, nativeMd5)] : [])]));
+  await assert.rejects(() => f.backend.favoriteSticker(nativeMd5, new AbortController().signal), { code: needsUpload ? 'ERR_STICKER_UPLOAD_REQUIRED' : 'ERR_STICKER_FAVORITE_UNKNOWN' });
+  assert.deepEqual(f.calls.map(call => call.cmd), [697, 696, 697]);
+});
+test('native list codecs reject malformed fields, duplicate identifiers and missing completion markers', () => {
+  const valid = stickerPage([nativeMd5]);
+  for (const body of [Buffer.concat([valid, fv(4, 1)]), stickerPage([nativeMd5, nativeMd5]), Buffer.concat([ld(1, fv(1, 0)), fv(2, 0)]), stickerPage(['not-an-md5'])])
+    assert.throws(() => api.stickerListResponse(body), { code: 'ERR_STICKER_PROTOCOL' });
+  assert.throws(() => api.stickerListRequest(-1), { code: 'ERR_STICKER_QUERY' });
+});
+test('native CGI accepts validated request-echo and content checksums, rejects another account and never retries', async () => {
+  const account = { uin: 123, wxid: 'fixture', token: 'aa'.repeat(15) }, body = api.stickerListRequest(), response = stickerPage([nativeMd5]);
+  for (const echo of [true, false]) {
+    let calls = 0;
+    const result = await api.requestStickerCgi(account, 697, body, new AbortController().signal, async (url, options) => {
+      calls++; assert(url.endsWith('/mmbatchemojidownload')); assert.equal(options.redirect, 'error');
+      return new Response(echo ? shortlinkAck(account, 697, body, response) : encodeCgiBody(697, response, account.uin, account.token));
+    });
+    assert.equal(calls, 1); assert.deepEqual(result, response);
+  }
+  let calls = 0;
+  await assert.rejects(() => api.requestStickerCgi(account, 697, body, new AbortController().signal, async () => { calls++; return new Response(encodeCgiBody(697, response, 124, account.token)); }), { code: 'ERR_STICKER_PROTOCOL' });
+  assert.equal(calls, 1);
 });

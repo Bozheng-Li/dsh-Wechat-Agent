@@ -10,6 +10,8 @@ export function memoryText(doc) {
       senderId: entry.senderId,
       direction: entry.direction,
       text: entry.text,
+      ...(entry.files?.length ? { files: entry.files.map(file => ({ name: file.name, bytes: file.bytes,
+        messageId: entry.messageId, tool: 'wechat_file', contentRead: false })) } : {}),
       ...(entry.attachments?.length
         ? {
             images: entry.attachments.map((image) => ({

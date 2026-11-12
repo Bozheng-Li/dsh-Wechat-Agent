@@ -47,7 +47,7 @@ test('global custom content is retained as scoped input below the common languag
 test('only one shipped persona and one global editor remain; conversation saves always follow it', () => {
   assert.equal(PERSONA_PRESETS.length, 1);
   assert.equal(PERSONA_PRESETS[0].role, '默认助手（拟人）');
-  const files = fs.readdirSync(new URL('../prompts/personas/', import.meta.url));
+  const files = fs.readdirSync(new URL('../prompts/personas/', import.meta.url)).filter(name => name.endsWith('.mjs'));
   assert.deepEqual(files.sort(), ['catalog.mjs', 'default.mjs', 'text.mjs']);
   const draft = configDraft({ persona: { name: '旧会话角色', aliases: [], prompt: '不应保存' } });
   assert(!Object.hasOwn(draft, 'persona'));

@@ -5,9 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { createServer } from 'node:http';
 import { StateStore, ImageGenerationService, IMAGE_GENERATION_CREDENTIAL, imageGenerationCredential, imageGenerationSettings, workTools, ChannelError } from '../lib/testing.js';
+import { stickerPng } from './fixtures/stickers.mjs';
 
-const assetRoot = new URL('../assets/stickers/', import.meta.url);
-const png = fs.readFileSync(new URL(fs.readdirSync(assetRoot, { recursive: true }).find(file => file.endsWith('.png')).replaceAll('\\', '/'), assetRoot));
+const png = stickerPng();
 const signal = () => new AbortController().signal;
 const response = () => Response.json({ data: [{ b64_json: png.toString('base64') }] });
 const provider = (id, extra = {}) => ({ id, name: '接口 ' + id, endpoint: `https://${id}-image.invalid/v1`, models: ['shared-image', id + '-image'], defaultModel: 'shared-image', ...extra });

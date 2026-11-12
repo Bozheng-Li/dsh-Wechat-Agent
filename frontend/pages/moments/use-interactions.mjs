@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
+import { timeOperationTimeoutMs } from '../../../shared/time-settings.mjs';
 
 const recentRounds = new Map();
 const empty = () => ({ runs: [], current: null, running: false, activeId: null });
-export function useInteractions(rpc, accountId) {
+export function useInteractions(rpc, accountId, timeSettings) {
   const [data, setData] = useState(empty), [busy, setBusy] = useState(''), [error, setError] = useState(''), [refreshError, setRefreshError] = useState(''), [cancelling, setCancelling] = useState(false);
   const api = useRef(rpc), live = useRef(false), chosen = useRef(recentRounds.get(accountId)), reads = useRef(0),
     requests = useRef(new Set()), operation = useRef(null), reading = useRef(false);
@@ -40,7 +41,7 @@ export function useInteractions(rpc, accountId) {
     setBusy(action); setError('');
     try {
       const cleanup = action.startsWith('cleanup.');
-      const result = await api.current(cleanup ? action : 'moments.interactions.' + action, { ...payload, accountId }, AbortSignal.any([controller.signal, AbortSignal.timeout(150000)]));
+      const result = await api.current(cleanup ? action : 'moments.interactions.' + action, { ...payload, accountId }, AbortSignal.any([controller.signal, AbortSignal.timeout(timeOperationTimeoutMs(timeSettings, 'moments.interactions.' + action))]));
       if (!live.current || controller.signal.aborted) return null;
       if (cleanup) { if (action === 'cleanup.delete') await refresh(); return result; }
       if (result.accountId !== accountId) throw new Error('账号已变化，请重新读取互动记录。');

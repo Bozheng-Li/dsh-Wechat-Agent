@@ -1,5 +1,6 @@
 import { resourcePath } from "../../../backend/platform/resources.mjs";
 import fs from 'node:fs';
+import { assertConversationAuthorized, authorizationEpoch, assertAuthorizationEpoch } from '../../../shared/authorization.mjs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
@@ -10,7 +11,7 @@ import { atomicJson } from "../../../backend/storage/atomic-json.ts";
 import { inspectAssetImage } from "../../media/image-format.mjs";
 import { DEFAULT_MEMORY_RETENTION_DAYS, defaultMemoryExpiry } from "../../../shared/memory-policy.mjs";
 import { IMAGE_MEMORY_COLLECTIONS, imageMemoryCollection, imageMemoryByteLimit, generatedImageMetadata, imageGenerationAt } from '../../../shared/image-memory.mjs';
-import { referencedMessageId } from '../../../shared/message-references.mjs';
+import { referencedMessageId } from '../../../shared/message-content.mjs';
 
 const sha = (value) =>
   createHash('sha256')
@@ -156,6 +157,32 @@ export class ImageMemory {
     clearInterval(this.timer);
     this.timer = null;
   }
+  storedScopes() {
+    const scopes = new Map();
+    for (const collection of IMAGE_MEMORY_COLLECTIONS) {
+      const root = collection === 'generated' ? path.join(this.store.root, 'storage/memory/generated-images') : this.root;
+      plain(root, true);
+      if (!fs.existsSync(root)) continue;
+      for (const account of fs.readdirSync(root, { withFileTypes: true })) {
+        if (!validId(account.name)) continue;
+        const folder = path.join(root, account.name); plain(folder, true, false);
+        for (const entry of fs.readdirSync(folder, { withFileTypes: true })) {
+          if (!validId(entry.name)) continue;
+          const directory = path.join(folder, entry.name), file = path.join(directory, 'index.json');
+          plain(directory, true, false); plain(file);
+          if (!fs.existsSync(file)) continue;
+          const doc = JSON.parse(fs.readFileSync(file, 'utf8'));
+          if (doc.ownerStoreId !== this.store.data.storeId) continue;
+          const key = conversationKey(doc.accountId, doc.chatType, doc.peerId), expected = collection === 'generated' ? sha([key, 'generated']) : key;
+          if (!doc.accountId || !['private', 'group'].includes(doc.chatType) || !doc.peerId || doc.peerId.endsWith('@chatroom') !== (doc.chatType === 'group') ||
+              account.name !== sha([doc.accountId]) || entry.name !== expected || doc.key !== expected)
+            throw fail('IMAGE_MEMORY_INVALID', '图片记忆索引的会话归属不匹配，未删除其他资料');
+          scopes.set(key, { accountId: doc.accountId, chatType: doc.chatType, peerId: doc.peerId, key });
+        }
+      }
+    }
+    return [...scopes.values()];
+  }
   sweep() {
     const accounts = new Set([
       ...Object.keys(this.store.data.accounts),
@@ -170,9 +197,10 @@ export class ImageMemory {
         this.sweepError = '部分会话的图片期限未能检查，请检查会话记录与目录权限';
         continue;
       }
-      for (const peer of peers) for (const collection of IMAGE_MEMORY_COLLECTIONS) {
-        const scope = this.selector({ ...peer, collection });
+      for (const peer of peers.filter(peer => peer.authorized)) for (const collection of IMAGE_MEMORY_COLLECTIONS) {
+        let scope;
         try {
+          scope = this.selector({ ...peer, collection });
           const index = path.join(this.directory(scope), 'index.json');
           plain(index);
           if (!fs.existsSync(index)) continue;
@@ -180,7 +208,7 @@ export class ImageMemory {
           this.cleanupState(state, Object.keys(state.deleted)); // Retry earlier file-cleanup failures.
         } catch (error) {
           this.errors.set(
-            scope.key,
+            scope?.key || peer.key,
             error instanceof ChannelError ? error.message : '到期图片未能清理，请检查磁盘空间和目录权限'
           );
         }
@@ -196,6 +224,7 @@ export class ImageMemory {
       typeof input.peerId !== 'string'
     )
       throw fail('INVALID_IMAGE_MEMORY_SCOPE', '请先选择图片所属账号和会话');
+    assertConversationAuthorized(this.store, input);
     const collection = imageMemoryCollection(input.collection),
       conversation = conversationKey(input.accountId, input.chatType, input.peerId),
       key = collection === 'generated' ? sha([conversation, 'generated']) : conversation;
@@ -295,6 +324,7 @@ export class ImageMemory {
     return state;
   }
   save(state) {
+    assertConversationAuthorized(this.store, state);
     const directory = this.directory(state);
     plain(directory, true);
     fs.mkdirSync(directory, { recursive: true });
@@ -345,6 +375,7 @@ export class ImageMemory {
   }
   async capture(input, entry, attachment, image, signal = noSignal(), { generation } = {}) {
     signal.throwIfAborted();
+    const epoch = authorizationEpoch(this.store, input.accountId);
     let state = this.load(input);
     const id = this.imageId(state, entry, attachment);
     if (!state.settings.enabled || state.deleted[id] || (generation !== undefined && state.generation !== generation))
@@ -408,6 +439,7 @@ export class ImageMemory {
       previewError = error instanceof ChannelError ? error.message : '缩略图未能生成；已保存的图片仍可打开';
     }
     signal.throwIfAborted();
+    assertAuthorizationEpoch(this.store, input.accountId, epoch);
     state = this.load(input);
     if (
       !state.items[id] ||

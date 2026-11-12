@@ -22,7 +22,11 @@ import { ModelSettings } from "./pages/settings/model-page.jsx";
 import { ImageGenerationSettings } from './pages/settings/image-generation-page.jsx';
 import { PersonaSettings } from "./pages/settings/persona-page.jsx";
 import { StorageSettings } from "./pages/settings/storage-page.jsx";
+import { TimeSettings } from './pages/settings/time-page.jsx';
+import { AutomationSettings } from './pages/settings/automation-page.jsx';
+import { preserveTimeValues } from '../shared/time-settings.mjs';
 import { Records } from "./pages/records/page.jsx";
+import { ExecutionTracesPage } from './pages/traces/page.jsx';
 
 export function PanelContent({ connection, catalog, state }) {
   const {
@@ -32,6 +36,7 @@ export function PanelContent({ connection, catalog, state }) {
     setPage,
     memoryTab,
     setMemoryTab,
+    automationTarget,
     error,
     busy,
     busyArea,
@@ -93,6 +98,8 @@ export function PanelContent({ connection, catalog, state }) {
     );
   else if (page === 'overview')
     content = <Overview status={status} busy={busy} blocked={blocked} onAction={action} onNavigate={navigate} />;
+  else if (page === 'traces') content = <ExecutionTracesPage key={status.account?.id || 'offline'} status={status}
+    rpc={(endpoint, payload, signal) => call(connection, endpoint, payload, signal || AbortSignal.timeout(120000))} />;
   else if (['diagnostics', 'digests', 'work', 'moments'].includes(page)) {
     const Page = { diagnostics: DiagnosticsPage, digests: DigestsPage, work: WorkPage, moments: MomentsPage }[page];
     content = (
@@ -123,18 +130,17 @@ export function PanelContent({ connection, catalog, state }) {
         onGrant={grant}
         onGrantMany={grantMany}
         onDetail={openDetail}
-        onToggle={(enabled) =>
-          saveSettings(
-            { ...statusRef.current.settings, enabled },
-            {
-              area: 'authorization',
-              text: enabled ? '自动回复已开启，开始处理之后收到的新消息。' : '自动回复已暂停，授权与记录继续保留。',
-            }
-          )
-        }
+        onNavigate={navigate}
       />
     );
   else if (page === 'settings') content = <SettingsIndex status={status} onNavigate={navigate} />;
+  else if (page === 'automation') content = <AutomationSettings key={status.account?.id || 'offline'} status={status} rows={recordRows}
+    target={automationTarget} blocked={blocked} notice={notice} onNavigate={navigate} onBack={back} backLabel={backLabel}
+    rpc={(endpoint, payload, signal) => call(connection, endpoint, payload, signal || AbortSignal.timeout(120000))}
+    onToggle={enabled => saveSettings({ ...statusRef.current.settings, enabled }, { area: 'automation',
+      text: enabled ? '自动回复已开启，开始处理之后收到的新消息。' : '自动回复已暂停，授权与记录继续保留。' })} />;
+  else if (page === 'time') content = <TimeSettings key={status.account?.id || 'offline'} status={status} blocked={blocked}
+    rpc={(endpoint, payload, signal) => call(connection, endpoint, payload, AbortSignal.any([signal, AbortSignal.timeout(120000)]))} onBack={back} backLabel={backLabel} />;
   else if (page === 'image-generation') content = <ImageGenerationSettings status={status} blocked={blocked}
     onAction={(endpoint, payload) => action(endpoint, payload, { area: 'image-generation' })} onBack={back} backLabel={backLabel} />;
   else if (page === 'identity')
@@ -300,7 +306,9 @@ export function PanelContent({ connection, catalog, state }) {
               accountId: status.account.id,
               chatType: peerType(detail),
               peerId: peerId(detail),
-              config: configPayload(draftsRef.current.conversation),
+              config: configPayload({ ...draftsRef.current.conversation,
+                natural: preserveTimeValues('natural', draftsRef.current.conversation.natural, detail.config.natural) }),
+              preserveTimeSettings: true,
             },
             { area: 'conversation', force: ['conversation'], text: '此会话的设置已保存，之后的回复使用新设置。' }
           )
@@ -349,6 +357,7 @@ export function PanelContent({ connection, catalog, state }) {
         status={status}
         rows={recordRows}
         initialPeer={detail}
+        onNavigate={navigate}
       />
     );
   else if (page === 'assets')
@@ -364,6 +373,7 @@ export function PanelContent({ connection, catalog, state }) {
           )
         }
         status={status}
+        onNavigate={navigate}
       />
     );
   else if (page === 'tasks')
@@ -374,6 +384,7 @@ export function PanelContent({ connection, catalog, state }) {
         status={status}
         rows={rows}
         initialPeer={detail}
+        onNavigate={navigate}
       />
     );
   else if (page === 'records')

@@ -3,16 +3,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {
-  StateStore, WechatChannel, MomentsService, momentsLikeRequestTool, isMomentsLikeRequest, momentsLikeRequestArgs, isSelfMomentsLikeRequest, planProgressiveTools, workModelTools, ChannelError
-} from '../lib/testing.js';
-
-
-
-
-
-
-
+import { StateStore } from '../backend/storage/state-store.mjs';
+import { WechatChannel } from '../modules/conversation/channel.mjs';
+import { MomentsService } from '../modules/moments/service.mjs';
+import { momentsLikeRequestTool, isMomentsLikeRequest } from '../modules/tools/moments-likes.mjs';
+import { momentsLikeRequestArgs, isSelfMomentsLikeRequest } from '../shared/moments-like-request.mjs';
+import { planProgressiveTools } from '../modules/tools/progressive.mjs';
+import { workModelTools } from '../modules/tools/index.mjs';
+import { ChannelError } from '../shared/contracts.mjs';
 
 const accountId = 'like-bot', room = 'like-room@chatroom';
 const bob = { accountId, chatType: 'private', peerId: 'bob', senderId: 'bob' };
@@ -21,7 +19,7 @@ const post = (id, userId = 'bob', values = {}) => ({ id, author: { userId, nickn
   text: '合成动态 ' + id, likedByCurrentAccount: false, deleted: false, ...values });
 function fixture(t, options = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-like-request-')), store = new StateStore(root);
-  store.configure(accountId, { enabled: true, privatePeers: ['alice', 'bob'], groups: [room], prompt: '' });
+  store.configure(accountId, { enabled: true, privatePeers: ['alice', 'bob', 'friend'], groups: [room], prompt: '' });
   const config = store.config.snapshot(store.data); config.remote = { globalAdminIds: ['alice'] }; store.config.commit(config);
   for (const [chatType, peerId] of [['private', 'alice'], ['private', 'bob'], ['group', room]])
     store.setConversationSettings(accountId, chatType, peerId, { ...store.conversationSettings(accountId, chatType, peerId),
@@ -164,15 +162,15 @@ test('damaged completed receipts or duplicated selections never become fake succ
 });
 
 test('deleted items can continue the same target cursor but a wrong author or malformed response does not write', async t => {
-  const f = fixture(t, { read: args => ({ accountId, action: 'user', items: args.query.cursor ? [post('2')] : [post('3', 'bob', { deleted: true })], nextCursor: args.query.cursor ? null : 'next' }) });
+  const f = fixture(t, { read: args => ({ accountId, source: 'wechat-sns-live', action: 'user', userId: args.query.userId, items: args.query.cursor ? [post('2')] : [post('3', 'bob', { deleted: true })], nextCursor: args.query.cursor ? null : 'next' }) });
   const value = await f.like(); assert.equal(value.results[0].postId, '2'); assert.equal(f.reads[1].query.userId, 'bob'); assert.equal(f.reads[1].query.cursor, 'next');
   for (const result of [
     { accountId: 'wrong', action: 'user', items: [post('3')] },
     { accountId, action: 'user', items: [post('3', 'alice')] },
     { accountId, action: 'user', items: [post('3', 'bob', { likedByCurrentAccount: undefined })] },
   ]) {
-    const invalid = fixture(t, { read: () => result });
-    await assert.rejects(invalid.like(), error => error.code === 'MOMENTS_LIKE_READ_INVALID'); assert.equal(invalid.writes.length, 0);
+    const invalid = fixture(t, { read: () => ({ source: 'wechat-sns-live', userId: 'bob', ...result }) });
+    await assert.rejects(invalid.like(), error => ['MOMENTS_LIKE_READ_INVALID', 'MOMENTS_AUTHORIZATION_UNVERIFIED'].includes(error.code)); assert.equal(invalid.writes.length, 0);
   }
 });
 

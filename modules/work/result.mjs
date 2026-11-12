@@ -8,7 +8,7 @@ export function workFiles(cwd) {
   const visit = (directory, depth) => {
     if (depth > 8 || files.length >= 100) return;
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-      if (entry.isSymbolicLink() || ['.wechat-work', '.git', 'node_modules', '.venv'].includes(entry.name)) continue;
+      if (entry.isSymbolicLink() || ['.wechat-work', '.wechat-inputs', '.git', 'node_modules', '.venv'].includes(entry.name)) continue;
       const file = path.join(directory, entry.name);
       if (entry.isDirectory()) visit(file, depth + 1);
       else if (entry.isFile() && files.length < 100) files.push({ path: path.relative(cwd, file).replaceAll('\\', '/'), bytes: fs.statSync(file).size });

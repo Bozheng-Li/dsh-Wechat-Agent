@@ -6,6 +6,10 @@ export interface MediaData {
   // references describe received or cached media; the sender never reads them.
   base64?: string; mediaType?: string; bytes?: number; sha256?: string;
   name?: string;
+  stickerMd5?: string;
+  // With a native sticker reference, base64 (if present) is only the checked
+  // static fallback, used after an explicit native rejection, never a timeout.
+  nativeSticker?: { md5: string };
 }
 export const MAX_SEND_IMAGE_BYTES = 10 * 1024 * 1024;
 export type Segment =
@@ -14,7 +18,7 @@ export type Segment =
   | { type: 'face'; data: MediaData }
   | { type: 'file'; data: MediaData & { name: string } }
   | { type: 'at'; data: { qq: string; name?: string } }
-  | { type: 'reply'; data: { id?: string; messageType?: number; senderId?: string; senderName?: string; content?: string; image?: { resourceId: string } } };
+  | { type: 'reply'; data: { id?: string; messageType?: number; senderId?: string; senderName?: string; content?: string; image?: { resourceId: string }; file?: { name: string; bytes?: number } } };
 
 export interface Contact { id: string; nickname: string; remark?: string; avatar?: string; alias?: string }
 export interface Group { id: string; name: string; memberCount: number; maxMemberCount?: number }
@@ -55,7 +59,11 @@ export interface Backend {
   subscribe(listener: (event: BridgeEvent) => void): () => void;
 }
 export class BridgeError extends Error {
-  constructor(public readonly code: string, message: string, public readonly details: Record<string, unknown> = {}) { super(message); this.name = 'BridgeError'; }
+  readonly code: string;
+  readonly details: Record<string, unknown>;
+  constructor(code: string, message: string, details: Record<string, unknown> = {}) {
+    super(message); this.name = 'BridgeError'; this.code = code; this.details = details;
+  }
   toJSON() { return { code: this.code, message: this.message, details: this.details }; }
 }
 export function object(value: unknown): Record<string, unknown> {
@@ -74,12 +82,20 @@ export function segments(value: unknown): Segment[] {
       case 'text': if (typeof d.text !== 'string') break; return { type: 'text', data: { text: d.text } };
       case 'image':
       case 'face': {
+        let nativeSticker: { md5: string } | undefined;
+        if (d.nativeSticker !== undefined) {
+          const native = object(d.nativeSticker);
+          if (s.type !== 'face' || typeof native.md5 !== 'string' || !/^[a-f0-9]{32}$/.test(native.md5))
+            throw new BridgeError('ERR_INVALID_PARAMS', '微信原生表情标识无效', { delivery: 'rejected' });
+          nativeSticker = { md5: native.md5 };
+          if (d.base64 === undefined) return { type: 'face', data: { nativeSticker } };
+        }
         if (d.base64 !== undefined) {
           if (typeof d.base64 !== 'string' || !d.base64.length || d.base64.length > Math.ceil(MAX_SEND_IMAGE_BYTES / 3) * 4 || d.base64.length % 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(d.base64))
             throw new BridgeError('ERR_INVALID_PARAMS', '图片内容必须是标准 base64，单张不能超过 10 MiB');
           if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(String(d.mediaType)))
             throw new BridgeError('ERR_INVALID_PARAMS', '图片类型必须是 PNG、JPEG、GIF 或 WebP');
-          return { type: s.type, data: { base64: d.base64, mediaType: String(d.mediaType), ...(d.name === undefined ? {} : { name: artifactName(d.name) }) } };
+          return { type: s.type, data: { base64: d.base64, mediaType: String(d.mediaType), ...(nativeSticker ? { nativeSticker } : {}), ...(d.name === undefined ? {} : { name: artifactName(d.name) }) } };
         }
         return { type: s.type, data: { file: string(d.file, `${s.type}.file`), ...(d.url === undefined ? {} : { url: string(d.url, `${s.type}.url`) }), ...(d.resourceId === undefined ? {} : { resourceId: string(d.resourceId, `${s.type}.resourceId`) }) } };
       }

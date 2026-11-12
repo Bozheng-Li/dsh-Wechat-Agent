@@ -1,3 +1,4 @@
+import { AutomationLink } from '../../components/automation-link.jsx';
 import { CleanupControl } from '../../components/cleanup-control.jsx';
 import { useEffect, useRef, useState } from 'react';
 import { Button, Empty, Feedback, Tag } from '../../components/workbench-ui.jsx';
@@ -5,7 +6,7 @@ import { PageHead } from '../../components/page-ui.jsx';
 import { useWorkbench } from '../../hooks/use-workbench.mjs';
 import { formatTime } from '../../shared/conversations.mjs';
 import { localDate as localDateInput } from '../../shared/local-date.mjs';
-import { MATERIAL_DEFAULTS, materialSourceKey } from '../../../shared/moments-materials.mjs';
+import { ScheduleCountdown } from '../../components/schedule-countdown.jsx';
 
 const blank = () => ({ title: '', text: '', url: '', enabled: true, expiresAt: null, imageUse: 'publish', imageOrigin: 'unknown' });
 const fieldsOf = item => Object.fromEntries(Object.keys(blank()).map(key => [key, item[key]]));
@@ -22,21 +23,19 @@ function MaterialImage({ item, accountId, rpc }) {
   }, [item.id, item.revision, accountId]);
   return url ? <img className="wa-material-thumbnail" src={url} alt={item.title} /> : <span className="wa-wb-note">{error || '正在读取图片…'}</span>;
 }
-export function MomentsMaterialsPage({ rpc, status, embedded = false }) {
-  const accountId = status.account?.id, state = useWorkbench(rpc, accountId, 'moments.materials.list', '', 3000);
-  const data = state.data, [settings, setSettings] = useState(structuredClone(MATERIAL_DEFAULTS)), [settingsDirty, setSettingsDirty] = useState(false);
+export function MomentsMaterialsPage({ rpc, status, embedded = false, onNavigate }) {
+  const accountId = status.account?.id, state = useWorkbench(rpc, accountId, 'moments.materials.list', '', 3000, status.timeSettings);
+  const data = state.data;
   const [editor, setEditor] = useState(null), [imageData, setImageData] = useState(null), [recognize, setRecognize] = useState(true);
   const [filter, setFilter] = useState('all'), [search, setSearch] = useState(''), [page, setPage] = useState(0), [removeId, setRemoveId] = useState(null), [error, setError] = useState('');
   const [selectedItems, setSelectedItems] = useState([]);
   const operations = useRef({}), uploader = useRef(null), busy = state.busy;
-  useEffect(() => { if (data?.settings && !settingsDirty) setSettings(data.settings); }, [data?.settings, settingsDirty]);
   useEffect(() => setPage(0), [filter, search]);
   const items = (data?.items || []).filter(item => (filter === 'all' || filter === 'available' && item.selectable || filter === 'used' && item.uses.length || filter === 'inactive' && !item.available) &&
     (!search.trim() || (item.title + ' ' + item.text).toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())));
   const pages = Math.max(1, Math.ceil(items.length / 12)), currentPage = Math.min(page, pages - 1);
   const open = item => { setEditor(item ? { id: item.id, revision: item.revision, fields: fieldsOf(item), kind: item.kind } : { fields: blank(), kind: 'text' }); setImageData(null); setError(''); };
   const edit = patch => setEditor(value => ({ ...value, fields: { ...value.fields, ...patch } }));
-  const configure = patch => { setSettings(value => ({ ...value, ...patch })); setSettingsDirty(true); };
   const execute = async (method, payload) => {
     const signature = JSON.stringify(payload), prior = operations.current[method];
     if (prior?.signature !== signature) operations.current[method] = { signature, requestId: 'material-' + crypto.randomUUID() };
@@ -76,29 +75,15 @@ export function MomentsMaterialsPage({ rpc, status, embedded = false }) {
       <div className="wa-wb-between"><div><h2>留下点什么</h2><p className="wa-wb-note">素材独立保留，生成朋友圈时再挑选。停用、过期和已用版本不会自动重复选用。</p></div>
         <div className="wa-wb-actions"><Button disabled={busy || !accountId} onClick={() => open()}>记一条素材</Button><Button quiet disabled={busy || !accountId} onClick={() => uploader.current?.click()}>上传图片素材</Button>
           <input ref={uploader} hidden aria-label="上传朋友圈素材图片" type="file" accept="image/png,image/jpeg" onChange={upload} /></div></div>
-      <details className="wa-subsection"><summary>聊天取材与自动整理</summary>
-        <p className="wa-wb-note">只整理所选聊天的新内容，先脱敏再保存；不会搬运聊天原图。原聊天记忆与素材分开保留。整理和生成都不等于发布。</p>
-        <fieldset disabled={busy}>
-          <label className="wa-wb-check"><input aria-label="允许素材按需联网取图" type="checkbox" checked={!!settings.webImagesEnabled} onChange={event => configure({ webImagesEnabled: event.target.checked })} />允许 agent 按需搜索并下载公开图片到素材库</label>
-          <p className="wa-wb-note">只提供可选工具，不强制联网或配图。网络图片保留来源，可编辑、停用或删除。</p>
-          <label className="wa-wb-check"><input aria-label="允许素材按需生图" type="checkbox" checked={!!settings.generatedImagesEnabled} onChange={event => configure({ generatedImagesEnabled: event.target.checked })} />允许 agent 按需调用生图接口生成图片素材</label>
-          <p className="wa-wb-note">使用设置中的生图 API，每轮最多一张，也可以不生成。图片标为 AI 创作，识别实际画面后用于配文。</p>
-          <label className="wa-wb-check"><input aria-label="自动整理朋友圈素材" type="checkbox" checked={settings.enabled} onChange={event => configure({ enabled: event.target.checked })} />定期自动整理新素材</label>
-          <label>整理间隔<select aria-label="朋友圈素材整理间隔" value={settings.intervalMinutes} onChange={event => configure({ intervalMinutes: Number(event.target.value) })}>
-            {[15, 60, 180, 360, 1440].map(value => <option key={value} value={value}>{value < 60 ? value + ' 分钟' : value / 60 + ' 小时'}</option>)}</select></label>
-          <div className="wa-material-sources">{data?.peers?.length ? data.peers.map(peer => <label className="wa-wb-check" key={materialSourceKey(peer)}>
-            <input type="checkbox" aria-label={'素材取材 ' + peer.name} checked={settings.sources.some(source => materialSourceKey(source) === materialSourceKey(peer))}
-              onChange={event => configure({ sources: event.target.checked ? [...settings.sources, { chatType: peer.chatType, peerId: peer.peerId }] : settings.sources.filter(source => materialSourceKey(source) !== materialSourceKey(peer)) })} />
-            {peer.name} <small>{peer.chatType === 'group' ? '群聊' : '私聊'}</small></label>) : <p className="wa-wb-note">暂无可选会话，请先在会话页授权。</p>}</div>
-          {settings.sources.some(source => !data?.peers?.some(peer => materialSourceKey(peer) === materialSourceKey(source))) && <p className="wa-alert is-error">有取材会话已撤权。<Button quiet onClick={() => configure({ sources: settings.sources.filter(source => data?.peers?.some(peer => materialSourceKey(peer) === materialSourceKey(source))) })}>移除失效取材会话</Button></p>}
-        </fieldset>
-        <div className="wa-wb-actions"><Button disabled={busy || !settingsDirty} onClick={async () => { if (await state.execute('moments.materials.configure', { settings })) { setSettingsDirty(false); state.setNotice('朋友圈取材范围已保存。'); } }}>保存取材设置</Button>
-          <Button quiet disabled={busy || !settingsDirty} onClick={() => { setSettings(data.settings); setSettingsDirty(false); }}>取消取材设置更改</Button>
-          <Button quiet disabled={busy || data?.running || settingsDirty || !settings.sources.length || !status.online} onClick={() => execute('moments.materials.organize', {})}>整理一次素材</Button></div>
-      </details>
-      {data?.running && <div className="wa-wb-between"><p role="status">{data.runningKind === 'describe' ? '正在识别图片，最多等待 5 分钟。' : data.runningKind === 'generate' ? '正在生成并识别图片素材，最多等待 5 分钟。' : data.runningKind === 'download' ? '正在下载图片素材，最多等待 5 分钟。' : (jobLabels[data.lastRun?.stage] || '正在整理素材') + '，最多等待 30 分钟；离开页面后仍会继续。'}</p><Button quiet onClick={stop}>停止素材处理</Button></div>}
+      <div className="wa-wb-actions">
+        <AutomationLink onNavigate={onNavigate} from={embedded ? 'moments' : 'assets'} section="moments-materials">取材与自动整理设置</AutomationLink>
+        <Button quiet disabled={busy || data?.running || !data?.settings.sources.length || !status.online} onClick={() => execute('moments.materials.organize', {})}>整理一次素材</Button>
+      </div>
+      <p className="wa-wb-note">取材会话、自动整理和图片获取开关统一在“设置 → 自动功能”中管理。</p>
+      {data?.running && <div className="wa-wb-between"><p role="status">{data.runningKind === 'describe' ? '正在识别图片，达到设定超时后停止。' : data.runningKind === 'generate' ? '正在生成并识别图片素材，达到设定超时后停止。' : data.runningKind === 'download' ? '正在下载图片素材，达到设定超时后停止。' : (jobLabels[data.lastRun?.stage] || '正在整理素材') + '，达到设定超时后停止；离开页面后仍会继续。'}</p><Button quiet onClick={stop}>停止素材处理</Button></div>}
       {data?.lastRun && data.lastRun.state !== 'running' && <p className="wa-wb-note" role="status">{data.lastRun.state === 'done' ? `最近整理：新增 ${data.lastRun.added} 条，更新 ${data.lastRun.updated} 条${data.lastRun.rejected ? `，${data.lastRun.rejected} 条未通过公开性检查` : ''}。` : data.lastRun.state === 'empty' ? '没有新的聊天内容可整理。' : data.lastRun.error}</p>}
-      {data?.settings.enabled && <small>下次整理：{data.nextRunAt ? formatTime(data.nextRunAt) : '等待安排'}</small>}
+      {data?.settings.enabled && <small className="wa-schedule-time"><span>下次整理：{data.nextRunAt ? formatTime(data.nextRunAt) : '等待安排'}</span>
+        <ScheduleCountdown at={data.nextRunAt} running={data.running} paused={data.error || !data.settings.sources.length} status={status} action="整理" /></small>}
     </div>
     {editor && <div className="wa-wb-card" data-testid="material-editor"><h2>{editor.id ? '编辑素材' : editor.kind === 'image' ? '添加图片素材' : '记一条素材'}</h2>
       <fieldset disabled={busy}>

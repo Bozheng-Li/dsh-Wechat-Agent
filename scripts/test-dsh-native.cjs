@@ -11,12 +11,10 @@ const { syncBuiltinESMExports } = require('node:module');
 const repo = path.resolve(__dirname, '..');
 const installation = process.argv[2] || process.env.DSH_INSTALLATION;
 if (!installation) throw new Error('Pass the DeepSeek Harness installation directory as an argument or DSH_INSTALLATION');
-const suiteTimeoutMs = Number(process.env.WECHAT_NATIVE_TEST_TIMEOUT_MS || 45000);
-if (!Number.isSafeInteger(suiteTimeoutMs) || suiteTimeoutMs < 1) throw new Error('WECHAT_NATIVE_TEST_TIMEOUT_MS must be a positive integer');
 for (const name of ['tmp', 'logs']) fs.mkdirSync(path.join(repo, 'storage', name), { recursive: true });
 if (!process.versions.electron) {
   const run = spawnSync(path.join(installation, 'DeepSeek Harness.exe'), ['--expose-internals', __filename, installation], {
-    windowsHide: true, encoding: 'utf8', timeout: suiteTimeoutMs,
+    windowsHide: true, encoding: 'utf8', timeout: 120000,
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
   });
   process.stdout.write(run.stdout || ''); process.stderr.write(run.stderr || '');
@@ -28,10 +26,8 @@ const { Context } = hostRequire('@deepseek-ai/cordis');
 const { LlmAdapter } = hostRequire('@deepseek-ai/dsh-llm');
 const { buildModelCatalog } = hostRequire('@deepseek-ai/dsh-api-session-controller');
 const { DshAgentRunner, WechatChannel, StateStore, TaskScheduler, AgentIdentity, conversationMemoryTool, imageMemoryTool, conversationImageTool, completedText, conversationTaskTool, webSearchTool, ChannelError, selectModel, readModelInfo, emptyNaturalSettings, REPLY_STYLE_REVIEW_NOTE } = require(path.join(repo, 'lib/testing.js'));
-const { momentsLikeRequestTool, momentsInteractionTool, momentsImagesTool, momentsPublishingTools, resolveMessageReferences, referenceText } = require(path.join(repo, 'lib/testing.js'));
-const fixtureParent = path.resolve(process.env.WECHAT_NATIVE_TEST_TMPDIR || path.join(repo, 'storage/tmp'));
-fs.mkdirSync(fixtureParent, { recursive: true });
-const root = fs.mkdtempSync(path.join(fixtureParent, 'dsh-native-'));
+const { momentsLikeRequestTool, momentsInteractionTool, momentsImagesTool, momentsPublishingTools } = require(path.join(repo, 'lib/testing.js'));
+const root = fs.mkdtempSync(path.join(repo, 'storage/tmp/dsh-native-'));
 process.env.DSH_HOME = path.join(root, 'home');
 process.env.DSH_AGENTS_HOME = path.join(root, 'agents');
 const ctx = new Context();
@@ -50,10 +46,18 @@ class FixtureAdapter extends LlmAdapter {
   }
   async *stream(options) {
     requests.push(options);
+    const systems = options.messages.filter(m => m.role === 'system').flatMap(m => m.content).map(b => b.text || '').join('\n');
+    if (systems.includes('你是后台人物记忆 Agent')) {
+      assert.deepEqual(options.tools || [], []);
+      const text = '{"updates":[],"conflicts":[]}';
+      yield { type: 'block-start', index: 0, blockType: 'text' }; yield { type: 'text-delta', index: 0, text };
+      yield { type: 'block-end', index: 0, block: { type: 'text', text } }; yield { type: 'finish', reason: { kind: 'stop' } }; return;
+    }
     const incomingImages = options.messages.flatMap(message => message.content || []).filter(block => block.type === 'image');
     const expectedTools = mode === 'moments-reply-schedule-tool' ? ['wechat_moments_reply_schedule'] : mode === 'moments-images-tool' && !incomingImages.length ? ['wechat_moments_images'] : ['moments-interaction-tool', 'moments-interaction-auto-tool'].includes(mode) ? ['wechat_moments_interact'] : mode === 'moments-like-tool' ? ['wechat_moments_like_recent'] : mode === 'image-request-tool' && !incomingImages.length ? ['wechat_read_image'] : mode === 'generated-image-memory-tool' && !incomingImages.length ? ['wechat_generated_image_memory'] : mode === 'image-memory-tool' && !incomingImages.length ? ['wechat_image_memory'] : mode === 'task-tool' || mode === 'task-denied' ? ['wechat_task'] : mode === 'search-tool' ? ['wechat_web_search'] : ['memory-tool', 'memory-all-tool', 'channel', 'empty-after-tool'].includes(mode) ? ['wechat_memory'] : [];
-    assert.deepEqual((options.tools || []).map(tool => tool.name), expectedTools, 'only current-conversation tools are available; host tools never leak');
-    const systems = options.messages.filter(m => m.role === 'system').flatMap(m => m.content).map(b => b.text || '').join('\n');
+    const scopedTools = mode === 'channel' ? ['wechat_memory', 'wechat_role_card']
+      : ['natural-reply', 'natural-skip'].includes(mode) ? ['wechat_role_card'] : expectedTools;
+    assert.deepEqual((options.tools || []).map(tool => tool.name), scopedTools, 'only current-conversation tools are available; host tools never leak');
     assert(systems.includes('微信') || systems.includes('这是内部资料处理任务'));
     assert(!systems.includes('HOST_SECRET_PERSONA'));
     if (mode === 'moments-reply-schedule-tool') {
@@ -208,6 +212,7 @@ async function verifyPluginLifecycle(hostContext) {
   const home = path.join(root, 'lifecycle-home'), pluginRoot = path.join(home, 'wechat-agent');
   const seed = new StateStore(pluginRoot), owner = 'lifecycle-owner', group = 'lifecycle@chatroom';
   seed.configure(owner, { enabled: true, privatePeers: [], groups: [group], prompt: '' });
+  seed.setRoleCardSettings({ ...seed.roleCardSettings(), enabled: false }, seed.roleCardSettingsView().revision);
   seed.setConversationSettings(owner, 'group', group, { mode: 'participate', minMessages: 5, maxMessages: 5, recordsPath: '' });
   const incoming = id => ({ id, serverMessageId: id, direction: 'incoming', chatType: 'group', peerId: group,
     sender: { id: 'fixture-member' }, time: Math.floor(Date.now() / 1000), message: [{ type: 'text', data: { text: id } }] });
@@ -231,6 +236,12 @@ async function verifyPluginLifecycle(hostContext) {
     Object.assign(child, { pid: process.pid, connected: true, exitCode: null, signalCode: null });
     child.send = (request, callback) => {
       callback?.();
+      if (request.type === 'cancel') return;
+      if (['stickers.list', 'stickers.recent'].includes(request.op)) {
+        queueMicrotask(() => child.emit('message', { type: 'result', id: request.id, ok: false,
+          error: { code: 'FIXTURE_UNAVAILABLE', message: 'Synthetic worker has no sticker collection' } }));
+        return;
+      }
       assert.equal(request.op, 'close', 'lifecycle fixture must never start a real connection or send');
       queueMicrotask(() => {
         closeCalls++; publish(false);
@@ -443,11 +454,12 @@ async function verifyPluginLifecycle(hostContext) {
   mode = 'moments-like-tool';
   const likeStore = new StateStore(path.join(root, 'moments-likes')), likeReads = [], likeWrites = [];
   likeStore.configure('fake-owner', { enabled: true, privatePeers: ['fake-friend'], groups: [], prompt: '' });
+  likeStore.setRoleCardSettings({ ...likeStore.roleCardSettings(), enabled: false }, likeStore.roleCardSettingsView().revision);
   let uncertainLike = false;
   const likeChannel = new WechatChannel({ store: likeStore, runner, transport: {
     status: () => ({ online: true, account: { id: 'fake-owner' }, momentsReadReady: true, momentsWriteReady: true }),
-    readMoments: async request => { likeReads.push(request); return { accountId: 'fake-owner', action: 'user', items: [
-      { id: '301', author: { userId: 'fake-friend', nickname: '合成好友' }, createdAt: 1700000301, text: '原生工具隔离测试', likedByCurrentAccount: false, deleted: false },
+    readMoments: async request => { likeReads.push(request); return { accountId: 'fake-owner', action: request.query.action, userId: request.query.userId, source: 'wechat-sns-live', items: [
+      { id: '301', author: { userId: 'fake-friend', nickname: '合成好友' }, createdAt: 1700000301, text: '原生工具隔离测试', likedByCurrentAccount: false, deleted: false, contentAvailable: true },
     ], nextCursor: null }; },
     writeMoments: async request => { likeWrites.push(request); if (uncertainLike) throw new ChannelError('MOMENTS_RESULT_UNKNOWN', '合成回执未知');
       return { accountId: 'fake-owner', action: 'like', postId: request.query.postId, liked: true, delivery: 'server-ack' }; },
@@ -457,6 +469,7 @@ async function verifyPluginLifecycle(hostContext) {
     const nativeResult = () => requests.at(-1).messages.filter(message => message.role === 'tool').flatMap(message => message.content || [])
       .filter(block => block.type === 'text').map(block => JSON.parse(block.text)).find(value => value.requestedCount === 1);
     await runner.run({ text: '帮我朋友圈点个赞', signal: controller.signal, tools: [tool('native-like-request')] });
+    assert.equal(nativeResult()?.liked, 1, JSON.stringify(nativeResult()));
     assert.equal(likeReads[0].query.userId, 'fake-friend'); assert.equal(likeWrites[0].query.postId, '301');
     assert.equal(nativeResult().liked, 1); assert.equal(nativeResult().results[0].delivery, 'server-ack');
     await runner.run({ text: '帮我朋友圈点个赞', signal: controller.signal, tools: [tool('native-like-request')] });
@@ -468,7 +481,10 @@ async function verifyPluginLifecycle(hostContext) {
   } finally { await likeChannel.close(); }
   mode = 'moments-interaction-tool';
   const interactionStore = new StateStore(path.join(root, 'moments-interactions')), interactionWrites = [];
-  interactionStore.configure('fake-owner', { enabled: true, privatePeers: ['fake-friend'], groups: [], prompt: '' });
+  interactionStore.configure('fake-owner', { enabled: true, privatePeers: ['fake-friend', 'synthetic-friend-0', 'synthetic-friend-1'], groups: [], prompt: '' });
+  interactionStore.setRoleCardSettings({ ...interactionStore.roleCardSettings(), enabled: false }, interactionStore.roleCardSettingsView().revision);
+  const interactionConfig = interactionStore.config.snapshot(interactionStore.data);
+  interactionConfig.remote = { globalAdminIds: ['fake-friend'] }; interactionStore.config.commit(interactionConfig);
   interactionStore.setConversationSettings('fake-owner', 'private', 'fake-friend', { ...interactionStore.conversationSettings('fake-owner', 'private', 'fake-friend'), remoteEnabled: true, adminIds: ['fake-friend'] });
   const interactionPosts = ['601', '602'].map((id, index) => ({ id, author: { userId: 'synthetic-friend-' + index, nickname: '合成好友 ' + index },
     text: '合成真实读取来源 ' + index, createdAt: Math.floor(Date.now() / 1000) - index, imageCount: 0, deleted: false, contentAvailable: true, likedByCurrentAccount: false, visibleCommentEntries: 0, comments: [] }));
@@ -500,7 +516,7 @@ async function verifyPluginLifecycle(hostContext) {
     assert.equal(replySettings.maxFriendRepliesPerRun, 3); assert.equal(replySettings.intervalMinutes, 27); assert.equal(interactionWrites.length, 4);
     interactionChannel.momentsAutomation.configure('fake-owner', { enabled: false });
     mode = 'moments-images-tool';
-    const imageBytes = fs.readFileSync(path.join(repo, 'assets/stickers', fs.readdirSync(path.join(repo, 'assets/stickers'), { recursive: true }).find(file => file.endsWith('.png'))));
+    const imageBytes = require(path.join(repo, 'tests/fixtures/stickers.mjs')).stickerPng();
     const imagePost = { ...interactionPosts[0], imageCount: 1, media: [{ id: 'native-photo', type: 'image' }] }; let imageReads = 0;
     interactionChannel.transport.readMomentsImages = async request => {
       imageReads++; assert.equal(request.query.postId, imagePost.id);
@@ -555,25 +571,14 @@ async function verifyPluginLifecycle(hostContext) {
       jobId: 'abcdef012345', fileName: 'grid.png', requesterId: 'fake-friend', deliveryState: 'sent', serverMessageIds: ['9007199254740999'], prompt: '生成网格' } };
   const generated = await channel.imageMemory.capture(generatedScope, generatedSource, generatedAttachment, original, controller.signal);
   assert.equal(channel.imageMemory.content(generatedScope, generated.id).data, original.data);
-  const quoteKey = 'native-generated-image-quote', quoteTime = Date.now(), quoteMessage = {
-    id: quoteKey, time: quoteTime, chatType: scope.chatType, peerId: scope.peerId, sender: { id: scope.senderId },
-    message: [{ type: 'text', data: { text: '引用这张生成图，实际是什么样？' } },
-      { type: 'reply', data: { id: `wx:${scope.peerId}:9007199254740999`, messageType: 3, senderId: scope.accountId, senderName: 'Agent' } }],
-  };
-  store.remember(quoteKey, quoteTime, { ...scope, key: quoteKey, createdAt: quoteTime, state: 'skipped', question: '引用这张生成图，实际是什么样？' }, { accountId: scope.accountId, message: quoteMessage });
-  const quoted = await resolveMessageReferences(channel, scope,
-    store.history(scope.accountId, scope.chatType, scope.peerId).find(entry => entry.key === quoteKey), controller.signal);
-  assert.equal(quoted[0].images[0].id, generated.id);
   mode = 'generated-image-memory-tool'; const generatedBefore = requests.length;
-  await runner.run({ text: '你刚才生成的网格是什么样？微信引用显示版本不支持，没有图片。\n\n' + referenceText(quoted), signal: controller.signal,
+  await runner.run({ text: '你刚才生成的网格是什么样？', signal: controller.signal,
     tools: [imageMemoryTool(channel.imageMemory, runner, generatedScope, () => {})] });
   const generatedRequests = requests.slice(generatedBefore);
   assert.equal(generatedRequests.length, 4, 'native search, read, isolated vision and final reply');
   assert.equal(generatedRequests.filter(request => request.messages.some(message => message.content?.some(block => block.type === 'image'))).length, 1);
   assert(generatedRequests.at(-1).messages.filter(message => message.role === 'tool').some(message => JSON.stringify(message).includes('重新读取原图')));
-  assert(JSON.stringify(generatedRequests[0].messages).includes(`image-memory://generated/${generated.id}`));
-  assert(store.history(scope.accountId, scope.chatType, scope.peerId).find(entry => entry.key === quoteKey).text.includes('重新读取原图'));
-  assert(channel.memory.view(scope).text.includes('重新读取原图'));
+  assert(channel.imageMemory.list(generatedScope).items.find(image => image.id === generated.id).description.includes('重新读取原图'));
   assert.equal(channel.imageMemory.list(scope).storedCount, 1, 'native generated memory must not overwrite received memory');
   channel.memory.append(scope, savedSource);
   const requestTransport = { media: async input => { assert.equal(input.resourceId, 'native-grid'); return original; } };
@@ -673,7 +678,7 @@ async function verifyPluginLifecycle(hostContext) {
   report.assertions.push('native DSH preserves a 2400x1600 original within its admission budget', 'per-image thumbnail limits reach the native vision prompt');
   report.assertions.push('retired document retrieval and answering are absent from the native workbench');
   report.assertions.push('independent image memory keeps original bytes and generates a bounded thumbnail', 'native saved-image search and read supply the stored 2400x1600 original to isolated vision and return its observation');
-  report.assertions.push('native generated-image search and read retain the actual 2400x1600 pixels, bind the exact quoted message and persist visual observations into quotation history and memory');
+  report.assertions.push('a plain followup searches generated-image memory, reads the saved 2400x1600 original and retains its visual observation without quotation enrichment');
   report.assertions.push('native natural-chat timer runs through the shared channel and real ACK boundary', 'natural decision and public reply use one native model request', 'natural skip produces no WeChat message or signature', 'natural chat inherits no search, task or host tools even with search enabled');
   report.assertions.push('native boilerplate reply keeps all formulas and returns a local review note with one model request');
   report.assertions.push('native complete replies beyond 12000 characters preserve all content and the ending with one model request');

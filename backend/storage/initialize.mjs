@@ -36,6 +36,9 @@ export function initializeState(store, root) {
   )
     throw new ChannelError('STATE_INVALID', '微信插件状态格式无效，未重置已有授权');
   store.data = saved ?? { version: 2, connectionWanted: false, accounts: {}, seen: {}, sessions: {}, records: [] };
+  const authorizationMigrating = store.data.authorizationRevocations === undefined || store.data.authorizationEpochs === undefined;
+  store.data.authorizationRevocations ??= [];
+  store.data.authorizationEpochs ??= {};
   const migrating = saved?.version === 1;
   store.data.storeId ??= migrating ? identity(['wechat-agent-v2', store.root, saved]) : randomUUID();
   store.config = new ConfigurationRepository(store.root, store.data.storeId, store.data);
@@ -124,7 +127,7 @@ export function initializeState(store, root) {
   }
   // A real server acknowledgement survives shutdown. Any unfinished send
   // remains uncertain and can never be automatically replayed.
-  let changed = migrating || !saved || modelConfigMigrating || personaTemplatesMigrating || configurationMigrating;
+  let changed = migrating || !saved || modelConfigMigrating || personaTemplatesMigrating || configurationMigrating || authorizationMigrating;
   const recoveryTime = migrating ? Math.trunc(fs.statSync(store.file).mtimeMs) : Date.now();
   for (const record of store.data.records) {
     if (!pendingStates.has(record.state)) continue;
@@ -146,13 +149,21 @@ export function migrateNamedDirectories(store) {
   );
   if (!moving.length) return;
   store._withSourceLocks(moving, () => {
-    const before = moving.map((view) => [view.key, store.data.conversations[view.key].directory]);
+    const before = moving.map((view) => [view.key, store.data.conversations[view.key].directory, store.data.conversations[view.key].archiveDirectories]);
     for (const view of moving) store._writeAt(view, store._directory(view));
-    for (const view of moving) store.data.conversations[view.key].directory = store._directory(view);
+    for (const view of moving) {
+      const metadata = store.data.conversations[view.key];
+      metadata.archiveDirectories = [...new Set([...(metadata.archiveDirectories || []), metadata.directory])];
+      metadata.directory = store._directory(view);
+    }
     try {
       store._saveRoot();
     } catch (error) {
-      for (const [key, directory] of before) store.data.conversations[key].directory = directory;
+      for (const [key, directory, archives] of before) {
+        store.data.conversations[key].directory = directory;
+        if (archives === undefined) delete store.data.conversations[key].archiveDirectories;
+        else store.data.conversations[key].archiveDirectories = archives;
+      }
       throw error;
     }
   });

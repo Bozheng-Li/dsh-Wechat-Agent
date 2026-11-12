@@ -1,3 +1,4 @@
+import { stickerPng } from './fixtures/stickers.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -19,12 +20,18 @@ function fixture(t) {
   const status = { online: true, account: { id: accountId }, momentsReadReady: true, momentsWriteReady: true, momentsAudienceReady: true };
   const audience = { accountId, membershipComplete: true, source: 'wechat-contacts-live', fetchedAt: new Date(clock).toISOString(), unavailableCount: 0,
     contacts: [{ id: 'alice', name: 'Alice', labelIds: ['1'] }], labels: [{ id: '1', name: '同事', userIds: ['alice'], memberCount: 1 }] };
-  const png = fs.readFileSync(path.join(import.meta.dirname, '../assets/stickers', fs.readdirSync(path.join(import.meta.dirname, '../assets/stickers'), { recursive: true }).find(file => file.endsWith('.png'))));
+  const png = stickerPng();
   const channel = { now: () => clock, store, transport: { status: () => status,
     readMomentsAudience: async () => structuredClone(audience),
-    writeMoments: async args => { writes.push(args); return { accountId, action: 'publish', postId: String(++serial), text: args.query.text, imageCount: args.query.images?.length ?? 0, delivery: 'server-ack',
-      ...(args.query.blockedLabelIds?.length || args.query.blockedUserIds?.length ? { audienceConfirmed: true, audienceSource: audience.source, audienceFetchedAt: audience.fetchedAt,
-        audienceSelection: { blockedLabelIds: args.query.blockedLabelIds, blockedUserIds: args.query.blockedUserIds }, blockedLabelIds: args.query.blockedLabelIds, blockedUserIds: ['alice'] } : {}) }; } },
+    writeMoments: async args => {
+      writes.push(args); const blockedUserIds = args.query.blockedLabelIds?.length || args.query.blockedUserIds?.length ? ['alice'] : [];
+      return { accountId, action: 'publish', postId: String(++serial), text: args.query.text, imageCount: args.query.images?.length ?? 0, delivery: 'server-ack',
+        audienceConfirmed: true, authorizationConfirmed: true, authorizationExcludedCount: 0,
+        authorizedAudienceUserIds: audience.contacts.map(row => row.id).filter(id => !blockedUserIds.includes(id)),
+        audienceSource: audience.source, audienceFetchedAt: audience.fetchedAt,
+        audienceSelection: { blockedLabelIds: args.query.blockedLabelIds || [], blockedUserIds: args.query.blockedUserIds || [] },
+        blockedLabelIds: args.query.blockedLabelIds || [], blockedUserIds };
+    } },
     runner: { run: async input => {
       if (input.mode === 'moments-content-review') { reviews.push(input); return { text: '{"ok":true,"reason":""}' }; }
       models.push(input); const data = JSON.parse(input.text); return { text: JSON.stringify({ theme: data.themes[0] || '日常小观察', text: '今天的小笑话编号' + models.length + '：冰箱里为什么不热闹？因为大家都很冷静。', imagePrompt: data.image ? '一只开心的卡通小狗，无文字' : '' }) }; },
@@ -344,6 +351,7 @@ async function uncertainPublication(t, { evidence = true, labels = true } = {}) 
       accountId, postId: post.postId, createdAt: post.createdAt, textHash: createHash('sha256').update(draft.text).digest('hex'), imageCount: 0,
       submittedBlockedUserIds: ['alice'], returnedBlockedUserIds: [], audienceSelection: settings,
       audienceSource: 'wechat-contacts-live', audienceFetchedAt: new Date(f.now()).toISOString(),
+      authorizedAudienceUserIds: [], authorizationExcludedCount: 0,
     } } : {}) });
   };
   await assert.rejects(f.manager.publishDraft(accountId, draft.id, signal()));
@@ -369,6 +377,8 @@ test('a legacy uncertain post is resolved as deleted only with the matching save
   const f = await uncertainPublication(t, { evidence: false });
   f.channel.momentsAutomation.remember(accountId, [{ ...f.post, id: f.post.postId, author: { userId: accountId } }]);
   f.advance(1000);
+  f.channel.transport.readMoments = async args => ({ accountId, action: args.query.action, source: 'wechat-sns-live',
+    items: [{ ...f.post, id: f.post.postId, author: { userId: accountId } }], nextCursor: null });
   f.channel.transport.writeMoments = async args => { f.writes.push(args); return { accountId, action: 'delete', postId: args.query.postId, deleted: true, delivery: 'server-ack' }; };
   await f.channel.moments.writeOwner({ action: 'delete', postId: f.post.postId }, accountId, 'explicit-delete', signal());
   const count = f.writes.length;
@@ -388,13 +398,13 @@ test('ret -2 during publication verification never becomes proof of deletion or 
   assert.equal(f.writes.length, 1); assert.match(result.message, /尚不能确认/);
 });
 
-test('legacy labels cannot be reconstructed from present-day membership while explicit saved user exclusions can be checked', async t => {
-  for (const labels of [true, false]) {
-    const f = await uncertainPublication(t, { evidence: false, labels });
+test('legacy privacy cannot confirm authorisation without its original snapshot, while saved user exclusions can be checked', async t => {
+  for (const [labels, evidence] of [[true, false], [false, false], [false, true]]) {
+    const f = await uncertainPublication(t, { evidence, labels });
     f.channel.momentsAutomation.remember(accountId, [{ ...f.post, id: f.post.postId, author: { userId: accountId } }]);
     f.channel.transport.readMomentsAudience = async () => { throw Error('Do not reconstruct an old label with new members'); };
     const result = await f.manager.reconcile(accountId, f.run.id, signal());
-    assert.equal(result.confirmed, !labels); assert.equal(f.run.state, labels ? 'published-unverified' : 'published'); assert.equal(f.writes.length, 1);
+    assert.equal(result.confirmed, evidence); assert.equal(f.run.state, evidence ? 'published' : 'published-unverified'); assert.equal(f.writes.length, 1);
   }
 });
 

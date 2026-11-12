@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { ScheduleCountdown } from '../../components/schedule-countdown.jsx';
 import { conversationKey, formatTime, peerName } from "../../shared/conversations.mjs";
 import { MemoryOverview } from "./visuals.jsx";
 import { samePeer, selector } from "../../shared/peers.mjs";
@@ -152,7 +153,8 @@ export function MemoryPage({ rpc, status, rows, initialPeer }) {
                 <p className="wa-help" role="status">
                   {doc.retryKind === 'yield' ? '已优先让位聊天回复，记忆整理会继续' :
                     doc.retryKind === 'extraction' ? '长期记忆提取会自动重试' : '压缩失败后会自动重试'}，
-                  下一次：{formatTime(doc.retryAt, true)}。原文继续保留。
+                  <span className="wa-schedule-time"><span>下一次：{formatTime(doc.retryAt, true)}。原文继续保留。</span>
+                    <ScheduleCountdown at={doc.retryAt} status={status} action="重试" /></span>
                 </p>
               )}
               <Alert text={doc.imageMemoryError} />

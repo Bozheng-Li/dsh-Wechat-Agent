@@ -7,6 +7,7 @@ import { remoteAuthorized } from '../remote/authorization/policy.mjs';
 import { atomicBytes } from '../../backend/storage/atomic-text.mjs';
 import { workPath } from '../work/policy.mjs';
 import { identity } from '../../backend/storage/keys.mjs';
+import { readMomentsWithMemory } from './read.mjs';
 
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const selfNames = new Set(['我', '我的', '自己', '本人', '发起人', 'sender', 'self', 'me']);
@@ -100,9 +101,12 @@ export class MomentsLikeRequests {
         const targetUserId = query.userId; this.check(scope, text, signal, assertAllowed, targetUserId);
         const items = [], seen = new Set(), cursors = new Set(); let cursor;
         for (let page = 0; page < 5; page++) {
-          const result = await this.channel.transport.readMoments({ accountId: scope.accountId, scopeKey,
-            query: { ...query, limit: args.count - items.length, ...(cursor ? { cursor } : {}) } }, signal);
+          const result = await readMomentsWithMemory(this.channel, { accountId: scope.accountId, scopeKey,
+            query: { ...query, limit: args.count - items.length, ...(cursor ? { cursor } : {}) } }, signal,
+            () => this.check(scope, text, signal, assertAllowed, targetUserId));
           this.check(scope, text, signal, assertAllowed, targetUserId);
+          if (result?.selection?.recencyVerified === false)
+            throw new ChannelError('MOMENTS_LIKE_READ_INCOMPLETE', '已读到部分可见动态，但微信未返回完整范围，无法核实最新位置；请恢复读取后重试或明确选择动态');
           if (result?.accountId !== scope.accountId || result.action !== 'user' || !Array.isArray(result.items) ||
               result.items.some(post => !momentsId(post.id) || post.author?.userId !== targetUserId || !Number.isSafeInteger(post.createdAt) || post.createdAt <= 0 || typeof post.likedByCurrentAccount !== 'boolean'))
             throw new ChannelError('MOMENTS_LIKE_READ_INVALID', '微信返回的动态账号、作者或状态不完整，未进行点赞');

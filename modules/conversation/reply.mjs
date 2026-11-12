@@ -1,17 +1,15 @@
 import { promptText } from "../../prompts/loader.mjs";
 import { ChannelError, publicError } from "../../shared/contracts.mjs";
 import { identity } from "../../backend/storage/keys.mjs";
-import { createToolNotifier } from './tool-notices.mjs';
 import { replyMemoryContext } from "./reply-context.mjs";
 import { REMINDER_REACTIONS, reminderReaction, reminderReceipt } from "./task-confirmation.mjs";
 import { simpleReminder } from "../tasks/scheduler.mjs";
 import { conversationTaskTool, mediaReplyTool } from "../tasks/conversation-tools.mjs";
+import { stickerReplyTools } from '../media/sticker-tools.mjs';
 import { conversationMemoryTool } from "../memory/query/tool.mjs";
 import { NATURAL_REASONS, parseNaturalDecision } from "./natural-chat.mjs";
 import { imageMemoryTool } from "../memory/images/tool.mjs";
 import { conversationImageTool } from "../memory/images/request-tool.mjs";
-import { resolveMessageReferences, refreshReferenceImages } from '../memory/images/references.mjs';
-import { messageReferences, referenceText, unavailableMessageContext } from '../../shared/message-references.mjs';
 import { recentGeneratedImageContext } from '../memory/images/recent.mjs';
 import { matches } from "./helpers.mjs";
 import { replyToWork, recordWorkCreation } from '../work/dialogue.mjs';
@@ -24,7 +22,8 @@ import { momentsInteractionTool } from '../tools/moments-interactions.mjs';
 import { momentsImagesTool } from '../tools/moments-images.mjs';
 import { chatMomentsMedia } from '../moments/media.mjs';
 import { momentsPublishingTools } from '../tools/moments-publishing.mjs';
-import { MOMENTS_PUBLISH_RPC_TIMEOUT_MS } from '../../shared/moments-publishing.mjs';
+import { timeLimitMs } from '../../shared/time-settings.mjs';
+import { personRoleCardTool, personRoleContext } from '../memory/roles/tool.mjs';
 
 export async function processReply(channel, item) {
   const { record } = item;
@@ -43,7 +42,7 @@ export async function processReply(channel, item) {
     if (momentsWaitExtended || !['preview', 'publish'].includes(action)) return;
     controller.signal.throwIfAborted();
     momentsWaitExtended = true; clearTimeout(timeout);
-    timeout = setTimeout(() => controller.abort(new ChannelError('MODEL_TIMEOUT', '朋友圈处理达到 1 小时时限，未继续发送')), MOMENTS_PUBLISH_RPC_TIMEOUT_MS);
+    timeout = setTimeout(() => controller.abort(new ChannelError('MODEL_TIMEOUT', '朋友圈处理达到设定时限，未继续发送')), timeLimitMs(channel.store, 'momentsPublishTimeoutMinutes') + 15000);
     timeout.unref?.();
   };
   let replySignal = controller.signal;
@@ -124,13 +123,9 @@ export async function processReply(channel, item) {
           peerId: record.peerId, senderId: record.senderId, senderName: record.sender,
           requestedAt: record.createdAt, requestKey: record.key };
         if (work.action !== 'help') { channel.work.assertAllowed(workScope, controller.signal); item.workRequestAuthorized = true; }
-        if (['create', 'continue'].includes(work.action)) item.quotedReferences = await resolveMessageReferences(channel, workScope, {
-          key: record.key, messageId: item.message.serverMessageId || item.message.id, time: record.createdAt,
-          observedAt: record.createdAt, references: messageReferences(item.message.message || [], record.peerId),
-        }, controller.signal, () => channel.work.assertAllowed(workScope, controller.signal));
         if (item.workNatural && work.request?.length > 12000) throw new ChannelError('WORK_REQUEST_INVALID', '工作要求应为 1–12000 字');
         result = item.workNatural && work.action !== 'input-required' ? await replyToWork(channel, item, workScope, controller.signal)
-          : { text: channel.work.handle(work, workScope, { defer: true, quotedReferences: item.quotedReferences, onCreated: job => recordWorkCreation(channel, item, job) }) };
+          : { text: channel.work.handle(work, workScope, { defer: true, onCreated: job => recordWorkCreation(channel, item, job) }) };
       } catch (error) {
         if (['STATE_WRITE_FAILED', 'CONFIG_CHANGED'].includes(error?.code) || controller.signal.aborted ||
             item.workRequestAuthorized && error?.code === 'WORK_NOT_AUTHORIZED') throw error;
@@ -199,14 +194,6 @@ export async function processReply(channel, item) {
         const promptStrategy = channel.store.modelConfig().promptStrategy ?? 'legacy';
         const history = channel.context(item);
         await channel.memory.enrich(record, channel.runner, channel.transport, controller.signal);
-        const quotedEntry = channel.memory.load(record).entries.find(entry => entry.key === record.key) ?? {
-          key: record.key, messageId: item.message.serverMessageId || item.message.id, time: record.createdAt,
-          observedAt: record.createdAt, references: messageReferences(item.message.message || [], record.peerId),
-        };
-        const quotedReferences = await resolveMessageReferences(channel, scope, quotedEntry, controller.signal,
-          () => { controller.signal.throwIfAborted(); channel.assertAllowed(item); });
-        for (const image of quotedReferences.flatMap(ref => ref.images ?? []))
-          imageReferences.push({ ...scope, collection: image.collection, id: image.id, digest: image.digest });
         const currentMemory = channel.memory.load(record);
         channel.longMemory.capture(record, currentMemory);
         if (
@@ -227,8 +214,6 @@ export async function processReply(channel, item) {
           throw new ChannelError('MEMORY_CHANGED', '记忆已清空，已取消旧上下文回复');
         doc.entries = doc.entries.map((entry) => ({
           ...entry,
-          ...(entry.references ? { references: currentMemory.entries.find(value => value.key === entry.key)?.references || entry.references,
-            text: currentMemory.entries.find(value => value.key === entry.key)?.text || entry.text } : {}),
           attachments: currentMemory.entries.find((value) => value.key === entry.key)?.attachments || entry.attachments,
         }));
         if (item.memorySnapshot) {
@@ -241,7 +226,6 @@ export async function processReply(channel, item) {
         const lookupSnapshot = doc;
         const currentImage = currentMemory.entries.find((entry) => entry.key === record.key);
         let generatedContext = '';
-        const unavailableContext = unavailableMessageContext(item.message);
         const imageContext = currentImage?.attachments
           ?.map((image) =>
             image.type === 'face'
@@ -282,19 +266,14 @@ export async function processReply(channel, item) {
         if (
           !item.naturalDecision &&
           library.settings.enabled &&
-          library.counts.enabled &&
-          (requestedImage ||
-            (sinceMedia >= library.settings.minGapMessages && channel.random() * 100 < library.settings.probability))
+          library.counts.enabled
         )
-          tools.push(
-            mediaReplyTool(
-              channel.library,
-              scope,
-              () => {
+        {
+          const assertMediaAllowed = () => {
                 controller.signal.throwIfAborted();
                 channel.assertAllowed(item);
-              },
-              (value) => {
+              };
+          const selectMedia = (value) => {
                 selectedMedia = value;
                 channel.store.update(record, {
                   replyMedia: {
@@ -302,13 +281,24 @@ export async function processReply(channel, item) {
                     name: value.asset.name,
                     kind: value.asset.kind,
                     description: value.asset.description,
+                    usage: value.asset.usage || '',
                   },
                 });
-              }
-            )
-          );
+              };
+          const options = { excludeIds: lastMedia?.replyMedia?.id ? [lastMedia.replyMedia.id] : [], random: channel.random,
+            explicitRequest: requestedImage, cooldown: sinceMedia < library.settings.minGapMessages };
+          if (channel.library.search(record.accountId, '', { kind: 'sticker', limit: 1 }).length)
+            tools.push(...stickerReplyTools(channel.library, scope, assertMediaAllowed, selectMedia, options));
+          if ((requestedImage || sinceMedia >= library.settings.minGapMessages) && channel.library.search(record.accountId, '', { kind: 'image', limit: 1 }).length)
+            tools.push(mediaReplyTool(channel.library, scope, assertMediaAllowed, selectMedia, { ...options, imagesOnly: true }));
+        }
         const onDemand = item.config.memoryMode === 'on-demand';
         const memoryReadResults = [];
+        tools.push(personRoleCardTool(channel, scope, () => {
+          controller.signal.throwIfAborted(); channel.assertAllowed(item);
+        }, { history: lookupSnapshot.entries, onResult: value => {
+          memoryReadResults.push(value); if (memoryReadResults.length > 2) memoryReadResults.shift();
+        } }));
         let otherToolUsed = false;
         if (!item.naturalDecision)
           tools.push(
@@ -404,7 +394,7 @@ export async function processReply(channel, item) {
             await channel.work.generatedImages.sync(scope, controller.signal, assertAllowed, { before: record.createdAt });
             const saved = channel.imageMemory.list(generatedScope, { limit: 1, before: record.createdAt });
             generatedContext = recentGeneratedImageContext(channel, scope, record.createdAt,
-              { references: quotedReferences, onRead: reference => imageReferences.push(reference) });
+              { onRead: reference => imageReferences.push(reference) });
             if (saved.settings.enabled && saved.total)
               tools.push(imageMemoryTool(channel.imageMemory, channel.runner, generatedScope, assertAllowed,
                 { maxTime: record.createdAt, onRead: reference => imageReferences.push(reference) }));
@@ -432,6 +422,15 @@ export async function processReply(channel, item) {
           persona,
           promptStrategy,
         });
+        const personContext = onDemand ? '' : personRoleContext(channel, scope,
+          { text: item.text, history: doc.entries, maxChars: 1100 });
+        if (personContext) {
+          const lines = [personContext];
+          for (const line of (context.memory || '').split('\n'))
+            if (lines.join('\n').length + line.length + 1 <= 3000) lines.push(line);
+          context.memory = lines.filter(Boolean).join('\n');
+          context.referenceChars = context.memory.length;
+        }
         channel.store.update(record, { memoryContext: {
           mode: context.mode,
           recentMessages: context.history.length,
@@ -446,13 +445,9 @@ export async function processReply(channel, item) {
         };
         controller.signal.throwIfAborted();
         channel.assertAllowed(item);
-        const notifyTool = createToolNotifier(channel, { scope, requestKey: record.key, signal: controller.signal,
-          assertAllowed: () => channel.assertAllowed(item), presentation: { persona, prompt: item.prompt,
-            identityMarkdown: channel.runner.getRuntimeSettings?.()?.identityMarkdown } });
         result = await channel.runner.run({
           text: item.text + (imageContext ? promptText("conversation/templates.json", "reply-text-4", [imageContext]) : '') +
-            (quotedReferences.length ? '\n\n' + referenceText(quotedReferences) : '') +
-            (generatedContext ? '\n\n' + generatedContext : '') + (unavailableContext ? '\n\n' + unavailableContext : ''),
+            (generatedContext ? '\n\n' + generatedContext : ''),
           group: item.message.chatType === 'group',
           mode: item.mode,
           prompt: item.prompt,
@@ -463,9 +458,8 @@ export async function processReply(channel, item) {
           tools,
           scheduledTask: item.scheduled,
           assertAllowed: () => { controller.signal.throwIfAborted(); channel.assertAllowed(item); },
-          onBeforeTool: (name, args, execution) => {
-            if (!['wechat_memory', 'wechat_capabilities'].includes(name)) otherToolUsed = true;
-            return notifyTool(name, args, execution);
+          onBeforeTool: name => {
+            if (!['wechat_memory', 'wechat_role_card', 'wechat_capabilities'].includes(name)) otherToolUsed = true;
           },
           speaker: item.ambient && item.naturalDecision ? undefined : { id: record.senderId, name: record.sender },
           account: channel.transport.status().account,
@@ -506,14 +500,14 @@ export async function processReply(channel, item) {
                   },
                 })
               : selectedMedia.caption;
-        if (!selectedMedia && !item.scheduled && !item.naturalDecision && (!otherToolUsed || generatedContext || quotedReferences.some(ref => ref.images?.length)) &&
+        if (!selectedMedia && !item.scheduled && !item.naturalDecision && (!otherToolUsed || generatedContext) &&
             typeof channel.runner.reviewMemoryReply === 'function') {
           const reviewed = await channel.runner.reviewMemoryReply({ text: item.text, persona: role?.persona || persona,
             speaker: { id: record.senderId, name: record.sender }, group: record.chatType === 'group',
-            currentContext: [imageContext, quotedReferences.length ? referenceText(refreshReferenceImages(channel.imageMemory, scope, quotedReferences)) : '',
-              generatedContext ? recentGeneratedImageContext(channel, scope, record.createdAt, { references: quotedReferences }) : '', unavailableContext].filter(Boolean).join('\n'),
+            currentContext: [imageContext,
+              generatedContext ? recentGeneratedImageContext(channel, scope, record.createdAt) : ''].filter(Boolean).join('\n'),
             imageEvidence: { available: imageReferences.length > 0, visionEnabled: channel.store.modelConfig().vision !== false,
-              sent: !!generatedContext || quotedReferences.some(ref => ref.messageId && ref.images?.some(image => image.collection === 'generated')) },
+              sent: !!generatedContext },
             memory: context.memory, history: context.history, adminNotes: role ? role.adminNotes : '',
             extraReadResults: memoryReadResults }, result.text, {
               signal: controller.signal, assertAllowed: () => channel.assertAllowed(item),
@@ -568,12 +562,10 @@ export async function processReply(channel, item) {
     });
     let replyMedia;
     if (selectedMedia) {
-      const asset = await channel.library.prepareSendContent(record.accountId, selectedMedia.asset.id, replySignal);
+      const asset = channel.library.resolveAsset(record.accountId, selectedMedia.asset.id);
       replyMedia = { id: asset.id, name: asset.name, kind: asset.kind, description: asset.description };
-      message.push({
-        type: asset.kind === 'sticker' ? 'face' : 'image',
-        data: { base64: asset.data, mediaType: asset.mediaType },
-      });
+      message.push(await channel.library.prepareSendSegment(record.accountId, asset.id, replySignal,
+        { nativeReady: channel.transport.status().nativeStickersReady !== false }));
     }
     if (!message.length) throw new ChannelError('MODEL_EMPTY', '本轮没有可发送的文字或图片');
     replySignal.throwIfAborted();

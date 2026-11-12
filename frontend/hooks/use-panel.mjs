@@ -12,6 +12,7 @@ export function usePanel(connection) {
     [page, setPage] = useState('overview'),
     [returnPages, setReturnPages] = useState({});
   const [memoryTab, setMemoryTab] = useState('conversation');
+  const [automationTarget, setAutomationTarget] = useState({});
   const [error, setError] = useState(''),
     [connectionError, setConnectionError] = useState(''),
     [busy, setBusy] = useState(''),
@@ -85,6 +86,7 @@ export function usePanel(connection) {
       setRecordData(null);
       setRecordError('');
       setMemoryTab('conversation');
+      setAutomationTarget(current => ({ section: current.section }));
       setDetailKey(null);
       detailRef.current = null;
       next.conversation = null;
@@ -170,7 +172,8 @@ export function usePanel(connection) {
   useEffect(() => {
     if (page === 'authorization' && status?.online && !contacts && !busyRef.current) void action('contacts');
   }, [page, authTab, status?.online, status?.account?.id]);
-  const navigate = (next, from) => {
+  const navigate = (next, from, target) => {
+    if (next === 'automation') setAutomationTarget(target || {});
     if (next === 'memory-review') {
       next = 'memory';
       setMemoryTab('review');
@@ -334,7 +337,7 @@ export function usePanel(connection) {
     text: enabled ? '会话已授权，可进入设置选择回复模式。' : '已撤销此会话授权，已有记录继续保留。',
   });
   const blocked = !!busy || !!status?.startupError;
-  const navPage = ['model', 'identity', 'persona', 'storage', 'changelog', 'administrators', 'image-generation', 'diagnostics'].includes(page)
+  const navPage = ['model', 'identity', 'persona', 'storage', 'changelog', 'administrators', 'image-generation', 'diagnostics', 'time', 'automation'].includes(page)
     ? 'settings'
     : page === 'conversation'
       ? 'authorization'
@@ -350,6 +353,7 @@ export function usePanel(connection) {
     setPage,
     memoryTab,
     setMemoryTab,
+    automationTarget,
     error,
     busy,
     busyArea,

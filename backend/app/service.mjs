@@ -13,11 +13,17 @@ import { imageGenerationSettings } from '../../shared/image-generation.mjs';
 import { imageMemoryCollection } from '../../shared/image-memory.mjs';
 import { resolveMomentsQuery } from '../../modules/moments/service.mjs';
 import { readMomentsImageContext } from '../../modules/moments/image-context.mjs';
+import { readMomentsWithMemory } from '../../modules/moments/read.mjs';
 import { momentsImage } from '../../modules/moments/media.mjs';
 import { MATERIAL_ENDPOINTS } from '../../shared/moments-materials.mjs';
 import { MOMENTS_LIKE_ENDPOINTS } from '../../shared/moments-likes.mjs';
 import { MOMENTS_INTERACTION_ENDPOINTS } from '../../shared/moments-interactions.mjs';
 import { OwnerCleanup } from '../../modules/cleanup/service.mjs';
+import { TRACE_ENDPOINTS, traceQuery } from '../../modules/traces/api.mjs';
+import { listTimeSettings } from '../../modules/settings/time.mjs';
+import { timeSettings, preserveTimeValues } from '../../shared/time-settings.mjs';
+import { filledRoleCardFields } from '../../shared/role-card.mjs';
+import { assertConversationAuthorized, conversationAuthorized } from '../../shared/authorization.mjs';
 
 export function createPluginService({
   ctx,
@@ -75,7 +81,8 @@ export function createPluginService({
       payload.peerId.endsWith('@chatroom') !== (payload.chatType === 'group')
     )
       throw new ChannelError('INVALID_PEERS', '会话类型或 ID 不正确，请重新选择会话');
-    return { accountId: payload.accountId, chatType: payload.chatType, peerId: payload.peerId };
+    const scope = { accountId: payload.accountId, chatType: payload.chatType, peerId: payload.peerId };
+    assertConversationAuthorized(store, scope); return scope;
   };
   const status = () => {
     const state = worker?.status() ?? {
@@ -120,7 +127,10 @@ export function createPluginService({
       search: runner?.search?.status?.() ?? { credentialStore: false, credentials: { dsh: false, tavily: false } },
       imageGeneration: channel?.work?.imageGeneration?.status() ?? { ...imageGenerationSettings(), credentialStore: false, credentialConfigured: false },
       memory: { windowChars: channel?.memory?.index.windowChars ?? 100000, path: channel?.memory?.root || null },
+      timeSettings: timeSettings(store?.config?.section('timeSettings')),
       scheduler: { enabled: !!scheduler && !scheduler.stopped, error: scheduler?.error || null },
+      authorization: { pendingCount: store?.data.authorizationRevocations?.filter(row => row.accountId === state.account?.id).length || 0,
+        error: channel?.authorization?.error || null },
       moments: state.account && channel?.momentsAutomation ? channel.momentsAutomation.list(state.account.id) : null,
       storage: {
         ...describeWorkspace(root, store),
@@ -135,6 +145,7 @@ export function createPluginService({
         state.account && store
           ? store
               .conversations(state.account.id)
+              .filter(peer => conversationAuthorized(store, peer))
               .map((peer) => ({
                 ...peer,
                 naturalStatus: channel?.natural?.summary(peer) ?? null,
@@ -202,6 +213,16 @@ export function createPluginService({
     call(endpoint, payload = {}, signal) {
       assertLive(signal);
       if (endpoint === 'status') return status();
+      if (payload.accountId && !['settings', 'contacts'].includes(endpoint) && channel?.authorization?.isCleaning(payload.accountId))
+        throw new ChannelError('AUTHORIZATION_CLEANUP_PENDING', '正在清空撤销授权的资料，相关操作保持停止；请在完成后重试。');
+      if (TRACE_ENDPOINTS.includes(endpoint)) {
+        const account = currentAccount(payload);
+        if (relocating) throw new ChannelError('WORKSPACE_MOVING', '正在切换数据目录，请稍后查看执行轨迹');
+        const pending = traceQuery(channel.traces, endpoint, account.id, payload, AbortSignal.any([lifetime, ...(signal ? [signal] : [])]));
+        featureOperations.add(pending);
+        void pending.finally(() => featureOperations.delete(pending)).catch(() => {});
+        return pending;
+      }
       if (endpoint === 'cleanup.preview' || endpoint === 'cleanup.delete') {
         const account = currentAccount(payload);
         if (relocating) throw new ChannelError('PLUGIN_STOPPING', '数据目录正在切换，请稍后再清理');
@@ -226,6 +247,7 @@ export function createPluginService({
       if (endpoint === 'changelog') return { markdown: fs.readFileSync(resourcePath('CHANGELOG.md'), 'utf8') };
       if (startupError) throw new ChannelError(startupError.code, startupError.message);
       if (endpoint === 'identity.get') return identity.view();
+      if (endpoint === 'time.list') return listTimeSettings({ store, channel, currentAccount, conversation }, payload);
       if (WORKBENCH_ENDPOINTS.includes(endpoint)) {
         const combined = AbortSignal.any([lifetime, ...(signal ? [signal] : [])]);
         // Workbench operations share the instance lifetime and caller cancellation.
@@ -268,7 +290,7 @@ export function createPluginService({
           const check = () => { assertLive(combined); currentAccount(payload); };
           const resolved = await resolveMomentsQuery(worker, query, { accountId: account.id, senderId: account.id }, combined, check); check();
           let result;
-          try { result = await worker.readMoments({ accountId: account.id, scopeKey: 'owner:' + account.id, query: resolved }, combined); }
+          try { result = await readMomentsWithMemory(channel, { accountId: account.id, scopeKey: 'owner:' + account.id, query: resolved }, combined, check); }
           catch (error) {
             check();
             if (['detail', 'comments'].includes(resolved.action)) channel.momentsAutomation?.recordReadFailure(account.id, resolved.postId, error);
@@ -289,7 +311,7 @@ export function createPluginService({
         const combined = AbortSignal.any([lifetime, ...(signal ? [signal] : [])]);
         assertLive(combined);
         if (endpoint === 'moments.likes.list') return likes.list(account.id);
-        if (endpoint === 'moments.likes.configure') return likes.configure(account.id, payload.settings);
+        if (endpoint === 'moments.likes.configure') return likes.configure(account.id, payload.preserveTimeSettings ? preserveTimeValues('likes', payload.settings, likes.rule(account.id).settings) : payload.settings);
         if (endpoint === 'moments.likes.cancel') return likes.cancel(account.id);
         if (typeof payload.requestId !== 'string' || !/^ui-moments-[a-f0-9-]{36}$/.test(payload.requestId))
           throw new ChannelError('MOMENTS_LIKE_REQUEST_INVALID', '本次执行编号缺失，请重新打开操作面板');
@@ -305,7 +327,7 @@ export function createPluginService({
           currentAccount(payload); assertLive(combined);
           switch (endpoint) {
             case 'moments.materials.list': return materials.list(account.id);
-            case 'moments.materials.configure': return materials.configure(account.id, payload.settings);
+            case 'moments.materials.configure': return materials.configure(account.id, payload.preserveTimeSettings ? preserveTimeValues('materials', payload.settings, materials.account(account.id).settings) : payload.settings);
             case 'moments.materials.save': return materials.put(account.id, payload);
             case 'moments.materials.delete': return materials.remove(account.id, payload.id, payload.revision);
             case 'moments.materials.image': { const { data, mediaType } = materials.image(account.id, payload.id); return { data, mediaType }; }
@@ -329,7 +351,8 @@ export function createPluginService({
         if (endpoint === 'moments.interactions.list') return manager.list(account.id, payload.id);
         if (endpoint === 'moments.interactions.stop') return manager.automation.cancel(account.id);
         if (endpoint === 'moments.interactions.configure') {
-          const pending = manager.automation.configure(account.id, payload.settings, payload.revision, combined, check);
+          const settings = payload.preserveTimeSettings ? preserveTimeValues('interactions', payload.settings, manager.automation.rule(account.id).settings) : payload.settings;
+          const pending = manager.automation.configure(account.id, settings, payload.revision, combined, check);
           featureOperations.add(pending); void pending.finally(() => featureOperations.delete(pending)).catch(() => {}); return pending;
         }
         if (endpoint === 'moments.interactions.edit') return manager.edit(account.id, payload.id, payload.revision, payload.rows, combined, check);
@@ -357,9 +380,9 @@ export function createPluginService({
         const requestId = () => { if (typeof payload.requestId !== 'string' || !/^ui-moments-[a-f0-9-]{36}$/.test(payload.requestId)) throw new ChannelError('MOMENTS_PLAN_INVALID', '操作编号缺失，请重新打开计划面板'); return payload.requestId; };
         const pending = (async () => {
           switch (endpoint) {
-            case 'moments.publishing.configure': return manager.configure(account.id, payload.settings, combined, check);
+            case 'moments.publishing.configure': return manager.configure(account.id, payload.preserveTimeSettings ? preserveTimeValues('publishing', payload.settings, manager.account(account.id).settings) : payload.settings, combined, check);
             case 'moments.publishing.cancel': return manager.cancel(account.id);
-            case 'moments.plans.save': return manager.savePlan(account.id, payload.settings, payload.id, requestId(), combined, check);
+            case 'moments.plans.save': return manager.savePlan(account.id, payload.preserveTimeSettings ? preserveTimeValues('plan', payload.settings, payload.id ? manager.plan(account.id, payload.id).settings : { graceMinutes: manager.account(account.id).settings.automatic.content.graceMinutes }) : payload.settings, payload.id, requestId(), combined, check);
             case 'moments.plans.enable': return manager.setEnabled(account.id, payload.id, payload.enabled);
             case 'moments.plans.delete': return manager.removePlan(account.id, payload.id);
             case 'moments.plans.preview': return manager.preview(account.id, payload.settings, requestId(), combined, check);
@@ -377,7 +400,7 @@ export function createPluginService({
         const account = currentAccount(payload), manager = channel.momentsAutomation;
         if (!manager) throw new ChannelError('MOMENTS_UNAVAILABLE', '朋友圈组件尚未加载');
         if (endpoint === 'moments.list') return manager.list(account.id);
-        if (endpoint === 'moments.configure') return manager.configure(account.id, payload.settings);
+        if (endpoint === 'moments.configure') return manager.configure(account.id, payload.preserveTimeSettings ? preserveTimeValues('replies', payload.settings, manager.rule(account.id).settings) : payload.settings);
         const combined = AbortSignal.any([lifetime, ...(signal ? [signal] : [])]);
         const pending = (async () => {
           if (endpoint === 'moments.discover') return manager.discover(account.id, combined, manager.rule(account.id).settings.lookbackDays);
@@ -449,18 +472,39 @@ export function createPluginService({
         return pending;
       }
       if (endpoint === 'memory.global.get') return channel.longMemory.view(currentAccount(payload).id);
-      if (endpoint === 'memory.role.get') {
-        const scope = channel.longMemory.selector(conversation(payload)), card = store.roleCards.view(scope),
-          section = channel.longMemory.view(scope.accountId).sections.find(section => section.key === scope.key);
-        return { ...card, conversationName: scope.name, factCount: section?.facts.length || 0,
-          personalFactCount: section?.facts.filter(fact => fact.subjectId && fact.subjectId !== 'group').length || 0 };
+      if (endpoint === 'memory.role.settings') return store.roleCardSettingsView();
+      if (endpoint === 'memory.role.list') {
+        const accountId = currentAccount(payload).id;
+        return { people: store.roleCards.list(accountId).map(view => ({
+          personId: view.personId, roleId: view.roleId, name: view.card.label || view.aliases.at(-1) || view.personId,
+          aliases: view.aliases, encounters: view.encounters, updatedAt: view.updatedAt, reviewedAt: view.reviewedAt,
+          pendingCount: view.pendingCount, nextAt: view.nextAt, filledFields: filledRoleCardFields(view.card, view.conflicts).length,
+          preview: Object.fromEntries(['addressAs', 'relationship', 'preferences', 'background', 'notes'].map(field =>
+            [field, view.conflicts.some(row => row.field === field) ? '' : view.card[field].slice(0, 180)])),
+          conflictCount: view.conflicts.length,
+          error: view.error || store.roleCards.errors.get(view.roleId) || null,
+          state: channel.personMemory.state(view),
+        })), scanning: channel.personMemory.scanning, errors: [...store.roleCards.errors.values()] };
       }
-      if (endpoint === 'assets.list') return channel.library.list(currentAccount(payload).id, payload);
+      if (endpoint === 'memory.role.get') {
+        currentAccount(payload);
+        const scope = store.roleCards.select(payload), card = store.roleCards.view(scope);
+        return { ...card, state: channel.personMemory.state(card) };
+      }
+      if (endpoint === 'assets.list') {
+        const account = currentAccount(payload);
+        return { ...channel.library.list(account.id, payload), stickers: channel.stickers.view(account.id) };
+      }
       if (endpoint === 'assets.content')
         return channel.library.getContent(currentAccount(payload).id, payload.assetId, { enabledOnly: false });
-      if (endpoint === 'assets.packs.content') {
-        currentAccount(payload);
-        return channel.library.builtins.preview(payload.packId, payload.assetId);
+      if (endpoint === 'assets.thumbnail') {
+        const account = currentAccount(payload);
+        const pending = channel.library.thumbnail(account.id, payload.assetId, AbortSignal.any([lifetime, ...(signal ? [signal] : [])])).then(preview => {
+          assertLive(signal); currentAccount(payload); return preview;
+        });
+        featureOperations.add(pending);
+        void pending.finally(() => featureOperations.delete(pending)).catch(() => {});
+        return pending;
       }
       if (endpoint === 'tasks.list') {
         const account = currentAccount(payload),

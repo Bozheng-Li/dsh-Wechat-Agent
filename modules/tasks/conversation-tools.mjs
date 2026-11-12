@@ -263,12 +263,12 @@ export function webSearchTool(getWeb, reportResult = () => {}, { assertAllowed =
   );
 }
 
-export function mediaReplyTool(library, scope, assertAllowed, select) {
+export function mediaReplyTool(library, scope, assertAllowed, select, { excludeIds = [], random = Math.random, imagesOnly = false } = {}) {
   return tool(
     'wechat_reply_media',
-    '从管理员导入的素材库中查找并选择本轮要回复的一张图片或表情包。先按情绪/含义 search，再用素材 ID select；禁止随意编造 ID 或文件路径。不为每句话强塞表情。select 仅选择，真正发送由微信通道核对授权和回执完成；不要声称已经发送。只发图片时 caption 为 null，想配一句话时 caption 填自然口语；选择后最终正文不会再次重复发送。',
+    '从当前账号的微信收藏、聊天收集及自行导入的素材中选择本轮一张表情或图片。按含义 search 后用 ID select；用户要随机表情、斗图或没有指定含义时可用 random，优先微信收藏并避开刚发过的表情。没有含义的表情不能凭名称猜画面。禁止编造 ID、路径或下载网址，不为每句话强塞表情。select/random 只选择，随后微信通道优先原生发送，接口明确拒绝时才用已保存图片替代；结果不明不会重发。只发表情 caption 为 null，配文只填一句自然口语，不要声称工具已经发送。',
     {
-      action: { type: 'string', enum: ['search', 'select'] },
+      action: { type: 'string', enum: ['search', 'select', 'random'] },
       query: { type: 'string', maxLength: 120 },
       kind: { type: 'string', enum: ['sticker', 'image'] },
       assetId: { type: 'string', maxLength: 100 },
@@ -285,16 +285,22 @@ export function mediaReplyTool(library, scope, assertAllowed, select) {
       if (args.action === 'search') {
         if (args.query !== undefined && (typeof args.query !== 'string' || args.query.length > 120))
           throw new ChannelError('INVALID_ASSET_QUERY', '素材搜索词最多 120 字');
-        return { ok: true, assets: library.search(scope.accountId, args.query || '', { kind: args.kind, limit: 8 }) };
+        return { ok: true, assets: library.search(scope.accountId, args.query || '', { kind: imagesOnly ? 'image' : args.kind, limit: 8 }).map(asset => ({
+          id: asset.id, name: asset.name, kind: asset.kind, description: asset.description, tags: asset.tags,
+          source: asset.nativeSticker?.favorite ? '微信收藏' : asset.sourceMessage ? '聊天收集' : '自行导入', native: !!asset.nativeSticker,
+        })) };
       }
-      if (args.action !== 'select') throw new ChannelError('INVALID_ASSET_ACTION', '请选择查找或选择素材');
+      if (!['select', 'random'].includes(args.action)) throw new ChannelError('INVALID_ASSET_ACTION', '请选择查找、选择或随机表情');
+      if (args.query !== undefined && (typeof args.query !== 'string' || args.query.length > 120)) throw new ChannelError('INVALID_ASSET_QUERY', '素材搜索词最多 120 字');
       if (
         args.caption !== undefined &&
         args.caption !== null &&
         (typeof args.caption !== 'string' || args.caption.length > 2000 || /\u0000/.test(args.caption))
       )
         throw new ChannelError('INVALID_ASSET_CAPTION', '配文最多 2000 字');
-      const asset = library.resolveAsset(scope.accountId, args.assetId);
+      const asset = args.action === 'random' ? library.randomSticker(scope.accountId, { query: args.query || '', excludeIds, random }) : library.resolveAsset(scope.accountId, args.assetId);
+      if (imagesOnly && asset?.kind !== 'image') throw new ChannelError('STICKER_READ_REQUIRED', '表情请使用 wechat_sticker_read 和 wechat_sticker_send；此入口只选择普通图片');
+      if (!asset) return { ok: false, code: 'STICKER_EMPTY', message: '当前没有符合要求的可用表情，可以正常文字回复，不能声称已发表情。' };
       select({ asset, caption: typeof args.caption === 'string' ? args.caption.trim() : '' });
       return {
         ok: true,

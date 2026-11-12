@@ -75,5 +75,6 @@ export async function generateMomentsContent(channel, settings, recentPosts, at,
   return { theme: generated.theme.trim(), text, imagePrompt: offline ? '' : generated.imagePrompt.trim(), selectedMaterials, imageMaterialId: imageId,
     ...(offline ? { textOnly: true } : {}), fallbacks,
     materialContextRefs: [...new Map([...materials.map(item => ({ id: item.id, revision: item.revision })), ...originalRefs].map(ref => [ref.id, ref])).values()],
+    materialSources: materials.map(item => ({ materialId: item.id, sources: materialStore.item(channel.transport.status().account.id, item.id).sources })),
     sources: [...(research?.sources ?? []), ...materials.filter(item => selected.includes(item.id) && item.url).map(item => ({ title: item.title, url: item.url }))] };
 }

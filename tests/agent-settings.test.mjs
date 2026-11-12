@@ -55,6 +55,25 @@ test('persona, participation instructions and account prompt enter the isolated 
   assert.deepEqual(f.calls[0].meta, { cwd: runtime.workspacePath });
 });
 
+test('person extraction has its own session and JSON contract even without a system override', async () => {
+  const f = fixture({ responseText: '{"updates":[],"conflicts":[]}' });
+  await new DshAgentRunner(f.ctx, () => null, () => ({
+    persona: { name: '不应进入后台的人设名字', prompt: '每次先叫主人。' },
+    identityMarkdown: '# 不应进入后台的全局身份',
+    modelConfig: { webSearch: true },
+  })).extractRoleCard({
+    text: '{"sources":[{"text":"以后叫我主人"}]}',
+    sessionId: 'active-chat-session', mode: 'default', signal: signal(),
+    tools: [{ name: 'chat_tool', description: 'chat only', execute() { assert.fail('no chat tools'); } }],
+  });
+  assert.notEqual(f.calls[0].sessionId, 'active-chat-session');
+  assert.equal(f.calls[0].resumeSessionId, undefined);
+  assert(f.scopes[0].prompt.text.includes('只输出 JSON'));
+  assert(f.scopes[0].prompt.text.includes('后台人物记忆 Agent'));
+  assert(!f.scopes[0].prompt.text.includes('不应进入后台'));
+  assert.deepEqual(f.scopes[0].rules, [{ allow: [] }]);
+});
+
 test('natural skip is one model call with persona and global identity, no tools and no public JSON', async () => {
   const f = fixture({ responseText: '{"action":"skip","reason":"repeated","text":""}' });
   let decision;

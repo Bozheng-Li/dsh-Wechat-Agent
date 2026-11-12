@@ -3,6 +3,7 @@ import { RoomPicker } from "../../components/room-picker.jsx";
 import { conversationKey, peerId, peerType, peerName, formatTime } from "../../shared/conversations.mjs";
 import { Button } from '../../components/button.jsx';
 import { PageHead } from '../../components/page-ui.jsx';
+import { AutomationLink } from '../../components/automation-link.jsx';
 
 const quality = (value) =>
   ({ original: '原图', full: '完整图片', thumbnail: '仅微信缩略图', unknown: '清晰度未核实' })[value] || '清晰度未核实';
@@ -17,14 +18,13 @@ function GenerationSource({ item }) {
   </div>;
 }
 
-export function ImageMemoryPage({ rpc, status, rows = [], initialPeer, active = true, collection = 'conversation' }) {
+export function ImageMemoryPage({ rpc, status, rows = [], initialPeer, active = true, collection = 'conversation', onNavigate }) {
   const accountId = status.account?.id, generated = collection === 'generated',
     title = generated ? '生成图片记忆' : '会话图片记忆';
   const [selected, setSelected] = useState(() => initialPeer || rows[0] || null),
     [doc, setDoc] = useState(null);
   const [query, setQuery] = useState(''),
-    [offset, setOffset] = useState(0),
-    [settings, setSettings] = useState(null);
+    [offset, setOffset] = useState(0);
   const [busy, setBusy] = useState(false),
     [error, setError] = useState(''),
     [notice, setNotice] = useState(''),
@@ -38,25 +38,15 @@ export function ImageMemoryPage({ rpc, status, rows = [], initialPeer, active = 
   const key = accountId + ':' + collection + ':' + (selected ? conversationKey(selected) : '');
   const current = useRef(key);
   current.current = key;
-  const docRef = useRef(doc);
-  docRef.current = doc;
-  const settingsRef = useRef(settings);
-  settingsRef.current = settings;
   const pending = useRef(false),
     previewId = useRef(null),
     previewTrigger = useRef(null),
     previewDialog = useRef(null),
     closeButton = useRef(null);
-  const reload = async (force = false, signal) => {
+  const reload = async (signal) => {
     if (!scope?.accountId) return;
     const next = await rpc('memory.images.list', { ...scope, query, offset, limit: 20 }, signal);
     if (signal?.aborted || current.current !== key) return;
-    if (
-      force ||
-      !settingsRef.current ||
-      JSON.stringify(settingsRef.current) === JSON.stringify(docRef.current?.settings)
-    )
-      setSettings(next.settings);
     setDoc(next);
     return next;
   };
@@ -66,7 +56,7 @@ export function ImageMemoryPage({ rpc, status, rows = [], initialPeer, active = 
     let timer;
     const poll = async () => {
       try {
-        if (!pending.current) await reload(false, controller.signal);
+        if (!pending.current) await reload(controller.signal);
       } catch (failure) {
         if (!controller.signal.aborted) setError(failure.message);
       }
@@ -119,7 +109,6 @@ export function ImageMemoryPage({ rpc, status, rows = [], initialPeer, active = 
     current.current = accountId + ':' + collection + ':' + (peer ? conversationKey(peer) : '');
     setSelected(peer);
     setDoc(null);
-    setSettings(null);
     setQuery('');
     setOffset(0);
     setThumbnails({});
@@ -138,7 +127,7 @@ export function ImageMemoryPage({ rpc, status, rows = [], initialPeer, active = 
     try {
       const result = await rpc(endpoint, { ...scope, ...payload });
       if (current.current !== key) return null;
-      await reload(true);
+      await reload();
       return result;
     } catch (failure) {
       if (current.current === key) setError(failure.message);
@@ -170,9 +159,6 @@ export function ImageMemoryPage({ rpc, status, rows = [], initialPeer, active = 
       setRemoving(false);
     }
   };
-  const invalid =
-    settings?.retentionDays !== null &&
-    (!Number.isSafeInteger(settings?.retentionDays) || settings.retentionDays < 1 || settings.retentionDays > 36500);
   return (
     <>
       <PageHead icon="image" title={title} description={generated
@@ -205,62 +191,19 @@ export function ImageMemoryPage({ rpc, status, rows = [], initialPeer, active = 
       ) : (
         <section className="wa-image-memory" data-testid={generated ? 'generated-image-memory-document' : 'image-memory-document'}>
           <div className="wa-memory-scope"><RoomPicker rows={rows} value={selected} onChange={choose} disabled={busy || !!preview} /></div>
-          {doc && settings ? (
+          {doc ? (
             <>
               {doc.error && (
                 <p role="alert" className="wa-alert is-error">
                   {doc.error}
                 </p>
               )}
-              <form
-                className="wa-image-settings"
-                onSubmit={async (event) => {
-                  event.preventDefault();
-                  if (await act('memory.images.configure', { settings })) setNotice('此会话的图片记忆设置已保存。');
-                }}
-              >
-                <label className="wa-check-row">
-                  <input
-                    type="checkbox"
-                    aria-label={generated ? '保存此会话的生成图片' : '保存此会话的图片'}
-                    checked={settings.enabled}
-                    disabled={busy}
-                    onChange={(event) => setSettings({ ...settings, enabled: event.target.checked })}
-                  />
-                  <span>{generated ? '保存此会话的生成图片' : '保存此会话的图片与表情'}</span>
-                </label>
-                <label className="wa-field">
-                  <span className="wa-label">保留天数（默认 30 天）</span>
-                  <input
-                    className="wa-input"
-                    type="number"
-                    min="1"
-                    max="36500"
-                    step="1"
-                    aria-label={generated ? '生成图片记忆保留天数' : '图片记忆保留天数'}
-                    placeholder="手动留空可长期保存"
-                    value={settings.retentionDays ?? ''}
-                    disabled={busy}
-                    onChange={(event) =>
-                      setSettings({
-                        ...settings,
-                        retentionDays: event.target.value.trim() === '' ? null : Number(event.target.value),
-                      })
-                    }
-                  />
-                </label>
-                <Button
-                  primary
-                  type="submit"
-                  disabled={busy || invalid || JSON.stringify(settings) === JSON.stringify(doc.settings)}
-                >
-                  保存图片记忆设置
-                </Button>
-              <Button disabled={busy || JSON.stringify(settings) === JSON.stringify(doc.settings)} onClick={() => setSettings(doc.settings)}>取消更改</Button>
-              </form>
-              {invalid && <div className="wa-alert is-error" role="alert">保留天数填写 1–36500 的整数，留空可长期保存。</div>}
+              <div className="wa-image-settings">
+                <span className="wa-help">自动保存{doc.settings.enabled ? '已开启' : '已关闭'}</span>
+                <AutomationLink onNavigate={onNavigate} from="memory" section="images" peer={selected}>图片自动保存设置</AutomationLink>
+              </div>
               <p className="wa-help">
-                期限从首次保存起计算，对已有和新图片都生效；到期会删除图片文件。关闭后停止保存和模型读取，已有图片仍可由你管理。
+                保存期限统一在“设置 → 时间设置”中修改。期限从首次保存起计算，对已有和新图片都生效；到期会删除图片文件。关闭后停止保存和模型读取，已有图片仍可由你管理。
               </p>
               <div className="wa-image-toolbar">
                 <input

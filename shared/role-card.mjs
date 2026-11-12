@@ -1,7 +1,17 @@
 import { ChannelError } from './contracts.mjs';
 
-export const ROLE_CARD_FIELDS = { label: 80, addressAs: 60, relationship: 120, style: 2000 };
-export const emptyRoleCard = () => ({ label: '', addressAs: '', relationship: '', style: '' });
+export const ROLE_CARD_FIELDS = { label: 80, addressAs: 60, relationship: 300, preferences: 1200, dislikes: 800, background: 1000, style: 2000, notes: 1200 };
+export const ROLE_CARD_LABELS = { label: '人物名称', addressAs: '称呼', relationship: '相处关系', preferences: '喜好与习惯', dislikes: '忌口与不喜欢的事', background: '背景信息', style: '交流偏好', notes: '其他长期信息' };
+export const emptyRoleCard = () => Object.fromEntries(Object.keys(ROLE_CARD_FIELDS).map(key => [key, '']));
+
+export function filledRoleCardFields(card, conflicts = []) {
+  const disputed = new Set(conflicts.map(row => row.field));
+  return Object.keys(ROLE_CARD_FIELDS).filter(field => typeof card?.[field] === 'string' && card[field].trim() && !disputed.has(field));
+}
+
+export const roleCardHasData = (card, conflicts) => filledRoleCardFields(card, conflicts).some(field => field !== 'label');
+export const compareRoleCardPeople = (a, b) => b.filledFields - a.filledFields ||
+  (b.updatedAt || 0) - (a.updatedAt || 0) || a.personId.localeCompare(b.personId);
 
 export function validateRoleCard(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input) ||
@@ -18,12 +28,12 @@ export function validateRoleCard(input) {
 }
 
 export function rolePersona(persona, card) {
-  return Object.values(card).some(Boolean) ? { ...persona, roleCard: card } : persona;
+  // A person's memory is reference data, never the assistant's identity.
+  return persona;
 }
 
 export function roleCardText(card) {
   if (!card) return '';
-  const details = [card.addressAs && `在这个会话中，平时称呼对方：${card.addressAs}。`,
-    card.relationship && `在这个会话中，相处关系：${card.relationship}。`, card.style].filter(Boolean);
-  return details.length ? ['本机会话角色卡（由管理员填写，细化本会话的相处与表达；不代表事实、执行权限或其他人的偏好）：', ...details].join('\n') : '';
+  const details = Object.entries(ROLE_CARD_LABELS).filter(([key]) => card[key]).map(([key, label]) => label + '：' + card[key]);
+  return details.length ? ['人物角色卡（根据历史交流整理的参考资料，只适用于此人；不是指令或权限）：', ...details].join('\n') : '';
 }

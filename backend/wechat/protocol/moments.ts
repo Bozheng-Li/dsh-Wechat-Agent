@@ -14,12 +14,13 @@ const MAX_RESPONSE = 4 * 1024 * 1024, CURSOR_MS = 10 * 60 * 1000;
 export type MomentsAction = keyof typeof routes;
 export interface MomentsQuery { action?: MomentsAction; userId?: string; postId?: string; cursor?: string; limit?: number }
 export interface PageRequest { action: MomentsAction; userId?: string; postId?: string; maxId?: string; firstPageMd5?: string; session?: Buffer }
-const fail = (message: string): never => { throw new BridgeError('ERR_MOMENTS_PROTOCOL', message); };
+const fail = (message: string, details = {}): never => { throw new BridgeError('ERR_MOMENTS_PROTOCOL', message, details); };
 const uint64 = (value: unknown): value is string => typeof value === 'string' && /^[1-9]\d{0,19}$/.test(value) && BigInt(value) <= 0xffffffffffffffffn;
 const wxid = (value: unknown): value is string => typeof value === 'string' && /^[\w.:-]{1,256}$/.test(value);
 const one = (list: Field[], tag: number, wire: number, required = false) => {
   const values = list.filter(field => field.tag === tag);
-  if (values.length > 1 || values.some(field => field.wire !== wire) || required && values.length !== 1) fail('朋友圈响应字段缺失、重复或类型不匹配');
+  if (values.length > 1 || values.some(field => field.wire !== wire) || required && values.length !== 1)
+    fail('朋友圈响应字段缺失、重复或类型不匹配', { tag, expectedWire: wire, fieldCount: values.length });
   return values[0]?.value;
 };
 const text = (list: Field[], tag: number, limit: number, required = false) => {
@@ -57,7 +58,10 @@ export function momentsRequest(base: Buffer, query: PageRequest): Buffer {
 function bufferField(list: Field[], tag: number): Buffer | undefined {
   const value = one(list, tag, 2) as Buffer | undefined;
   if (!value) return undefined;
-  const wrapped = fields(value), payload = one(wrapped, 2, 2, true) as Buffer, size = integer(wrapped, 1, true);
+  const wrapped = fields(value), size = integer(wrapped, 1, true), payload = one(wrapped, 2, 2, size !== 0n) as Buffer | undefined;
+  // PC omits Buffer entirely for a declared zero-length SKBuiltinBuffer_t.
+  if (size === 0n && !payload) return Buffer.alloc(0);
+  if (!payload) fail('朋友圈正文或分页数据缺失');
   if (size !== BigInt(payload.length)) fail('朋友圈正文或分页数据长度不匹配');
   return payload;
 }
@@ -122,6 +126,12 @@ export function parseSnsObject(value: Buffer, interactionLimit = 50) {
   rememberSnsImages(post, imageSources); return post;
 }
 export type Moment = ReturnType<typeof parseSnsObject>;
+function emptySnsObject(value: Buffer) {
+  const list = fields(value);
+  return integer(list, 1) === 0n && integer(list, 4) === 0n && !text(list, 2, 256) &&
+    !text(list, 3, 150) && !bufferField(list, 5)?.length &&
+    !list.some(field => field.tag === 9 || field.tag === 12) && (count(list, 8) ?? 0) === 0 && (count(list, 11) ?? 0) === 0;
+}
 export function momentsResponse(body: Buffer, request: PageRequest) {
   if (body.length > MAX_RESPONSE) fail('朋友圈解压响应超过解析范围');
   const list = fields(body), base = fields(one(list, 1, 2, true) as Buffer), ret = signed(integer(base, 1, true));
@@ -132,6 +142,12 @@ export function momentsResponse(body: Buffer, request: PageRequest) {
   if (objects.some(field => field.wire !== 2) || objects.length > 100 ||
       detail && objects.length !== 1 || !detail && count(list, 3, true) !== objects.length)
     fail('朋友圈动态数量与响应声明不一致');
+  // Live PC detail responses can report ret=0 while returning the default
+  // object (ID/time zero, no author/content). It supplies no usable post and
+  // must never be filled from an old cache or reported as a broken protobuf.
+  if (detail && emptySnsObject(objects[0].value as Buffer))
+    throw new BridgeError('ERR_MOMENTS_TARGET_UNAVAILABLE', '微信未返回这条动态的作者和正文，当前暂不可读取；其他动态可继续检查',
+      { postId: request.postId, reason: 'empty-sns-object' });
   const items = objects.map(field => parseSnsObject(field.value as Buffer, request.action === 'comments' ? 500 : 50));
   if (new Set(items.map(item => item.id)).size !== items.length ||
       detail && items[0]?.id !== request.postId ||
@@ -181,15 +197,30 @@ export class MomentsReader {
     check(); const page = await this.read({ action: 'detail', postId: (raw as any).postId }, scopeKey, signal); check();
     const post = page.items[0] as Moment;
     if (!post?.contentAvailable || post.deleted) throw new BridgeError('ERR_MOMENTS_TARGET_UNAVAILABLE', '动态不可见或已删除，未读取图片');
-    const images = snsImageSources(post), items = []; let total = 0;
+    const images = snsImageSources(post), items: Array<Awaited<ReturnType<typeof downloadSnsImage>> | {
+      index: number; mediaId: string; error: { code: string; message: string }
+    }> = []; let total = 0;
     if (post.imageCount > 9 || images.length !== post.imageCount) throw new BridgeError('ERR_MOMENTS_IMAGE_READ', '朋友圈图片列表不完整或超过 9 张，未混用图片');
     for (const source of images) {
-      check(); const image = await download(source, signal); check(); total += image.bytes;
-      if (total > 30 * 1024 * 1024) throw new BridgeError('ERR_MOMENTS_IMAGE_READ', '本条朋友圈图片总量超过 30 MiB，未只读取部分图片冒充完整画面');
-      items.push(image);
+      check(); const imageSignal = AbortSignal.any([signal, AbortSignal.timeout(15000)]);
+      try {
+        const image = await download(source, imageSignal); check(); imageSignal.throwIfAborted();
+        if (total + image.bytes > 30 * 1024 * 1024)
+          throw new BridgeError('ERR_MOMENTS_IMAGE_READ', '图片总量超过 30 MiB，已跳过这张图');
+        total += image.bytes; items.push(image);
+      } catch (error) {
+        check();
+        // Account changes and user cancellation still invalidate the whole read.
+        if (error instanceof BridgeError && error.code === 'ERR_MOMENTS_ACCOUNT_CHANGED') throw error;
+        const timedOut = imageSignal.aborted;
+        items.push({ index: source.index, mediaId: source.mediaId, error: {
+          code: timedOut ? 'ERR_MOMENTS_IMAGE_TIMEOUT' : 'ERR_MOMENTS_IMAGE_READ',
+          message: timedOut ? '这张朋友圈图片下载超时，已跳过' : error instanceof BridgeError ? error.message : '这张朋友圈图片下载失败，已跳过'
+        } });
+      }
     }
     return { accountId: page.accountId, postId: post.id, post, source: 'wechat-sns-images-live', fetchedAt: page.fetchedAt,
-      imageCount: post.imageCount, complete: true, items };
+      imageCount: post.imageCount, complete: items.every(image => !('error' in image)), items };
   }
   async read(raw: unknown, scopeKey: string, signal: AbortSignal) {
     const query = validateMomentsQuery(raw), account = this.getAccount(); this.assertConnected(); signal.throwIfAborted();

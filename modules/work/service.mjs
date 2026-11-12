@@ -21,14 +21,12 @@ import { retryArtifacts, retryWorkDelivery } from './delivery.mjs';
 import { consolidateWorkProjects, migrateWorkProjectSession } from './projects.mjs';
 import { sameDirectory } from '../../backend/storage/paths.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createToolNotifier } from '../conversation/tool-notices.mjs';
-import { WorkProgressReporter } from './progress.mjs';
 import { workPresentation } from './presentation.mjs';
 import { GeneratedImageMemory } from '../memory/images/generated.mjs';
 import { imageMemoryTool } from '../memory/images/tool.mjs';
-import { referenceText } from '../../shared/message-references.mjs';
-import { refreshReferenceImages } from '../memory/images/references.mjs';
 import { workConversationMemoryTool } from '../memory/query/work-tool.mjs';
+import { personRoleCardTool } from '../memory/roles/tool.mjs';
+import { WorkProgressReporter } from './progress.mjs';
 
 const matches = (job, scope = {}) => ['accountId', 'chatType', 'peerId', 'senderId'].every(key => scope[key] === undefined || scope[key] === job[key]);
 const folderKey = job => {
@@ -92,7 +90,7 @@ export class WorkService {
     const key = folderKey(job);
     return [...this.active.values(), ...this.deliveries.values()].some(value => folderKey(value.job) === key);
   }
-  create(scope, request, previousId, { defer = false, imageRequest, conversationTurn = false, quotedReferences, conversationSnapshot } = {}) {
+  create(scope, request, previousId, { defer = false, imageRequest, conversationTurn = false, conversationSnapshot } = {}) {
     this.assertAllowed(scope);
     if (typeof request !== 'string' || !request.trim() || request.length > 12000)
       throw new ChannelError('WORK_REQUEST_INVALID', '工作要求应为 1–12000 字');
@@ -121,7 +119,6 @@ export class WorkService {
     }
     const job = this.store.add({ id, ...scope, requestedAt, request: request.trim(), folder, workspaceRoot, connectionAccess,
       ...(selectedImage ? { imageRequest: selectedImage } : {}),
-      ...(quotedReferences?.length ? { quotedReferences: structuredClone(quotedReferences) } : {}),
       ...(previous ? { continues: previous.id } : {}),
       ...(conversationTurn ? { conversationTurn: true } : {}),
       sessionId: previous?.workspaceRoot === workspaceRoot ? previous.sessionId : null,
@@ -196,6 +193,7 @@ export class WorkService {
     const limits = workSettings(this.channel.store.config.data.work);
     let createdTaskCount = 0;
     let producedResult;
+    let progress;
     const imageSnapshot = workImageSnapshot(cwd);
     const saveImages = async artifacts => {
       const archives = archiveWorkImages(job, cwd, artifacts);
@@ -204,7 +202,6 @@ export class WorkService {
         await this.generatedImages.captureJob(job);
       }
     };
-    let progress;
     try {
       this.assertAllowed(job, controller.signal);
       if (job.continues) {
@@ -231,21 +228,17 @@ export class WorkService {
           }
         }
       }
-      job = save({ state: 'running', startedAt: this.channel.now(),
-        ...(job.quotedReferences?.length ? { quotedReferences: refreshReferenceImages(this.channel.imageMemory, job, job.quotedReferences) } : {}) });
-      progress = new WorkProgressReporter(this, id, controller.signal);
-      active.progress = progress;
-      const result = await this.runner.run({ request: [job.request, referenceText(job.quotedReferences)].filter(Boolean).join('\n\n'), cwd, workspaceRoot: job.workspaceRoot, sessionId: job.sessionId, signal: controller.signal, limits, connectionAccess: job.connectionAccess === true,
-        onProgress: event => progress.observe(event),
-        onBeforeTool: createToolNotifier(this.channel, { scope: job, requestKey: job.id, workJobId: job.id,
-          signal: controller.signal, assertAllowed: () => this.assertAllowed(job, controller.signal),
-          presentation: workPresentation(this.channel, job) }),
+      job = save({ state: 'running', startedAt: this.channel.now() });
+      progress = active.progress = new WorkProgressReporter(this, id, controller.signal);
+      const result = await this.runner.run({ request: job.request, cwd, workspaceRoot: job.workspaceRoot, sessionId: job.sessionId, signal: controller.signal, limits, connectionAccess: job.connectionAccess === true,
         presentation: workPresentation(this.channel,job),
         ...(job.imageRequest ? { imageRequest: structuredClone(job.imageRequest) } : {}),
         imageGeneration: this.imageGeneration,
-        memoryTools: this.chatSnapshots.has(job.id) ? [workConversationMemoryTool(this.channel, job, this.chatSnapshots.get(job.id),
-          () => this.assertAllowed(job, controller.signal))] : [],
-        imageMemoryTools: ['generated', ...(job.quotedReferences?.some(ref => ref.images?.some(image => image.collection === 'conversation')) ? ['conversation'] : [])].map(collection =>
+        memoryTools: [personRoleCardTool(this.channel, { ...job, requestedAt: job.requestedAt ?? job.createdAt },
+          () => this.assertAllowed(job, controller.signal)),
+          ...(this.chatSnapshots.has(job.id) ? [workConversationMemoryTool(this.channel, job, this.chatSnapshots.get(job.id),
+            () => this.assertAllowed(job, controller.signal))] : [])],
+        imageMemoryTools: ['generated'].map(collection =>
           imageMemoryTool(this.channel.imageMemory, this.channel.runner,
             { ...job, collection, currentJobId: job.id }, () => this.assertAllowed(job, controller.signal),
             { maxTime: job.requestedAt ?? job.createdAt,
@@ -277,10 +270,13 @@ export class WorkService {
         assertAllowed: () => this.assertAllowed(job, controller.signal),
         onSession: (sessionId, { native = false } = {}) => { job = save({ sessionId, ...(native ? { nativeExecution: true } : {}) }); },
         onSessionHistory: sessionHistory => { job = save({ sessionHistory }); },
+        onProgress: event => progress.observe(event),
+        onBeforeTool: name => progress.observe({ kind: 'tool-start', tool: name, at: this.channel.now() }),
         onOperation: async operation => {
           const recorded = structuredClone(operation);
           if (recorded.result.text?.length > 2000) recorded.result = { ...recorded.result, text: recorded.result.text.slice(0, 2000), textTruncated: true };
           job = save({ operations: [...job.operations, { ...recorded, at: this.channel.now() }] });
+          progress.observe({ kind: 'tool-result', tool: recorded.tool, at: this.channel.now(), failed: recorded.result.ok === false });
           if (recorded.result.ok && ['wechat_work_output', 'wechat_work_generate_image'].includes(recorded.tool))
             await saveImages(recorded.result.artifacts ?? []);
         } });

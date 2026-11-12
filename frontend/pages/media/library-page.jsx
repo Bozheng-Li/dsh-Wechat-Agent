@@ -2,13 +2,15 @@ import { useEffect, useRef, useState } from 'react';
 import { Button } from '../../components/button.jsx';
 import { PageHead } from '../../components/page-ui.jsx';
 import { Glyph } from '../../components/glyph.jsx';
+import { StickerControls } from './sticker-controls.jsx';
+import { AutomationLink } from '../../components/automation-link.jsx';
 
 const kinds = { sticker: '表情包', image: '图片' };
 const empty = {
   items: [],
   packs: [],
   total: 0,
-  counts: { all: 0, enabled: 0, described: 0, bytes: 0 },
+  counts: { all: 0, enabled: 0, described: 0, bytes: 0, favorites: 0, collected: 0 },
   settings: { enabled: true, probability: 20, minGapMessages: 3 },
   progress: null,
 };
@@ -25,6 +27,7 @@ const tagsFromText = (text) => [
 const metadata = (asset) => ({
   name: asset.name,
   description: asset.description,
+  usage: asset.usage || '',
   tags: asset.tags.join('，'),
   kind: asset.kind,
   enabled: asset.enabled,
@@ -52,55 +55,12 @@ function dataUrl(value) {
   return 'data:' + value.mediaType + ';base64,' + value.data;
 }
 
-function PackPreview({ pack, accountId, rpc }) {
-  const [images, setImages] = useState({}),
-    [error, setError] = useState(false);
-  const previewIds = pack.previews.map((item) => item.id).join(',');
-  useEffect(() => {
-    const controller = new AbortController();
-    setImages({});
-    setError(false);
-    void Promise.all(
-      pack.previews.map(async (item) => {
-        try {
-          const value = await rpc(
-            'assets.packs.content',
-            { accountId, packId: pack.id, assetId: item.id },
-            controller.signal
-          );
-          const url = dataUrl(value);
-          if (!controller.signal.aborted) setImages((previous) => ({ ...previous, [item.id]: url }));
-        } catch {
-          if (!controller.signal.aborted) setError(true);
-        }
-      })
-    );
-    return () => controller.abort();
-  }, [accountId, pack.id, previewIds]);
-  return (
-    <>
-      <div className="wa-pack-previews">
-        {pack.previews.map((item) => (
-          <div key={item.id}>
-            {images[item.id] ? (
-              <img src={images[item.id]} alt={item.name} />
-            ) : (
-              <span className="wa-help">{item.name}</span>
-            )}
-          </div>
-        ))}
-      </div>
-      {error && <p className="wa-help">部分预览暂不可用，请刷新页面重试。</p>}
-    </>
-  );
-}
-
-
-export function MediaLibraryPage({ rpc, status }) {
+export function MediaLibraryPage({ rpc, status, onNavigate }) {
   const accountId = status.account?.id;
   const [data, setData] = useState(empty),
     [query, setQuery] = useState(''),
     [kind, setKind] = useState(''),
+    [source, setSource] = useState(''),
     [packId, setPackId] = useState(''),
     [offset, setOffset] = useState(0);
   const [selected, setSelected] = useState(new Set()),
@@ -109,7 +69,6 @@ export function MediaLibraryPage({ rpc, status }) {
     [preview, setPreview] = useState(''),
     [previewError, setPreviewError] = useState('');
   const [draft, setDraft] = useState(null),
-    [settings, setSettings] = useState(null),
     [importKind, setImportKind] = useState('sticker');
   const [busy, setBusy] = useState(''),
     [notice, setNotice] = useState(''),
@@ -122,9 +81,8 @@ export function MediaLibraryPage({ rpc, status }) {
     active = useRef(null),
     mounted = useRef(true),
     previewCache = useRef(new Map()),
-    settingsRef = useRef(settings),
+    previewSignatures = useRef(new Map()),
     currentAccount = useRef(accountId);
-  settingsRef.current = settings;
   busyRef.current = busy;
   currentAccount.current = accountId;
   const request = (endpoint, payload = {}, signal) => rpc(endpoint, { accountId, ...payload }, signal);
@@ -132,17 +90,11 @@ export function MediaLibraryPage({ rpc, status }) {
     if (!accountId) return;
     const result = await request(
       'assets.list',
-      { query, kind: kind || undefined, packId: packId || undefined, offset, limit: 24 },
+      { query, kind: kind || undefined, packId: packId || undefined, source: source || undefined, offset, limit: 24 },
       signal
     );
     if (!mounted.current || signal?.aborted || currentAccount.current !== accountId) return;
     setData((previous) => (previous.revision > result.revision ? previous : result));
-    if (!settingsRef.current)
-      setSettings({
-        ...result.settings,
-        probability: String(result.settings.probability),
-        minGapMessages: String(result.settings.minGapMessages),
-      });
   };
   useEffect(() => {
     mounted.current = true;
@@ -153,15 +105,15 @@ export function MediaLibraryPage({ rpc, status }) {
   }, []);
   useEffect(() => {
     setData(empty);
-    setSettings(null);
-    settingsRef.current = null;
     setSelected(new Set());
     setEditing(null);
     setDraft(null);
     setThumbnails({});
     previewCache.current.clear();
+    previewSignatures.current.clear();
     setOffset(0);
     setPackId('');
+    setSource('');
     setBusy('');
     setNotice('');
     setError('');
@@ -172,7 +124,7 @@ export function MediaLibraryPage({ rpc, status }) {
   useEffect(() => {
     setSelected(new Set());
     setConfirmDelete(false);
-  }, [query, kind, packId]);
+  }, [query, kind, packId, source]);
   useEffect(() => {
     const controller = new AbortController();
     let timer;
@@ -189,32 +141,33 @@ export function MediaLibraryPage({ rpc, status }) {
       controller.abort();
       clearTimeout(timer);
     };
-  }, [accountId, query, kind, packId, offset]);
+  }, [accountId, query, kind, packId, source, offset]);
   useEffect(() => {
     const controller = new AbortController(),
       missing = data.items.filter(
         (asset) =>
-          asset.bytes <= 300 * 1024 && asset.width * asset.height <= 2000000 && !previewCache.current.has(asset.id)
+          asset.bytes > 0 && previewSignatures.current.get(asset.id) !== (asset.contentSha256 || asset.id) + ':' + asset.bytes
       );
     void (async () => {
       for (let at = 0; at < missing.length && !controller.signal.aborted; at += 4) {
         await Promise.all(
           missing.slice(at, at + 4).map(async (asset) => {
             try {
-              const url = dataUrl(await request('assets.content', { assetId: asset.id }, controller.signal));
+              const url = dataUrl(await request('assets.thumbnail', { assetId: asset.id }, controller.signal));
               if (!controller.signal.aborted && currentAccount.current === accountId) {
                 previewCache.current.set(asset.id, url);
+                previewSignatures.current.set(asset.id, (asset.contentSha256 || asset.id) + ':' + asset.bytes);
                 setThumbnails((value) => ({ ...value, [asset.id]: url }));
               }
             } catch {
-              if (!controller.signal.aborted) previewCache.current.set(asset.id, null);
+              if (!controller.signal.aborted) previewSignatures.current.set(asset.id, (asset.contentSha256 || asset.id) + ':' + asset.bytes);
             }
           })
         );
       }
     })();
     return () => controller.abort();
-  }, [accountId, data.items.map((asset) => asset.id).join(',')]);
+  }, [accountId, data.items.map((asset) => asset.id + ':' + asset.bytes + ':' + asset.contentSha256).join(',')]);
   useEffect(() => {
     if (!editing) {
       setPreview('');
@@ -223,8 +176,7 @@ export function MediaLibraryPage({ rpc, status }) {
     const controller = new AbortController();
     setPreview(previewCache.current.get(editing.id) || '');
     setPreviewError('');
-    if (!previewCache.current.get(editing.id))
-      void request('assets.content', { assetId: editing.id }, controller.signal)
+    void request('assets.content', { assetId: editing.id }, controller.signal)
         .then((value) => {
           if (!controller.signal.aborted) setPreview(dataUrl(value));
         })
@@ -265,7 +217,8 @@ export function MediaLibraryPage({ rpc, status }) {
     };
   }, [editing?.id, accountId]);
   const act = async (endpoint, payload, message) => {
-    if (busy) return false;
+    if (busyRef.current) return false;
+    busyRef.current = endpoint;
     const controller = new AbortController();
     active.current = controller;
     setBusy(endpoint);
@@ -283,7 +236,7 @@ export function MediaLibraryPage({ rpc, status }) {
       return false;
     } finally {
       if (active.current === controller) active.current = null;
-      if (mounted.current && currentAccount.current === accountId) setBusy('');
+      if (mounted.current && currentAccount.current === accountId) { busyRef.current = ''; setBusy(''); }
     }
   };
   const uploadFiles = async (files) => {
@@ -334,7 +287,7 @@ export function MediaLibraryPage({ rpc, status }) {
       await reload();
       if (mounted.current && currentAccount.current === accountId)
         setNotice(
-          `已导入 ${totals.imported} 张，跳过 ${totals.duplicates} 张重复素材${totals.skipped ? `及 ${totals.skipped} 个非图片文件` : ''}。可以继续填写含义；普通图片可按需理解，表情包不调用模型。`
+          `已导入 ${totals.imported} 张，跳过 ${totals.duplicates} 张重复素材${totals.skipped ? `及 ${totals.skipped} 个非图片文件` : ''}。表情含义与适用情景将在后台整理，也可以手动填写。`
         );
     } catch (failure) {
       if (mounted.current && currentAccount.current === accountId)
@@ -365,42 +318,25 @@ export function MediaLibraryPage({ rpc, status }) {
       else next.add(id);
       return next;
     });
-  const settingsInvalid =
-    !settings ||
-    !Number.isInteger(Number(settings.probability)) ||
-    Number(settings.probability) < 0 ||
-    Number(settings.probability) > 100 ||
-    !Number.isInteger(Number(settings.minGapMessages)) ||
-    Number(settings.minGapMessages) < 0 ||
-    Number(settings.minGapMessages) > 100;
-  const settingsDirty =
-    settings &&
-    JSON.stringify({
-      ...settings,
-      probability: Number(settings.probability),
-      minGapMessages: Number(settings.minGapMessages),
-    }) !== JSON.stringify(data.settings);
   const analyze = () =>
     act(
       'assets.describe',
       { assetIds: selected.size ? [...selected] : undefined },
       (result) =>
-        `已理解 ${result.succeeded} 张${result.failed ? `，${result.failed} 张未完成，可查看原因后重试` : ''}${result.skipped ? `；${result.skippedStickers || 0} 张表情包跳过，${result.skipped - (result.skippedStickers || 0)} 张保留了你的最新修改` : ''}。`
+        `已理解 ${result.succeeded} 张${result.failed ? `，${result.failed} 张未完成，可查看原因后重试` : ''}${result.skipped ? `；${result.skippedNoPreview || 0} 张等待原图，${result.skipped - (result.skippedNoPreview || 0)} 张保留了你的最新修改` : ''}。`
     );
   const togglePack = (pack) =>
     act(
       'assets.packs.configure',
       { packId: pack.id, enabled: !pack.enabled },
       (result) =>
-        `“${pack.name}”已${result.enabled ? '启用' : '停用'}${result.imported ? `，加入 ${result.imported} 张素材` : ''}。${result.duplicates ? '已有的重复图片保留原来的分组和设置。' : ''}${result.enabled && !data.settings.enabled ? '图片回复总开关仍关闭，可在“回复时怎样使用素材”中开启。' : ''}`
+        `“${pack.name}”已${result.enabled ? '启用' : '停用'}${result.imported ? `，加入 ${result.imported} 张素材` : ''}。${result.duplicates ? '已有的重复图片保留原来的分组和设置。' : ''}${result.enabled && !data.settings.enabled ? '图片回复总开关仍关闭，可在“设置 → 自动功能 → 聊天表情与图片”中开启。' : ''}`
     );
-  const builtinPacks = data.packs.filter((pack) => pack.builtin),
-    importedPacks = data.packs.filter((pack) => !pack.builtin);
-  const source = builtinPacks[0]?.source;
+  const importedPacks = data.packs;
   const progress = upload || data.progress?.running;
   return (
     <div className="wa-library-page">
-      <PageHead icon="image" title="表情与图片" description="管理回复素材、分组与使用方式。">
+      <PageHead icon="image" title="表情与图片" description="微信收藏、聊天表情和你自己的图片。">
         {accountId && <Button primary icon="plus" disabled={!!busy} onClick={() => document.querySelector('[data-testid="asset-import"]')?.scrollIntoView({ behavior: 'auto', block: 'start' })}>添加素材</Button>}
       </PageHead>
       {error && (
@@ -421,6 +357,7 @@ export function MediaLibraryPage({ rpc, status }) {
         </section>
       ) : (
         <>
+          <StickerControls data={data} status={status} busy={busy} act={act} />
           <section className="wa-library-gallery" data-testid="my-assets">
             <div className="wa-assets-gallery-heading">
               <h2>我的素材</h2>
@@ -435,11 +372,17 @@ export function MediaLibraryPage({ rpc, status }) {
             </div>
             <div className="wa-assets-statline">
               <span>共 {data.counts.all} 张</span>
+              <span>微信收藏 {data.counts.favorites || 0} 张</span>
+              <span>聊天收集 {data.counts.collected || 0} 张</span>
               <span>可用于回复 {data.counts.enabled} 张</span>
               <span>有含义 {data.counts.described} 张</span>
               <span>{size(data.counts.bytes)}</span>
             </div>
             {data.counts.all > 0 && <>
+            <div className="wa-sticker-sources" aria-label="表情来源筛选">
+              {[['', '全部素材'], ['favorite', '微信收藏'], ['chat', '聊天收集'], ['upload', '自行导入']].map(([value, label]) =>
+                <button key={value} type="button" aria-pressed={source === value} disabled={!!busy} onClick={() => { setSource(value); setPackId(''); setOffset(0); }}>{label}</button>)}
+            </div>
             <div className="wa-assets-toolbar">
               <input
                 type="search"
@@ -506,7 +449,7 @@ export function MediaLibraryPage({ rpc, status }) {
                   void analyze();
                 }}
               >
-                {selected.size ? `理解选中的 ${selected.size} 张` : '理解未填写含义的图片'}
+                {selected.size ? `理解选中的 ${selected.size} 张` : '整理未填写的含义与情景'}
               </Button>
               {selected.size > 0 && <Button quiet danger disabled={!!busy} onClick={() => setConfirmDelete(true)}>
                 删除选中
@@ -514,7 +457,7 @@ export function MediaLibraryPage({ rpc, status }) {
               {selected.size > 0 && <span className="wa-assets-selected">已选 {selected.size} 张</span>}
             </div>
             <p className="wa-help wa-section-space">
-              模型仅分析普通图片。表情包可点击编辑名称、含义与适用场景。
+              表情会整理画面含义、适用情景和标签；你也可以点击图片手动编辑。动态图按首帧整理，原图保留。
               {status.modelConfig?.vision === false ? '请先在模型高级设置开启图像理解，才能自动分析。' : ''}
             </p>
             </>}
@@ -582,14 +525,14 @@ export function MediaLibraryPage({ rpc, status }) {
                     </div>
                     <div className="wa-asset-details">
                       <strong>{asset.name}</strong>
-                      <p>{asset.description || '还没填写含义，点击编辑或让模型理解。'}</p>
+                      <p>{asset.usage || asset.description || (asset.kind === 'sticker' ? '等待整理含义与适用情景' : '点击编辑或让模型理解')}</p>
                       {asset.descriptionError && <p className="wa-assets-card-error">{asset.descriptionError}</p>}
                       <div className="wa-asset-meta">
                         <span>
-                          {kinds[asset.kind]} ·{' '}
+                          {asset.nativeSticker ? '微信表情' : kinds[asset.kind]} ·{' '}
                           {!asset.packEnabled ? '分组已停用' : asset.enabled ? '启用' : '单张已停用'}
                         </span>
-                        <span>{size(asset.bytes)}</span>
+                        <span>{asset.bytes ? size(asset.bytes) : '预览暂未取得'}</span>
                       </div>
                     </div>
                   </button>
@@ -599,16 +542,16 @@ export function MediaLibraryPage({ rpc, status }) {
             {!data.items.length && (
               <div className="wa-empty">
                 <div className="wa-empty-icon"><Glyph name={data.counts.all ? 'search' : 'image'} /></div>
-                <h3>{data.counts.all ? '没有匹配的素材' : '先挑一组喜欢的表情'}</h3>
+                <h3>{data.counts.all ? '没有匹配的素材' : '把微信里的表情带过来'}</h3>
                 <p>
                   {data.counts.all
                     ? '换个关键词或清除筛选试试。'
-                    : '在下方启用一组内置表情，也可以上传自己的 ZIP 或图片。'}
+                    : '同步账号收藏，或从已授权的聊天中保存表情。也可以导入自己的图片。'}
                 </p>
                 <Button quiet disabled={!!busy} onClick={() => {
-                  if (data.counts.all) { setQuery(''); setKind(''); setPackId(''); setOffset(0); }
-                  else document.querySelector('[data-testid="builtin-sticker-packs"]')?.scrollIntoView({ behavior: 'auto', block: 'start' });
-                }}>{data.counts.all ? '清除筛选' : '浏览内置表情'}</Button>
+                  if (data.counts.all) { setQuery(''); setKind(''); setPackId(''); setSource(''); setOffset(0); }
+                  else document.querySelector('[data-testid="wechat-stickers"]')?.scrollIntoView({ behavior: 'auto', block: 'start' });
+                }}>{data.counts.all ? '清除筛选' : '查看同步与收集'}</Button>
               </div>
             )}
             {data.total > 24 && (
@@ -629,78 +572,6 @@ export function MediaLibraryPage({ rpc, status }) {
               <div className="wa-path-value">{data.path}</div>
               <p className="wa-help">当前微信账号独立保存素材。切换账号不会混用别的账号图片。</p>
             </details>
-          </section>
-          <section className="wa-library-section wa-library-packs" data-testid="builtin-sticker-packs">
-            <header className="wa-document-heading"><div><h2>内置表情包</h2>
-            <p className="wa-help">
-              启用后可用于回复，无需下载；设置仅用于当前微信账号。
-            </p></div></header>
-            <div className="wa-packs-grid">
-              {builtinPacks.map((pack) => (
-                <article
-                  className={'wa-pack-card' + (pack.enabled ? ' is-enabled' : '')}
-                  data-pack-id={pack.id}
-                  key={pack.id}
-                >
-                  <div className="wa-pack-art"><PackPreview pack={pack} accountId={accountId} rpc={rpc} /></div>
-                  <div className="wa-pack-copy">
-                  <h3>{pack.name}</h3>
-                  <p className="wa-pack-description">{pack.description}</p>
-                  <p className="wa-pack-count">
-                    {pack.total} 张 · 已添加 {pack.installed} 张
-                  </p>
-                  </div>
-                  <div className="wa-pack-footer">
-                    <label className="wa-pack-toggle">
-                      <input
-                        type="checkbox"
-                        role="switch"
-                        aria-label={'启用分组 ' + pack.name}
-                        checked={pack.enabled}
-                        disabled={!!busy}
-                        onChange={() => {
-                          void togglePack(pack);
-                        }}
-                      />
-                      {pack.enabled ? '已启用' : '未启用'}
-                    </label>
-                    <Button
-                      quiet
-                      disabled={!!busy || !pack.installed}
-                      onClick={() => {
-                        setPackId(pack.id);
-                        setQuery('');
-                        setKind('');
-                        setOffset(0);
-                        document
-                          .querySelector('[data-testid="my-assets"]')
-                          ?.scrollIntoView({ behavior: 'auto', block: 'start' });
-                      }}
-                    >
-                      查看这组
-                    </Button>
-                  </div>
-                </article>
-              ))}
-            </div>
-            {source && (
-              <p className="wa-pack-source">
-                图片：
-                <a href={source.url} target="_blank" rel="noreferrer">
-                  {source.name}
-                </a>{' '}
-                · {source.author} ·{' '}
-                <a href={source.licenseUrl} target="_blank" rel="noreferrer">
-                  {source.license} 许可证
-                </a>
-                。原图未修改；中文名称与场景由本插件整理。
-              </p>
-            )}
-            {!data.settings.enabled && (
-              <p className="wa-alert wa-pack-paused-note">
-                图片回复总开关已关闭。分组可预览和设置；如需使用，请在下方“回复时怎样使用素材”中开启并保存。
-              </p>
-            )}
           </section>
           <section className="wa-library-section wa-library-import" data-testid="asset-import">
             <div className="wa-assets-upload">
@@ -787,67 +658,11 @@ export function MediaLibraryPage({ rpc, status }) {
             {data.progress?.error && !data.progress.running && (
               <p className="wa-help wa-section-space">{data.progress.error}</p>
             )}
-            <details className="wa-subsection" data-testid="asset-settings">
-              <summary>回复时怎样使用素材</summary>
-              <label className="wa-assets-checkline">
-                <input
-                  type="checkbox"
-                  aria-label="允许图片和表情回复"
-                  checked={settings?.enabled ?? true}
-                  disabled={!!busy}
-                  onChange={(event) => setSettings({ ...settings, enabled: event.target.checked })}
-                />
-                允许 Agent 用图片和表情回复
-              </label>
-              <div className="wa-assets-settings">
-                <Field title="自动使用概率" help="0% 表示只在明确要求图片时使用。">
-                  <div className="wa-row">
-                    <input
-                      className="wa-input"
-                      type="number"
-                      min="0"
-                      max="100"
-                      aria-label="素材自动使用概率"
-                      value={settings?.probability ?? '20'}
-                      disabled={!!busy}
-                      onChange={(event) => setSettings({ ...settings, probability: event.target.value })}
-                    />
-                    <span>%</span>
-                  </div>
-                </Field>
-                <Field title="至少间隔几条消息" help="避免连续用图片刷屏。">
-                  <input
-                    className="wa-input"
-                    type="number"
-                    min="0"
-                    max="100"
-                    aria-label="素材最少消息间隔"
-                    value={settings?.minGapMessages ?? '3'}
-                    disabled={!!busy}
-                    onChange={(event) => setSettings({ ...settings, minGapMessages: event.target.value })}
-                  />
-                </Field>
-              </div>
-              <Button primary
-                disabled={!!busy || settingsInvalid || !settingsDirty}
-                onClick={() => {
-                  void act(
-                    'assets.configure',
-                    {
-                      settings: {
-                        ...settings,
-                        probability: Number(settings.probability),
-                        minGapMessages: Number(settings.minGapMessages),
-                      },
-                    },
-                    '素材使用设置已保存。'
-                  );
-                }}
-              >
-                保存使用设置
-              </Button>
-              <p className="wa-help wa-assets-setting-note">明确要求发图时不受概率和间隔限制。GIF、WebP 以第一帧静态图片发送，原素材保留。</p>
-            </details>
+            <div className="wa-subsection">
+              <div className="wa-between"><h3>自动表情与图片</h3><AutomationLink onNavigate={onNavigate} from="assets" section="media">素材自动设置</AutomationLink></div>
+              <p className="wa-help">图片表情回复、聊天表情收集与含义整理统一在“设置 → 自动功能”中管理。</p>
+              <p className="wa-help">图片表情回复{data.settings.enabled ? '已开启' : '已关闭'} · 聊天表情收集{data.settings.captureIncoming ? '已开启' : '已关闭'} · 含义整理{data.settings.autoDescribe ? '已开启' : '已关闭'}</p>
+            </div>
           </section>
         </>
       )}
@@ -880,23 +695,30 @@ export function MediaLibraryPage({ rpc, status }) {
                   )}
                 </div>
                 <p className="wa-help wa-section-space">
-                  {editing.width} × {editing.height} · {size(editing.bytes)} · {editing.mediaType}
+                  {editing.bytes ? `${editing.width} × ${editing.height} · ${size(editing.bytes)}` : '微信暂未提供预览，仍可尝试原生发送'}
                 </p>
+                {preview && previewError && <p className="wa-alert">{previewError}</p>}
+                {editing.nativeSticker && <p className="wa-help">{editing.nativeSticker.favorite ? '已收藏在当前微信账号' : '已保存在本机表情库'} · 优先使用微信原生表情</p>}
+                {editing.nativeSticker && !editing.nativeSticker.favorite && <Button disabled={!!busy || !status.online} onClick={async () => {
+                  if (await act('assets.stickers.favorite', { assetId: editing.id }, '微信收藏列表已确认收录这张表情。')) setEditing(null);
+                }}>收藏到微信</Button>}
+                <Button disabled={!!busy || !editing.effectiveEnabled || !status.online} onClick={() => void act('assets.stickers.send', { assetId: editing.id }, result =>
+                  `已${result.native ? '用微信原生表情' : '用图片'}发送到文件传输助手，微信已确认。`)}>试发到文件传输助手</Button>
                 {editing.descriptionError && <p className="wa-alert wa-section-space">{editing.descriptionError}</p>}
                 <Button
-                  disabled={!!busy || status.modelConfig?.vision === false}
+                  disabled={!!busy || !editing.bytes || status.modelConfig?.vision === false}
                   onClick={async () => {
                     if (
                       await act(
                         'assets.describe',
                         { assetIds: [editing.id] },
-                        '已重新理解这张素材，可关闭并重新打开查看最新含义。'
+                        '已整理这张素材，可重新打开查看含义与适用情景。'
                       )
                     )
                       setEditing(null);
                   }}
                 >
-                  让模型理解这张图片
+                  {editing.kind === 'sticker' ? '整理含义与适用情景' : '让模型理解这张图片'}
                 </Button>
               </div>
               <div>
@@ -910,17 +732,21 @@ export function MediaLibraryPage({ rpc, status }) {
                     onChange={(event) => setDraft({ ...draft, name: event.target.value })}
                   />
                 </Field>
-                <Field title="含义与适用场景" help="例如：一只猫翻白眼，用于熟人间无奈吐槽；不适合安慰难过的人。">
+                <Field title="画面与含义" help="描述实际画面、文字与表达的情绪，模型检索时会读取。">
                   <textarea
                     className="wa-textarea"
                     aria-label="素材含义"
-                    rows={6}
+                    rows={4}
                     maxLength={1600}
                     value={draft.description}
                     disabled={!!busy}
                     onChange={(event) => setDraft({ ...draft, description: event.target.value })}
                   />
                   <span className="wa-assets-description-count">{draft.description.length} / 1600</span>
+                </Field>
+                <Field title="适用情景" help="例如：适合熟人间轻松吐槽；不适合安慰正在难过的人。">
+                  <textarea className="wa-textarea" aria-label="表情适用情景" rows={3} maxLength={600}
+                    value={draft.usage} disabled={!!busy} onChange={event => setDraft({ ...draft, usage: event.target.value })} />
                 </Field>
                 <Field title="标签" help="用逗号分隔，最多 16 个。">
                   <input

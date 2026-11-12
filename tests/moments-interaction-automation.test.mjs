@@ -1,22 +1,21 @@
+import { stickerPng } from './fixtures/stickers.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {
-  MomentsInteractions, MomentsService, interactionAutomationSettings, momentsInteractionTool, ChannelError
-} from '../lib/testing.js';
-
-
-
-
+import { MomentsInteractions } from '../modules/moments/interactions.mjs';
+import { MomentsService } from '../modules/moments/service.mjs';
+import { interactionAutomationSettings } from '../shared/moments-interaction-settings.mjs';
+import { momentsInteractionTool } from '../modules/tools/moments-interactions.mjs';
+import { ChannelError } from '../shared/contracts.mjs';
 import { createHash } from 'node:crypto';
 
 function fixture(t, dependencies = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-interaction-auto-')), accountId = 'auto-owner';
   let now = Date.parse('2026-11-10T04:00:00Z');
   const posts = [], reads = [], writes = [], models = [], managers = [], admins = ['admin'];
-  const settings = { enabled: true, privatePeers: ['admin', 'ordinary'], groups: [] };
+  const settings = { enabled: true, privatePeers: ['admin', 'ordinary', 'friend-a', 'friend-b', 'friend-c'], groups: [] };
   const status = { online: true, account: { id: accountId }, momentsReadReady: true, momentsWriteReady: true };
   const scope = { accountId, chatType: 'private', peerId: 'admin', senderId: 'admin' };
   const channel = { now: () => now, store: { root, data: { storeId: 'auto-interaction-fixture' }, persona: () => ({ name: '本地测试' }),
@@ -28,7 +27,7 @@ function fixture(t, dependencies = {}) {
         if (query.action === 'comments') return { accountId: args.accountId, action: 'comments', postId: query.postId, source: 'wechat-sns-live',
           items: structuredClone(posts.find(post => post.id === query.postId)?.comments ?? []), nextCursor: null };
         const offset = Number(query.cursor ?? 0), limit = query.limit ?? 20;
-        return { accountId: args.accountId, action: query.action, source: 'wechat-sns-live', items: structuredClone(filtered.slice(offset, offset + limit)),
+        return { accountId: args.accountId, action: query.action, ...(query.action === 'user' ? { userId: query.userId } : {}), source: 'wechat-sns-live', items: structuredClone(filtered.slice(offset, offset + limit)),
           nextCursor: filtered.length > offset + limit ? String(offset + limit) : null };
       },
       writeMoments: async (args, signal) => {
@@ -58,7 +57,7 @@ const gate = t => { const entered = Promise.withResolvers(), release = Promise.w
 
 test('automatic comments read photos only after skip rules and reuse their evidence during generation', async t => {
   const f = fixture(t), imageReads = [], vision = [], original = f.channel.runner.run;
-  const bytes = fs.readFileSync(path.join(import.meta.dirname, '../assets/stickers', fs.readdirSync(path.join(import.meta.dirname, '../assets/stickers'), { recursive: true }).find(file => file.endsWith('.png'))));
+  const bytes = stickerPng();
   const photo = { imageCount: 1, media: [{ id: 'photo', type: 'image' }] };
   f.add(1, { ...photo, comments: [{ userId: f.accountId, id: '99' }], visibleCommentEntries: 1 });
   f.add(2, { ...photo, text: '' }); f.add(3, photo);
@@ -76,6 +75,26 @@ test('automatic comments read photos only after skip rules and reuse their evide
   await f.configure({ commentCount: 1 }); const result = await f.due();
   assert.deepEqual(imageReads, ['2']); assert.equal(vision.length, 1); assert.equal(result.counts.commented, 1);
   assert.equal(JSON.parse(f.models[0].text).posts[0].imageContext[0].description, '一只茶杯放在桌上');
+});
+
+test('automatic comments reuse partial pictures or text fallback, and image-only failures still permit likes',async t=>{
+  for(const mode of ['partial','text','vision-off','none'])await t.test(mode,async t=>{
+    const f=fixture(t),bytes=stickerPng(),run=f.channel.runner.run;let imageReads=0;
+    const post=f.add(1,{text:mode==='none'?'':'今天喝了新咖啡',imageCount:2,media:[{id:'photo-1',type:'image'},{id:'photo-2',type:'image'}]});
+    f.channel.transport.readMomentsImages=async({accountId})=>{
+      imageReads++;if(mode!=='partial')throw Error('PRIVATE_PROVIDER_TOKEN');
+      return {accountId,postId:post.id,post:structuredClone(post),source:'wechat-sns-images-live',complete:true,imageCount:2,
+        items:post.media.map((photo,index)=>({index:index+1,mediaId:photo.id,data:bytes.toString('base64'),bytes:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex'),mediaType:'image/png'}))};
+    };
+    if(mode==='vision-off')f.channel.store.modelConfig=()=>({vision:false});
+    f.channel.runner.run=async input=>input.mode==='moments-image-read'?{text:'{"images":[{"index":1,"readable":false,"description":"没有看清的内容"},{"index":2,"readable":true,"description":"桌上有一杯咖啡"}]}'}:run(input);
+    await f.enable({likeCount:1,commentCount:1});const result=await f.due();
+    assert.equal(result.counts.liked,1);assert.equal(result.counts.commented,mode==='none'?0:1);assert.equal(imageReads,mode==='vision-off'?0:1);
+    assert.equal(result.scan.selection.imageFailures,1);
+    if(mode==='none'){assert.equal(f.models.length,0);assert(result.rows[0].imageReadError);}
+    else {const model=JSON.parse(f.models[0].text).posts[0];assert.equal(model.imageContext.length,mode==='partial'?1:0);
+      assert.equal(result.rows[0].commentBasis,mode==='partial'?'images':'text');assert(!JSON.stringify(model).includes('PRIVATE_PROVIDER_TOKEN'));}
+  });
 });
 
 test('automatic interaction defaults stay off and reject invalid schedules, quotas and skip flags', () => {

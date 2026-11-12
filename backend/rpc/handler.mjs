@@ -3,6 +3,7 @@ import { WORKBENCH_ENDPOINTS } from "../../modules/workbench/service.mjs";
 import { MATERIAL_ENDPOINTS } from '../../shared/moments-materials.mjs';
 import { MOMENTS_LIKE_ENDPOINTS } from '../../shared/moments-likes.mjs';
 import { MOMENTS_INTERACTION_ENDPOINTS } from '../../shared/moments-interactions.mjs';
+import { TRACE_ENDPOINTS } from '../../modules/traces/api.mjs';
 
 export function rpcHandler(service, isDisposed = () => false) {
   return async (endpoint, payload, signal, peer) => {
@@ -14,6 +15,9 @@ export function rpcHandler(service, isDisposed = () => false) {
       if (
         ![
           'status',
+          ...TRACE_ENDPOINTS,
+          'time.list',
+          'time.configure',
           'cleanup.preview',
           'cleanup.delete',
           'administrators.configure',
@@ -67,7 +71,11 @@ export function rpcHandler(service, isDisposed = () => false) {
           'memory.retryImages',
           'memory.global.get',
           'memory.role.get',
+          'memory.role.list',
           'memory.role.save',
+          'memory.role.refresh',
+          'memory.role.settings',
+          'memory.role.configure',
           'memory.global.edit',
           'memory.global.clear',
           'memory.global.extract',
@@ -78,7 +86,12 @@ export function rpcHandler(service, isDisposed = () => false) {
           'memory.images.delete',
           'memory.images.clear',
           'assets.list',
+          'assets.stickers.sync',
+          'assets.stickers.collect',
+          'assets.stickers.send',
+          'assets.stickers.favorite',
           'assets.content',
+          'assets.thumbnail',
           'assets.import',
           'assets.edit',
           'assets.delete',
@@ -89,7 +102,6 @@ export function rpcHandler(service, isDisposed = () => false) {
           'assets.upload.finish',
           'assets.upload.abort',
           'assets.packs.configure',
-          'assets.packs.content',
           'tasks.list',
           'work.list',
           'work.get',

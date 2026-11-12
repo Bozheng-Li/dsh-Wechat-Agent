@@ -44,7 +44,7 @@ function schedulerFixture(t) {
   const temp = temporary(), current = { online: true, account: { id: owner } }, calls = [], sent = [];
   let now = Date.parse('2026-11-06T06:00:00Z');
   const groups = new Map([[room, [member('alice', '阿禾', room, { card: '产品·阿禾', remark: 'Alice' }), member('bob', '小林')]], [other, [member('other-alice', '阿禾', other)]]]);
-  const settings = { enabled: true, groups: [room, other], privatePeers: ['alice'] };
+  const settings = { enabled: true, groups: [room, other], privatePeers: ['alice', 'bob', 'other-alice', 'one', 'two', 'three', 'four'] };
   const store = { root: temp.dir, data: { storeId: 'isolated-mention-store', records: [] }, settings: () => settings,
     conversationSettings: () => ({ allowChatTasks: true }), conversations: () => [{ chatType: 'group', peerId: room, name: '产品组' }, { chatType: 'group', peerId: other, name: '另一群' }] };
   const transport = { status: () => structuredClone(current), call: async (op, args, options) => {
@@ -98,7 +98,7 @@ test('member resolution rejects account, conversation and authorization mismatch
   f.current.account.id = 'another-account';
   await assert.rejects(f.scheduler.resolveTargets(['阿禾'], f.scope), { code: 'ACCOUNT_CHANGED' });
   f.current.account.id = owner; f.settings.groups = [other];
-  await assert.rejects(f.scheduler.resolveTargets(['阿禾'], f.scope), { code: 'TASK_NOT_AUTHORIZED' });
+  await assert.rejects(f.scheduler.resolveTargets(['阿禾'], f.scope), { code: 'OBJECT_NOT_AUTHORIZED' });
 });
 
 test('an account switch or cancellation during member lookup cannot create a stale target', async t => {
@@ -164,6 +164,7 @@ test('chat remind-me defaults to the true sender, explicit names support multipl
 
 test('chat name ambiguity requires a real incoming mention, and mentioning the assistant never selects it', async t => {
   const f = schedulerFixture(t), args = { action: 'create', content: '喝水', delaySeconds: 60, targetNames: ['阿禾'] };
+  f.settings.privatePeers.push('duplicate');
   f.groups.set(room, [member('alice', '阿禾'), member('duplicate', '阿禾')]);
   const scope = { ...f.scope, incomingMentions: [{ id: owner, name: '助手' }] };
   const ambiguous = await execute(conversationTaskTool(f.scheduler, scope, () => {}, '一分钟后提醒阿禾喝水'), args);

@@ -152,15 +152,20 @@ test('a requested one-minute reminder is durable and runs once with real deliver
   await f.scheduler.tick(); assert.equal(f.sent.length, 2);
 });
 
-test('scheduled delivery stays pending offline, and revoked peers or other accounts are never sent to', async t => {
+test('scheduled delivery waits offline, but revocation deletes old tasks and regrant requires a new reminder', async t => {
   const f = fixture(t);
-  f.scheduler.create({ kind: 'message', content: '待发送', schedule: { kind: 'once', at: f.now() + 1000 } }, f.scope);
+  const task = f.scheduler.create({ kind: 'message', content: '待发送', schedule: { kind: 'once', at: f.now() + 1000 } }, f.scope);
   f.advance(1000); f.state.online = false; await f.scheduler.tick(); assert.equal(f.sent.length, 0);
   f.state.online = true; f.state.account.id = 'other-account'; await f.scheduler.tick(); assert.equal(f.sent.length, 0);
   f.state.account.id = owner; f.store.configure(owner, { ...f.store.settings(owner), groups: [other] });
-  await f.scheduler.tick(); assert.equal(f.sent.length, 0);
+  await f.channel.authorization.whenIdle(); await f.scheduler.tick(); assert.equal(f.sent.length, 0);
+  assert(!f.scheduler.list(owner).tasks.some(row => row.id === task.id));
   f.store.configure(owner, { ...f.store.settings(owner), groups: [room, other] });
-  await f.scheduler.tick(); assert.equal(f.sent.length, 1);
+  await f.scheduler.tick(); assert.equal(f.sent.length, 0);
+  f.scheduler.create({ kind: 'message', content: '重新创建的提醒', schedule: { kind: 'once', at: f.now() + 1000 } }, f.scope);
+  f.advance(1000);
+  await f.scheduler.tick(); assert.equal(f.sent.length, 1, JSON.stringify({ scheduler: f.scheduler.list(owner), fault: f.channel.fault,
+    pauses: [...f.channel.pauses.values()] }));
 });
 
 test('uncertain scheduled sends are paused and never automatically retried after restart', async t => {
@@ -300,7 +305,7 @@ test('natural-reply defaults precede the persona and mechanically worded chat re
   const prompts = [], messages = [], answers = [answerText];
   const ctx = { agentDefaultModel: { currentSelection: () => ({ provider: 'fixture', model: 'chat' }) },
     agents: { create: async options => {
-      options.setup({ tools: { restrict() {}, guard() {}, register() {} }, systemPrompt: { suppressRuntimeContext() {}, section: value => prompts.push(value.text) }, on() {} });
+      options.setup({ tools: { restrict() {}, guard() {}, register() {} }, systemPrompt: { suppressRuntimeContext() {}, section: value => { if (value.name === 'wechat-agent') prompts.push(value.text); } }, on() {} });
       const answer = answers.shift();
       return { agent: { session: { seq: 0, snapshotEvents: () => [{ type: 'assistant/message', data: { turn: 0, message: { content: [{ type: 'text', text: answer }] } } }, { type: 'turn/end', data: { turn: 0, reason: { kind: 'completed' } } }] },
         followup: value => messages.push(value), whenIdle: async () => {}, cancel() {} }, dispose: async () => {} };

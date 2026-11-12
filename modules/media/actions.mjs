@@ -1,6 +1,10 @@
 import { ChannelError } from "../../shared/contracts.mjs";
 
 export const endpoints = [
+  'assets.stickers.sync',
+  'assets.stickers.collect',
+  'assets.stickers.send',
+  'assets.stickers.favorite',
   'assets.import',
   'assets.configure',
   'assets.packs.configure',
@@ -20,6 +24,10 @@ export async function mediaMutation(
   signal
 ) {
   switch (endpoint) {
+    case 'assets.stickers.sync': return channel.stickers.sync(currentAccount(payload).id, signal);
+    case 'assets.stickers.collect': return channel.stickers.collectRecent(currentAccount(payload).id, signal);
+    case 'assets.stickers.send': return channel.stickers.sendTest(currentAccount(payload).id, payload.assetId, signal);
+    case 'assets.stickers.favorite': return channel.stickers.favorite(currentAccount(payload).id, payload.assetId, signal);
     case 'assets.import': {
       const account = currentAccount(payload);
       return channel.library.import(account.id, payload);
@@ -93,7 +101,8 @@ export async function mediaMutation(
         account.id,
         payload.assetIds,
         runner,
-        AbortSignal.any([lifetime, ...(signal ? [signal] : [])])
+        AbortSignal.any([lifetime, ...(signal ? [signal] : [])]),
+        { assertAllowed: () => { assertLive(signal); currentAccount(payload); if (!store.modelConfig().vision) throw new ChannelError('VISION_DISABLED', '图像理解已关闭，未保存新的素材说明'); } }
       );
     }
     case 'assets.upload.start': {

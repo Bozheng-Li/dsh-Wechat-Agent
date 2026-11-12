@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { stickerPng } from './fixtures/stickers.mjs';
 import path from 'node:path';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
@@ -10,7 +11,7 @@ function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-friend-replies-')), accountId = 'reply-owner';
   let now = Date.parse('2026-11-10T04:00:00Z'), serial = 9000, manager;
   const status = { online: true, account: { id: accountId }, momentsReadReady: true, momentsWriteReady: true };
-  const settings = { enabled: true }, posts = [], reads = [], writes = [], models = [], imageReads = [], managers = [], hidden = new Set();
+  const settings = { enabled: true, privatePeers: ['friend-a', 'third-party'], groups: [] }, posts = [], reads = [], writes = [], models = [], imageReads = [], managers = [], hidden = new Set();
   const channel = { now: () => now, store: { root, data: { storeId: 'friend-replies-test' }, settings: () => settings,
     persona: () => ({ name: '合成测试' }), modelConfig: () => ({ vision: true }) },
     transport: { status: () => status, readMoments: async (args, signal) => {
@@ -275,23 +276,26 @@ for (const corruption of ['parent', 'recipient', 'tracked-account', 'activation-
   assert(f.manager.error); await f.due(); assert.equal(f.writes.length, 1); assert.equal(fs.readFileSync(f.manager.file(), 'utf8'), content);
 });
 
-test('friend reply generation receives actual photo evidence, and image-read failures never invent a comment', async t => {
+test('friend replies use actual photo evidence and fall back to verified conversation text after image failures', async t => {
   for (const mode of ['complete', 'unreadable', 'unavailable', 'vision-off']) await t.test(mode, async t => {
     const f = fixture(t), post = f.add('70001', { imageCount: 1, media: [{ id: 'photo', type: 'image' }] }); f.enable();
-    const stickers = path.join(import.meta.dirname, '../assets/stickers');
-    const bytes = fs.readFileSync(path.join(stickers, fs.readdirSync(stickers, { recursive: true }).find(file => file.endsWith('.png'))));
+    const bytes = stickerPng();
     f.channel.transport.readMomentsImages = async ({ accountId, query }) => {
       f.imageReads.push(query.postId); if (mode === 'unavailable') throw Error('合成读图失败');
       return { accountId, postId: post.id, post: structuredClone(post), source: 'wechat-sns-images-live', complete: true, imageCount: 1,
         items: [{ index: 1, mediaId: 'photo', bytes: bytes.length, data: bytes.toString('base64'), sha256: createHash('sha256').update(bytes).digest('hex'), mediaType: 'image/png' }] };
     };
     if (mode === 'vision-off') f.channel.store.modelConfig = () => ({ vision: false });
-    if (mode === 'unreadable') f.channel.runner.run = async input => { f.models.push(input); return { text: '{"images":[{"index":1,"readable":false,"description":"图片内容看不清"}]}' }; };
+    const run=f.channel.runner.run;
+    if (mode === 'unreadable') f.channel.runner.run = async input => { if(input.mode!=='moments-image-read')return run(input);
+      f.models.push(input);return { text: '{"images":[{"index":1,"readable":false,"description":"图片内容看不清"}]}' }; };
     await f.due();
     if (mode === 'complete') {
       assert.equal(f.writes.length, 1); assert.equal(f.models[0].mode, 'moments-image-read'); assert.equal(f.models[0].images.length, 1);
       assert.equal(JSON.parse(f.models[1].text).imageContext[0].description, '桌上有一只白色茶杯'); assert.equal(reply(f).imageContext.postId, post.id);
-    } else { assert.equal(f.writes.length, 0); assert.equal(f.models.filter(row => row.mode === 'moments-reply').length, 0); assert.equal(reply(f).state, 'failed'); }
+    } else { assert.equal(f.writes.length, 1); const model=f.models.find(row=>row.mode==='moments-reply');assert(model);
+      assert.deepEqual(JSON.parse(model.text).imageContext,[]);assert.equal(reply(f).state,'sent');assert.equal(reply(f).commentBasis,'text');
+      if(mode==='unreadable')assert.equal(reply(f).imageContext.complete,false);else assert(reply(f).imageReadError); }
   });
 });
 

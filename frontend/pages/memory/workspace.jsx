@@ -9,7 +9,7 @@ export function MemoryWorkspace({ tab, setTab, ...props }) {
   const tabs = [
     ['conversation', '会话记忆'],
     ['global', '长期记忆'],
-    ['roles', '会话角色卡'],
+    ['roles', '人物角色卡'],
     ['images', '会话图片记忆'],
     ['generated-images', '生成图片记忆'],
     ['review', '维护'],

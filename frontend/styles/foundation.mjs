@@ -32,6 +32,14 @@ export const foundationCss = `
 .wa-panel .wa-back{display:inline-flex;align-items:center;gap:6px;padding:4px 0;margin:0 0 14px;border:0;background:none;color:var(--wa-muted);font-size:12px}
 .wa-panel .wa-back:hover{color:var(--wa-ink)}
 
+/* Schedule times and their live countdown stay together, wrapping as needed. */
+.wa-panel .wa-schedule-time{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px}
+.wa-panel .wa-countdown[data-state]{display:inline-flex;align-items:center;align-self:flex-start;gap:5px;max-width:100%;padding:3px 7px;border:1px solid color-mix(in srgb,var(--wa-accent) 18%,var(--wa-border-soft));border-radius:6px;background:var(--wa-accent-soft);color:var(--wa-accent);font:500 11px/1.5 var(--wa-font-body);vertical-align:middle;white-space:nowrap}
+.wa-panel .wa-countdown-value{font:11px/1.5 var(--wa-font-mono);font-variant-numeric:tabular-nums}
+.wa-panel .wa-countdown:is([data-state=paused],[data-state=disabled],[data-state=idle]){background:var(--wa-subtle);border-color:var(--wa-border-soft);color:var(--wa-muted)}
+.wa-panel .wa-countdown[data-state=running]{background:var(--wa-info-soft);border-color:color-mix(in srgb,var(--wa-info) 18%,var(--wa-border-soft));color:var(--wa-info)}
+.wa-panel .wa-countdown:is([data-state=due],[data-soon=true]){background:var(--wa-warning-soft);border-color:color-mix(in srgb,var(--wa-warning) 18%,var(--wa-border-soft));color:var(--wa-warning)}
+
 /* Buttons reserve solid fill for the main action. */
 .wa-panel .wa-button{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:34px;padding:6px 12px;border:1px solid var(--wa-border);border-radius:6px;background:var(--wa-surface);color:var(--wa-ink);font-size:12px;font-weight:550;line-height:1.6;text-align:center;white-space:normal;vertical-align:middle;transition:background .13s,border-color .13s,color .13s;box-shadow:var(--wa-shadow)}
 .wa-panel .wa-button:hover:not(:disabled){background:var(--wa-subtle);border-color:var(--wa-faint)}

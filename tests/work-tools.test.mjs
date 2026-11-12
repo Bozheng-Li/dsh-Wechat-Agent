@@ -6,6 +6,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { StateStore, WechatChannel, ChannelError, ImageGenerationService, workModelTools, modelToolList, registerModelTools, workDialogueState } from '../lib/testing.js';
 import { fixtureWorkRoute } from './fixtures/work-dialogue.mjs';
+import { stickerPng } from './fixtures/stickers.mjs';
 
 const scope = { accountId: 'tools-owner', chatType: 'private', peerId: 'alice', senderId: 'alice' };
 const signal = () => new AbortController().signal;
@@ -14,8 +15,7 @@ const until = async predicate => {
   const deadline = Date.now() + 5000;
   while (!predicate()) { assert(Date.now() < deadline, 'native work did not reach the expected state'); await new Promise(resolve => setTimeout(resolve, 5)); }
 };
-const imageRoot = path.resolve('assets/stickers');
-const imageBytes = fs.readFileSync(path.join(imageRoot, fs.readdirSync(imageRoot, { recursive: true }).find(file => file.endsWith('.png'))));
+const imageBytes = stickerPng();
 
 function fixture(t, model = input => ({ text: '原生任务结果：' + input.request })) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-work-tools-')), store = new StateStore(root);

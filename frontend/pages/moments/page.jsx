@@ -4,7 +4,6 @@ import { PageHead } from '../../components/page-ui.jsx';
 import { WorkspaceTabs, WorkspacePanels } from '../../components/workspace-tabs.jsx';
 import { useWorkbench } from '../../hooks/use-workbench.mjs';
 import { formatTime } from '../../shared/conversations.mjs';
-import { MOMENTS_DEFAULTS } from '../../../shared/moments.mjs';
 import { AudiencePicker, audiencePreview } from './audience-picker.jsx';
 import { MomentsPublishingPage } from './publishing-page.jsx';
 import { MomentsMaterialsPage } from './materials-page.jsx';
@@ -14,16 +13,16 @@ import { MomentsReplySchedule } from './reply-schedule.jsx';
 import { Glyph } from '../../components/glyph.jsx';
 const stamp = seconds => formatTime(seconds * 1000);
 
-export function MomentsPage({ rpc, status }) {
-  return <MomentsWorkspace key={status.account?.id ?? 'offline'} rpc={rpc} status={status} />;
+export function MomentsPage({ rpc, status, onNavigate }) {
+  return <MomentsWorkspace key={status.account?.id ?? 'offline'} rpc={rpc} status={status} onNavigate={onNavigate} />;
 }
-function MomentsWorkspace({ rpc, status }) {
+function MomentsWorkspace({ rpc, status, onNavigate }) {
   const [interactionPost, setInteractionPost] = useState(null);
   const [tab, setTab] = useState('posts'), [postId, setPostId] = useState(''), [lookup, setLookup] = useState(''),
     [comments, setComments] = useState(null), [reply, setReply] = useState(null), [replyText, setReplyText] = useState(''),
-    [text, setText] = useState(''), [photos, setPhotos] = useState([]), [settings, setSettings] = useState({ ...MOMENTS_DEFAULTS }),
-    [dirty, setDirty] = useState(false), [deleting, setDeleting] = useState(false), [fileError, setFileError] = useState('');
-  const state = useWorkbench(rpc, status.account?.id, 'moments.list', '', tab === 'publishing' ? 3000 : 0);
+    [text, setText] = useState(''), [photos, setPhotos] = useState([]),
+    [deleting, setDeleting] = useState(false), [fileError, setFileError] = useState('');
+  const state = useWorkbench(rpc, status.account?.id, 'moments.list', '', ['publishing', 'schedule'].includes(tab) ? 3000 : 0, status.timeSettings);
   const [audience, setAudience] = useState(null), [audienceError, setAudienceError] = useState(false),
     [selection, setSelection] = useState({ blockedLabelIds: [], blockedUserIds: [] });
   const preview = audiencePreview(audience, selection.blockedLabelIds, selection.blockedUserIds);
@@ -34,9 +33,7 @@ function MomentsWorkspace({ rpc, status }) {
   };
   const operation = useRef(null), liveState = useRef(state); liveState.current = state;
   const data = state.data, posts = data?.posts ?? [], post = posts.find(post => post.id === postId);
-  useEffect(() => { if (data?.settings && !dirty) setSettings(data.settings); }, [data, dirty]);
   useEffect(() => { const timer = setInterval(() => { if (!liveState.current.busy) void liveState.current.refresh(); }, 15000); return () => clearInterval(timer); }, []);
-  const update = values => { setSettings({ ...settings, ...values }); setDirty(true); };
   const write = async args => {
     const signature = JSON.stringify(args);
     if (operation.current?.signature !== signature) operation.current = { signature, requestId: 'ui-moments-' + crypto.randomUUID() };
@@ -66,11 +63,11 @@ function MomentsWorkspace({ rpc, status }) {
       <WorkspaceTabs name="moments" label="朋友圈功能" active={tab} onChange={setTab}
         tabs={[["posts", "我的动态"], ["friends", "好友动态"], ["interactions", "点赞评论"], ["comments", "评论区"], ["publish", "发朋友圈"], ["publishing", "自动发布"], ["materials", "素材库"], ["schedule", "定时回复"]]} />
       <WorkspacePanels name="moments" tabs={['posts', 'friends', 'interactions', 'comments', 'publish', 'publishing', 'materials', 'schedule']} active={tab}>
-      {tab === 'friends' && <MomentsFriendsPage key={status.account?.id} rpc={rpc} status={status} onComments={loadComments}
+      {tab === 'friends' && <MomentsFriendsPage key={status.account?.id} rpc={rpc} status={status} onNavigate={onNavigate} onComments={loadComments}
         onInteract={post => { setInteractionPost({ postId: post.id, key: crypto.randomUUID() }); setTab('interactions'); }} />}
-      {tab === 'interactions' && <MomentsInteractionsPage key={status.account?.id} rpc={rpc} status={status} initialPost={interactionPost} onSeedUsed={() => setInteractionPost(null)} onComments={loadComments} />}
-      {tab === 'materials' && <MomentsMaterialsPage rpc={rpc} status={status} embedded />}
-      {tab === 'publishing' && <MomentsPublishingPage rpc={rpc} state={state} status={status} audience={audience} audienceError={audienceError} loadAudience={loadAudience} />}
+      {tab === 'interactions' && <MomentsInteractionsPage key={status.account?.id} rpc={rpc} status={status} onNavigate={onNavigate} initialPost={interactionPost} onSeedUsed={() => setInteractionPost(null)} onComments={loadComments} />}
+      {tab === 'materials' && <MomentsMaterialsPage rpc={rpc} status={status} embedded onNavigate={onNavigate} />}
+      {tab === 'publishing' && <MomentsPublishingPage rpc={rpc} state={state} status={status} audience={audience} audienceError={audienceError} loadAudience={loadAudience} onNavigate={onNavigate} />}
       {tab === 'posts' && <>
         <div className="wa-moments-toolbar">
           <Button disabled={state.busy || !status.online} onClick={() => state.execute('moments.discover')}>拉取我的动态</Button>
@@ -129,8 +126,7 @@ function MomentsWorkspace({ rpc, status }) {
           if (result) { setText(''); setPhotos([]); setSelection({ blockedLabelIds: [], blockedUserIds: [] }); setPostId(result.postId); setTab('posts'); }
         }}>发布到我的朋友圈</Button></div>
       </div>}
-      {tab === 'schedule' && <MomentsReplySchedule state={state} status={status} posts={posts} settings={settings} update={update} dirty={dirty}
-        reset={() => { setDirty(false); setSettings(data?.settings ?? { ...MOMENTS_DEFAULTS }); }} saved={() => setDirty(false)} />}
+      {tab === 'schedule' && <MomentsReplySchedule state={state} status={status} onNavigate={onNavigate} />}
       </WorkspacePanels>
     </Offline>
   </section>;

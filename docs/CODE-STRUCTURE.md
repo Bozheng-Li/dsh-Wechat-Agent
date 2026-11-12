@@ -29,7 +29,7 @@ dsh-Wechat-Agent/
 │  │  ├─ images/                 图片保存、查询和读取工具
 │  │  ├─ query/                  组合记忆查询工具
 │  │  └─ actions.mjs             记忆管理操作
-│  ├─ media/                     素材库、内置表情、格式校验、管理操作
+│  ├─ media/                     微信收藏、聊天表情、情景说明、读取发送工具与素材管理
 │  ├─ moments/                   动态、评论、好友点赞、计划发布与独立朋友圈素材库
 │  ├─ tasks/                     调度、对话任务工具、管理操作
 │  ├─ tools/                     模型工具统一注册、原生 tools 列表、工作会话与并行调度
@@ -77,11 +77,12 @@ dsh-Wechat-Agent/
 | 要修改的内容 | 主要入口 |
 | --- | --- |
 | 页面与交互 | `frontend/pages/<功能>/`、`frontend/page-content.jsx` |
+| 任务执行轨迹 | `modules/traces/` 记录独立任务、步骤与实际模型／工具请求，批量保存并支持实时读取；`frontend/pages/traces/` 提供分类、横向关系图、分支分页、节点详情与导出；持久文件位于 `storage/traces/<账号哈希>/<日期>/` |
 | 美术与主题 | `frontend/styles/tokens.mjs` 声明变量；`foundation.mjs` 定义控件，`layout.mjs` 定义导航与概览；`automation.mjs`、`content.mjs`、`settings.mjs` 各自负责模块；规范见 [视觉系统](VISUAL-SYSTEM.md) |
 | 轮询、草稿和操作反馈 | `frontend/hooks/` |
 | 新增管理操作 | 对应 `modules/<功能>/actions.mjs`、`backend/rpc/actions.mjs` 和 `backend/rpc/handler.mjs` |
 | 回复触发、排队及发送 | `modules/conversation/{incoming,channel,reply}.mjs` |
-| 每次工具执行前的微信提示与独立回执 | `modules/conversation/tool-notices.mjs`、`modules/tools/registry.mjs` |
+| 工具静默执行与必要交互 | `modules/tools/registry.mjs`、`modules/conversation/reply.mjs`、`modules/work/{service,runner}.mjs` |
 | 聊天图片完整下载与 JPEG 图像流 | `backend/wechat/protocol/{backend,image-download,media-loader}`、`modules/media/wechat-image-stream.mjs` |
 | 默认搜索接口与一次备用回退 | `modules/search/{service,fallback,errors}.mjs` |
 | 聊天与工作共用的复杂事实检索规则 | `prompts/agent/factual-search.mjs` |
@@ -92,13 +93,14 @@ dsh-Wechat-Agent/
 | 状态和目录迁移 | `backend/storage/` |
 | 记忆和对应工具 | `modules/memory/<子功能>/` |
 | 会话与生成图片记忆 | `modules/memory/images/{store,generated,tool}.mjs`、`shared/image-memory.mjs`、`frontend/pages/memory/{workspace,images-page}.jsx` |
-| 微信引用消息 | `backend/wechat/protocol/reference.ts`、`shared/message-references.mjs`、`modules/memory/images/references.mjs`、`frontend/pages/records/references.jsx` |
+| 占位消息与历史引用兼容 | `shared/message-content.mjs`、`backend/wechat/protocol/reference.ts`、`frontend/pages/records/references.jsx`；不做引用补查或上下文增强 |
 | 提醒、素材、搜索 | `modules/{tasks,media,search}/` |
 | 朋友圈素材与发布 | `modules/moments/{material-store,material-privacy,materials,publishing-content,publishing-review,publishing}.mjs`、`shared/moments-materials.mjs`、`frontend/pages/moments/materials-page.jsx` |
 | 好友动态与点赞 | `backend/wechat/protocol/moments-user-page.ts`、`modules/moments/{likes,like-requests}.mjs`、`modules/tools/moments-likes.mjs`、`shared/moments-{likes,like-request}.mjs`、`frontend/pages/moments/friends-page.jsx` |
 | 朋友圈读图工具 | `backend/wechat/protocol/moments-images.ts`、`modules/moments/image-context.mjs`、`modules/tools/moments-images.mjs`，以实际图片补充评论，纯点赞不读图 |
 | 分轮点赞与评论 | `modules/moments/{interactions,interaction-read,interaction-content,image-context,post-content}.mjs`、`shared/moments-interactions.mjs`、`modules/tools/moments-interactions.mjs`、`frontend/pages/moments/{interactions-page.jsx,use-interactions.mjs}` |
-| 自动互动设置与周期 | `modules/moments/{interaction-schedule,interaction-selection}.mjs`、`shared/moments-interaction-settings.mjs`、`frontend/pages/moments/interaction-automation.jsx` |
+| 自动功能设置 | `frontend/pages/settings/automation-page.jsx` 汇集各组表单；原会话、朋友圈、记忆与素材页面通过 `frontend/components/automation-link.jsx` 打开对应设置 |
+| 自动互动设置与周期 | `modules/moments/{interaction-schedule,interaction-selection}.mjs`、`shared/moments-interaction-settings.mjs`、`frontend/pages/settings/moments-interaction-settings.jsx`；运行状态保留在 `frontend/pages/moments/interaction-automation.jsx` |
 | 自己与好友朋友圈的定时接话 | `modules/moments/{automation,friend-replies}.mjs`、`shared/moments.mjs`、`modules/tools/moments-publishing.mjs`、`frontend/pages/moments/reply-schedule.jsx` |
 | 管理员与远程状态 | `modules/remote/`、`frontend/components/admin-picker.jsx`、`frontend/pages/settings/administrators-page.jsx` |
 | 微信协议、登录与回执 | `backend/wechat/protocol/` |
@@ -167,7 +169,13 @@ dsh-Wechat-Agent/
 | SSH 连接、命令与 VS Code | `wechat_work_ssh_connect`、`wechat_work_ssh_exec`、`wechat_work_vscode_connect` | 管理员原生工作会话 |
 | 本机／DSH 状态 | `wechat_work_status` | 管理员原生工作会话 |
 
-共 17 种工具能力；同名工具在各自上下文中只注册一次。生图工具说明与参数来自当前配置目录，密钥继续由凭据服务保管。增加能力时在对应定义文件中添加工具并纳入列表，无需给消息入口增加关键词执行分支。
+上表列出常用工作工具；同名工具在各自上下文中只注册一次。生图工具说明与参数来自当前配置目录，密钥继续由凭据服务保管。增加能力时在对应定义文件中添加工具并纳入列表，无需给消息入口增加关键词执行分支。
+
+微信附件读取功能已停用：聊天与原生工作不注册 `wechat_file`，能力目录不包含 `files`，旧 `files` IPC 直接返回 `FILE_FEATURE_DISABLED`。历史文件元信息、操作记录与底层解析原型保留兼容；不再自动选取最近附件或创建下载输入。
+
+`list` 接受 `offset/limit` 并返回总数和下一页；不触发下载。列表为空且较新消息仅为占位时，`read/download` 返回 `FILE_NOT_RECEIVED`、`needsUserInput: true` 和 `retryable: false`，停止本轮反复查找。聊天和原生工作显式启用静默工具指引，内部资料处理提示保持隔离；任务仍记录真实操作和最终微信回执，用户主动查询可读取实际状态。
+
+旧文件记录只包含可展示元信息；下载标识与密钥不进入历史或提示词。已有 `.wechat-inputs/` 仍从自动成果收集中排除，防止历史输入被当成新成果发送。`wechat_work_output` 继续支持实际生成或明确指定的本机文件，Word 等二进制文档由 DSH 原生工具生成；`wechat_work_write` 只写 UTF-8 文本。
 
 ```powershell
 npm run build

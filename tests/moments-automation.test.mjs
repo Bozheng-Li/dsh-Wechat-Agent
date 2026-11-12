@@ -10,12 +10,12 @@ function fixture(t) {
   let clock = 1700000000000, serial = 100, enabled = true;
   const accountId = 'moments-owner', status = { online: true, account: { id: accountId }, momentsReadReady: true, momentsWriteReady: true },
     calls = [], models = [], writes = [], comments = new Map(), own = { id: '9007199254740997', author: { userId: accountId }, createdAt: clock / 1000, text: '本人动态', imageCount: 0 };
-  const channel = { now: () => clock, store: { root, data: { storeId: 'automation-test-store' }, settings: () => ({ enabled }), persona: () => ({ name: '小胖' }) },
+  const channel = { now: () => clock, store: { root, data: { storeId: 'automation-test-store' }, settings: () => ({ enabled, privatePeers: ['friend'], groups: [] }), persona: () => ({ name: '小胖' }) },
     transport: { status: () => status, readMoments: async (args, signal) => {
       signal.throwIfAborted(); calls.push(args); const query = args.query;
-      if (query.action === 'timeline') return { accountId, items: [own, { ...own, id: '99', author: { userId: 'other' }, text: '他人正文' }], nextCursor: null };
+      if (query.action === 'timeline') return { accountId, source: 'wechat-sns-live', action: 'timeline', items: [own, { ...own, id: '99', author: { userId: 'other' }, text: '他人正文' }], nextCursor: null };
       const all = comments.get(query.postId) ?? [], offset = Number(query.cursor ?? 0), items = all.slice(offset, offset + 50);
-      return { accountId, action: 'comments', items, postId: query.postId, visibleCommentEntries: all.length, nextCursor: offset + 50 < all.length ? String(offset + 50) : null };
+      return { accountId, source: 'wechat-sns-live', action: 'comments', items, postId: query.postId, visibleCommentEntries: all.length, nextCursor: offset + 50 < all.length ? String(offset + 50) : null };
     }, writeMoments: async (args, signal) => {
       signal.throwIfAborted(); writes.push(args); const { query } = args, commentId = String(++serial);
       if (query.action === 'comment') (comments.get(query.postId) ?? []).push({ id: commentId, userId: accountId, text: query.text, replyToCommentId: query.replyToCommentId });
@@ -103,7 +103,7 @@ test('an unavailable newer post does not block healthy comments and its read bac
   const f = fixture(t), broken = { ...f.own, id: '9007199254740998', createdAt: f.own.createdAt + 1 };
   const read = f.channel.transport.readMoments; let failures = 0;
   f.channel.transport.readMoments = async (args, signal) => {
-    if (args.query.action === 'timeline') return { accountId: f.accountId, items: [broken, f.own] };
+    if (args.query.action === 'timeline') return { accountId: f.accountId, source: 'wechat-sns-live', action: 'timeline', items: [broken, f.own] };
     if (args.query.postId === broken.id) { failures++; throw new ChannelError('ERR_MOMENTS_REJECTED', 'target unavailable', { ret: -2 }); }
     return read(args, signal);
   };
@@ -141,9 +141,9 @@ test('failure on a later comment page discards that incomplete snapshot and cont
   const f = fixture(t), broken = { ...f.own, id: '9007199254740998', createdAt: f.own.createdAt + 1 };
   const read = f.channel.transport.readMoments;
   f.channel.transport.readMoments = async (args, signal) => {
-    if (args.query.action === 'timeline') return { accountId: f.accountId, items: [broken, f.own] };
+    if (args.query.action === 'timeline') return { accountId: f.accountId, source: 'wechat-sns-live', action: 'timeline', items: [broken, f.own] };
     if (args.query.postId !== broken.id) return read(args, signal);
-    if (!args.query.cursor) return { accountId: f.accountId, items: [f.comment(55)], nextCursor: 'next' };
+    if (!args.query.cursor) return { accountId: f.accountId, source: 'wechat-sns-live', action: 'comments', postId: args.query.postId, items: [f.comment(55)], nextCursor: 'next' };
     throw new ChannelError('ERR_MOMENTS_REJECTED', 'unavailable', { ret: -2 });
   };
   f.configure(); f.comments.set(f.own.id, [f.comment(1)]); f.advance(60000); await f.manager.tick();

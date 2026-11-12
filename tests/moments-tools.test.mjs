@@ -1,3 +1,4 @@
+import { stickerPng } from './fixtures/stickers.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -11,7 +12,7 @@ const accountId = 'moments-bot', room = 'moments-room@chatroom';
 const scope = { accountId, chatType: 'private', peerId: 'alice', senderId: 'alice' };
 function fixture(t, { beforeRead, beforeWrite } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-moments-test-')), store = new StateStore(root), reads = [], models = [], sent = [], works = [];
-  store.configure(accountId, { enabled: true, privatePeers: ['alice', 'bob'], groups: [room], prompt: '' });
+  store.configure(accountId, { enabled: true, privatePeers: ['alice', 'bob', 'visible-author'], groups: [room], prompt: '' });
   const config = store.config.snapshot(store.data); config.remote = { globalAdminIds: ['alice'] }; store.config.commit(config);
   for (const [type, peerId] of [['private', 'alice'], ['private', 'bob'], ['group', room]])
     store.setConversationSettings(accountId, type, peerId, { ...store.conversationSettings(accountId, type, peerId), remoteEnabled: true, mode: type === 'group' ? 'nickname' : 'default', adminIds: [] });
@@ -19,11 +20,20 @@ function fixture(t, { beforeRead, beforeWrite } = {}) {
   const writes = [], status = { online: true, account: { id: accountId }, momentsReadReady: true, momentsWriteReady: true };
   const transport = { status: () => status, readMoments: async (args, signal) => {
     reads.push(args); await beforeRead?.(args); signal.throwIfAborted();
-    return { accountId, action: args.query.action, source: 'wechat-sns-live', items: [{ id: '9007199254740997', text: '授权范围内的响应', imageCount: 1 }], nextCursor: null, mediaContentIncluded: false };
+    const items = args.query.action === 'comments'
+      ? [{ id: '3', userId: 'visible-author', text: '可见评论', createdAt: Math.floor(Date.now() / 1000) }]
+      : [{ id: args.query.postId || '9007199254740997', author: { userId: args.query.userId || accountId },
+        text: '授权范围内的响应', imageCount: 1, createdAt: Math.floor(Date.now() / 1000), contentAvailable: true, deleted: false }];
+    return { accountId, action: args.query.action, source: 'wechat-sns-live', ...(args.query.action === 'comments' ? { postId: args.query.postId } : {}),
+      ...(args.query.action === 'user' ? { userId: args.query.userId } : {}),
+      items, nextCursor: null, mediaContentIncluded: false };
   }, writeMoments: async (args, signal) => {
     writes.push(args); await beforeWrite?.(args); signal.throwIfAborted();
     return { accountId, action: args.query.action, postId: args.query.postId ?? '9007199254740999', text: args.query.text,
       liked: true, commentId: '9007199254741000', imageCount: args.query.images?.length ?? 0, delivery: 'server-ack',
+      ...(args.query.action === 'publish' ? { audienceConfirmed: true, authorizationConfirmed: true, authorizationExcludedCount: 0,
+        authorizedAudienceUserIds: ['alice', 'bob', 'visible-author'], blockedUserIds: [], audienceSource: 'wechat-contacts-live',
+        audienceFetchedAt: new Date().toISOString() } : {}),
       ...(args.query.replyToCommentId ? { replyToCommentId: args.query.replyToCommentId, replyToUserId: 'visible-author' } : {}),
       ...(args.query.action === 'delete' ? { deleted: true } : {}) };
   }, send: async payload => { sent.push(payload); return { delivery: 'server-ack', serverMessageIds: ['moments-ack-' + sent.length] }; } };
@@ -88,6 +98,7 @@ test('shielded publish requires an exact selection receipt and reuses it after r
   const f = fixture(t), query = { action: 'publish', text: '正文', blockedLabelIds: ['1'], blockedUserIds: ['alice'] }, signal = new AbortController().signal;
   const oldWrite = f.transport.writeMoments; let writes = 0;
   f.transport.writeMoments = async (args, signal) => { writes++; return { ...await oldWrite(args, signal), audienceConfirmed: true, blockedUserIds: ['alice','bob'], blockedLabelIds: ['1'],
+    authorizedAudienceUserIds: ['visible-author'],
     audienceSelection: { blockedLabelIds: ['1'], blockedUserIds: ['alice'] }, audienceSource: audienceSnapshot.source, audienceFetchedAt: audienceSnapshot.fetchedAt }; };
   const confirmed = await f.channel.moments.write(query, scope, 'privacy-turn', signal); assert.equal(confirmed.audienceConfirmed, true);
   const reused = await new MomentsService(f.channel).write(query, scope, 'privacy-turn', signal); assert.equal(reused.reusedReceipt, true); assert.equal(writes, 1);
@@ -163,6 +174,7 @@ test('owner RPC reads live data without granting another principal or account ac
 });
 test('explicit subjects resolve to their actual roles while vague pronouns and ambiguous names never guess a homepage', async t => {
   const f = fixture(t), signal = new AbortController().signal;
+  f.store.configure(accountId, { ...f.store.settings(accountId), privatePeers: [...f.store.settings(accountId).privatePeers, 'friend-a', 'friend-b'] });
   await assert.rejects(f.channel.moments.read({ action: 'user', user: '我' }, scope, signal), error => error.code === 'MOMENTS_SUBJECT_REQUIRED');
   await f.channel.moments.read({ action: 'user', subject: 'account' }, scope, signal);
   assert.equal(f.reads[0].query.userId, accountId);
@@ -295,8 +307,7 @@ test('malformed success receipts are stored as unknown and never repeat a public
 test('chat photo publishing requires frozen room ownership, full media and a still-current undeleted image', async () => {
   const entry = { key: 'image-record', messageId: '111', text: '这张图片', rememberedAt: Date.now(), attachments: [{ type: 'image', resourceId: 'a'.repeat(64) }] };
   const snapshot = { generation: 1, createdAt: Date.now(), entries: [entry] }, doc = structuredClone(snapshot), deleted = {};
-  const assets = path.resolve(import.meta.dirname, '../assets/stickers');
-  const data = fs.readFileSync(path.join(assets, fs.readdirSync(assets, { recursive: true }).find(file => file.endsWith('.png'))));
+  const data = stickerPng();
   let quality = 'original', duringRead = () => {}, reads = 0;
   const channel = { memory: { load: () => doc, expiry: () => Date.now() + 10000, now: Date.now, images: { load: () => ({ deleted }), imageId: () => 'saved-id' } },
     transport: { media: async args => { reads++; assert.equal(args.accountId, accountId); assert.equal(args.peerId, scope.peerId); assert.equal(args.messageId, '111'); duringRead(); return { data: data.toString('base64'), quality }; } } };

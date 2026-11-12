@@ -143,14 +143,17 @@ test('batch understanding persists errors and retries while preserving concurren
   assert(new MediaLibrary(f.store).search(f.owner, '赞同').length === 1);
 });
 
-test('explicit mixed asset analysis skips stickers before decoding or calling the model and reports them honestly', async t => {
+test('mixed asset analysis saves sticker scenarios separately from ordinary image notes', async t => {
   const f = fixture(t), sticker = f.import().assetIds[0], photo = f.import(png([0, 0, 255]), '普通图片.png', 'image').assetIds[0];
   let calls = 0;
-  const result = await f.library.describe(f.owner, [sticker, photo], { describeImages: async images => { calls++; assert.equal(images.length, 1); return ['蓝色方块。']; } }, new AbortController().signal);
-  assert.equal(calls, 1); assert.equal(result.skippedStickers, 1); assert.equal(result.succeeded, 1); assert.equal(result.completed, 2);
-  assert.equal(f.library.resolveAsset(f.owner, sticker).description, '');
-  const skipped = await f.library.describe(f.owner, [sticker], {}, new AbortController().signal);
-  assert.equal(skipped.skippedStickers, 1); assert.equal(skipped.failed, 0); assert.equal(calls, 1);
+  const result = await f.library.describe(f.owner, [sticker, photo], {
+    describeImages: async images => { calls++; assert.equal(images.length, 1); return ['蓝色方块。']; },
+    describeStickers: async images => { calls++; assert.equal(images.length, 1); return [{ name: '红色方块', description: '红色方块。', usage: '用于颜色话题，不推测具体情绪。', tags: ['红色'] }]; },
+  }, new AbortController().signal);
+  assert.equal(calls, 2); assert.equal(result.skipped, 0); assert.equal(result.succeeded, 2); assert.equal(result.completed, 2);
+  assert.equal(f.library.resolveAsset(f.owner, sticker).description, '红色方块。');
+  assert.equal(f.library.resolveAsset(f.owner, sticker).usage, '用于颜色话题，不推测具体情绪。');
+  assert.equal(f.library.search(f.owner, '颜色话题')[0].id, sticker);
 });
 
 test('cancelled model analysis does not overwrite assets or claim unfinished work succeeded', async t => {

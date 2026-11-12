@@ -4,7 +4,7 @@ import { formatTime } from '../../shared/conversations.mjs';
 import { MOMENTS_INTERACTION_DEFAULTS as defaults, interactionHasComment, interactionHasLike, interactionOptions } from '../../../shared/moments-interactions.mjs';
 import { useInteractions } from './use-interactions.mjs';
 import { CleanupControl } from '../../components/cleanup-control.jsx';
-import { InteractionAutomation } from './interaction-automation.jsx';
+import { InteractionAutomationStatus } from './interaction-automation.jsx';
 
 const actions = [['like', '只点赞'], ['comment', '只评论'], ['both', '点赞并评论']];
 const modes = [['latest', '最近几条'], ['random', '随机挑选'], ['manual', '手动勾选']];
@@ -18,8 +18,8 @@ function Receipt({ label, step }) {
   return <span className={'wa-interaction-receipt is-' + step.state} title={step.message}>{label} · {steps[step.state]}{step.result?.commentId ? ` #${step.result.commentId}` : ''}</span>;
 }
 
-export function MomentsInteractionsPage({ rpc, status, initialPost, onSeedUsed, onComments }) {
-  const accountId = status.account?.id, online = status.online && !!accountId, state = useInteractions(rpc, accountId);
+export function MomentsInteractionsPage({ rpc, status, initialPost, onSeedUsed, onComments, onNavigate }) {
+  const accountId = status.account?.id, online = status.online && !!accountId, state = useInteractions(rpc, accountId, status.timeSettings);
   const [options, setOptions] = useState({ ...defaults, postIds: [] }), [rows, setRows] = useState([]), [notice, setNotice] = useState('');
   const pendingPreview = useRef(null), seeded = useRef(null), lastRevision = useRef(null);
   const round = state.data.current, editable = round?.state === 'draft', running = ['running', 'generating'].includes(round?.state);
@@ -36,6 +36,8 @@ export function MomentsInteractionsPage({ rpc, status, initialPost, onSeedUsed, 
     }
   }, [round]);
   const preview = async (next = options) => {
+    next = { ...next, intervalSeconds: status.timeSettings?.manualInteractionIntervalSeconds ?? defaults.intervalSeconds,
+      lookbackDays: status.timeSettings?.manualInteractionLookbackDays ?? defaults.lookbackDays };
     const signature = JSON.stringify(next);
     if (pendingPreview.current?.signature !== signature) pendingPreview.current = { signature, requestId: 'ui-moments-' + crypto.randomUUID() };
     const result = await state.execute('preview', { options: next, requestId: pendingPreview.current.requestId });
@@ -55,11 +57,12 @@ export function MomentsInteractionsPage({ rpc, status, initialPost, onSeedUsed, 
   const missingComments = comments && selected.some(row => !row.commentText.trim() && !row.commentSkipReason);
   return <div className="wa-interactions" data-testid="moments-interactions" data-account-id={accountId}>
     <header className="wa-interaction-heading"><div><h2>给朋友一点回应</h2><p>按计划定时互动，也可以临时选一轮。点赞、接话，都有据可看。</p></div><span className="wa-interaction-limit">每轮最多 20 条</span></header>
-    <InteractionAutomation state={state} status={status} />
+    <InteractionAutomationStatus state={state} status={status} onNavigate={onNavigate} />
     <header className="wa-interaction-manual-heading"><h3>手动执行一轮</h3><p>临时选择动态，先检查内容，再执行。</p></header>
     <div className="wa-interaction-workspace">
       <section className="wa-interaction-setup" aria-label="本轮互动设置">
         <div className="wa-interaction-step"><span>01</span><h3>选择范围与玩法</h3></div>
+        <p className="wa-wb-note">查看最近天数与逐条间隔统一在“设置 → 时间设置”中修改。</p>
         <fieldset disabled={!!state.busy || running}><legend className="wa-sr-only">互动设置</legend>
           <Choices label="互动动作" items={actions} value={options.action} onChange={action => update({ action })} />
           <label>动态来源<select aria-label="互动动态来源" value={options.source} onChange={e => update({ source: e.target.value, postIds: [] })}>
@@ -69,7 +72,6 @@ export function MomentsInteractionsPage({ rpc, status, initialPost, onSeedUsed, 
             <Choices label="动态选择方式" items={modes} value={options.mode} onChange={mode => update({ mode })} />
             <div className="wa-interaction-fields">
               {options.mode !== 'manual' && <label>本轮条数<input aria-label="本轮互动条数" type="number" min={1} max={20} value={options.count} onChange={e => update({ count: Number(e.target.value), poolSize: Math.max(options.poolSize, Number(e.target.value)) })} /></label>}
-              <label>动态时间<select aria-label="互动时间范围" value={options.lookbackDays} onChange={e => update({ lookbackDays: Number(e.target.value) })}>{[[1, '最近 24 小时'], [3, '最近 3 天'], [7, '最近 7 天'], [30, '最近 30 天'], [0, '不限时间']].map(([value, text]) => <option value={value} key={value}>{text}</option>)}</select></label>
               {options.mode !== 'latest' && <label>候选动态数<input aria-label="互动候选数量" type="number" min={Math.max(1, options.count)} max={100} value={options.poolSize} onChange={e => update({ poolSize: Number(e.target.value) })} /></label>}
               {options.mode === 'random' && options.source === 'timeline' && <label>每位好友最多<input aria-label="随机每位好友上限" type="number" min={1} max={20} value={options.perFriendLimit} onChange={e => update({ perFriendLimit: Number(e.target.value) })} /></label>}
             </div>
@@ -80,7 +82,6 @@ export function MomentsInteractionsPage({ rpc, status, initialPost, onSeedUsed, 
             {options.commentMode === 'fixed' && <label>指定评论<textarea aria-label="互动指定评论" rows={3} maxLength={2000} value={options.commentText} onChange={e => update({ commentText: e.target.value })} placeholder="读完动态后，还能逐条修改" /></label>}
             <label className="wa-wb-check"><input aria-label="跳过已经评论的动态" type="checkbox" checked={options.skipCommented} onChange={e => update({ skipCommented: e.target.checked })} />跳过当前账号已经评论的动态</label>
           </div>}
-          <label>每条动态之间的间隔（秒）<input aria-label="互动间隔秒数" type="number" min={0} max={60} value={options.intervalSeconds} onChange={e => update({ intervalSeconds: Number(e.target.value) })} /></label>
         </fieldset>
         <p className="wa-wb-note">{options.mode === 'random' ? '在本次可见候选中随机选取，名单生成后固定。' : options.mode === 'manual' ? '读取候选后，勾选本轮要互动的动态。' : '按发布时间选取，已点赞的条目仍占原位置。'}不足时按实际数量处理。</p>
         <Button disabled={!!state.busy || running || !online || !valid} onClick={() => preview()}>{state.busy === 'preview' ? '正在读取…' : round ? '重新读取并预览' : '读取并预览'}</Button>
@@ -103,7 +104,9 @@ export function MomentsInteractionsPage({ rpc, status, initialPost, onSeedUsed, 
           <div className="wa-interaction-rows">{rows.map(row => <article key={row.postId} data-interaction-post={row.postId} className={'wa-interaction-row' + (row.selected ? ' is-selected' : '')}>
             <div className="wa-interaction-original"><header><label className="wa-wb-check"><input aria-label={'选择互动动态 ' + row.postId} type="checkbox" checked={row.selected} disabled={!editable || !!state.busy || !row.selected && selected.length >= 20} onChange={e => edit(row.postId, { selected: e.target.checked })} /><span><strong>{row.nickname || row.userId}</strong><time>{stamp(row.createdAt)}</time></span></label>{editable && row.likedByCurrentAccount && <Tag state="liked">已点赞</Tag>}</header>
               <p className="wa-interaction-post-text">{row.text || '无文字动态'}</p><small>{row.imageCount > 0 && `${row.imageCount} 张图片 · `}{Number.isFinite(row.likeCount) ? `${row.likeCount} 个赞` : '赞数未知'} · {Number.isFinite(row.commentCount) ? `${row.commentCount} 条评论` : '评论数未知'}</small>
-              {row.imageContext?.images?.length > 0 && <details className="wa-wb-note"><summary>已读取 {row.imageContext.images.length} 张配图{!row.imageContext.complete && ' · 部分看不清'}</summary>{row.imageContext.images.map(image => <p key={image.index}>图 {image.index}：{image.description}</p>)}</details>}
+              {row.imageContext?.images?.length > 0 && <details className="wa-wb-note"><summary>已读到 {row.imageContext.images.filter(image => image.readable).length}/{row.imageCount} 张配图{!row.imageContext.complete && ' · 其余已跳过'}</summary>{row.imageContext.images.map(image => <p key={image.index}>图 {image.index}：{image.readable ? image.description : '已跳过 · ' + (image.error?.message || image.description)}</p>)}</details>}
+              {row.imageReadError && <p className="wa-wb-note">配图未读取：{row.imageReadError.message}</p>}
+              {row.imageCount > 0 && row.commentText && row.commentBasis === 'text' && <p className="wa-wb-note">配图未读到可用内容，本条评论依据正文生成。</p>}
               <details className="wa-interaction-identity"><summary>动态详情</summary><small>{row.userId}<br />动态 {row.postId}</small>{onComments && <Button quiet disabled={!!state.busy} onClick={() => onComments(row.postId)}>查看评论区</Button>}</details>
             </div>
             <div className="wa-interaction-response">{comments && <>
@@ -115,7 +118,7 @@ export function MomentsInteractionsPage({ rpc, status, initialPost, onSeedUsed, 
             </div>
           </article>)}</div>
           <footer className="wa-interaction-execute"><div className="wa-interaction-step"><span>03</span><h3>{editable ? '执行这一轮' : '微信回执'}</h3></div>
-            {editable ? <><p className="wa-wb-note">{dirty ? '逐条修改会随执行一起保存。' : '检查好作者、正文和评论，再提交本轮。'}{comments && ' 生成评论会结合真实配图；图片读取失败会跳过该条评论。'}</p><div className="wa-wb-actions">
+            {editable ? <><p className="wa-wb-note">{dirty ? '逐条修改会随执行一起保存。' : '检查好作者、正文和评论，再提交本轮。'}{comments && ' 评论使用读到的配图；未读到图片时按正文回复，图文都不可用时跳过评论。'}</p><div className="wa-wb-actions">
               {comments && round.options.commentMode === 'generated' && <Button quiet disabled={!!state.busy || !online || !selected.length || optionsDirty} onClick={generate}>{state.busy === 'generate' ? '正在生成评论…' : '生成逐条评论'}</Button>}
               {dirty && <Button quiet disabled={!!state.busy || !online} onClick={save}>保存逐条修改</Button>}
               <Button disabled={!!state.busy || state.data.running || !online || status.momentsWriteReady === false || !selected.length || missingComments || optionsDirty} onClick={run}>执行 {selected.length} 条 · {actions.find(([id]) => id === round.options.action)?.[1]}</Button>

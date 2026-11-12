@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildWechatPrompt, applyFixedReplyBoundaries, personaFromPreset, DEFAULT_AGENT_IDENTITY
+  buildWechatPrompt, DEFAULT_AGENT_IDENTITY
 } from '../lib/testing.js';
+import { applyFixedReplyBoundaries } from '../prompts/reply/compose.mjs';
+import { personaFromPreset } from '../prompts/personas/catalog.mjs';
 
 
 

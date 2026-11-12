@@ -6,13 +6,17 @@ import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 
 import { ChannelError } from "../../shared/contracts.mjs";
-import { BuiltinStickerCatalog } from "./builtin-stickers.mjs";
+import { retireBuiltinStickers, saveWechatSticker, reconcileFavorites, validStickerMd5 } from './wechat-stickers.mjs';
+import { assetThumbnail } from './thumbnail.mjs';
+import { describeAssets } from './description.mjs';
 import { MEDIA_LIBRARY_LIMITS, IMAGE_TYPES, IMAGE_EXTENSIONS } from "./limits.mjs";
 import { error, accountId, decodeBase64, plain, normalizeKind } from "./validation.mjs";
 import { inspectAssetImage } from "./image-format.mjs";
+import { prepareStickerImage } from './sticker-image.mjs';
 import { readAssetZip } from "./zip.mjs";
 
 export const SETTINGS = Object.freeze({ enabled: true, probability: 20, minGapMessages: 3 });
+export const STICKER_SETTINGS = Object.freeze({ captureIncoming: true, preferNative: true, autoDescribe: true });
 
 export const UPLOADED_PACK = 'user-uploads';
 
@@ -58,7 +62,7 @@ export function atomic(file, data) {
   }
 }
 
-export function settings(input) {
+export function settings(input, previous = STICKER_SETTINGS) {
   if (
     !input ||
     typeof input.enabled !== 'boolean' ||
@@ -70,11 +74,13 @@ export function settings(input) {
     input.minGapMessages > 100
   )
     throw error('ASSET_SETTINGS_INVALID', '请设置是否开启，自动使用概率 0–100%，以及至少间隔 0–100 条消息');
-  return { enabled: input.enabled, probability: input.probability, minGapMessages: input.minGapMessages };
+  const extra = Object.fromEntries(Object.entries(STICKER_SETTINGS).map(([key, fallback]) => [key, input[key] ?? previous[key] ?? fallback]));
+  if (Object.values(extra).some(value => typeof value !== 'boolean')) throw error('ASSET_SETTINGS_INVALID', '请选择是否收集聊天表情和使用原生表情');
+  return { enabled: input.enabled, probability: input.probability, minGapMessages: input.minGapMessages, ...extra };
 }
 
 export class MediaLibrary {
-  constructor(store, { now = Date.now, pythonPath, conversionTimeoutMs = 15000, builtinCatalog } = {}) {
+  constructor(store, { now = Date.now, pythonPath, conversionTimeoutMs = 15000 } = {}) {
     configurationFor(store);
     this.store = store;
     this.now = now;
@@ -83,7 +89,6 @@ export class MediaLibrary {
     this.uploads = new Map();
     this.completedUploads = new Map();
     this.jobs = new Map();
-    this.builtins = builtinCatalog ?? new BuiltinStickerCatalog();
     this.runtimePath = resourcePath('runtime');
     this.pythonPath = pythonPath || path.join(this.runtimePath, 'python/python.exe');
     this.conversionTimeoutMs = conversionTimeoutMs;
@@ -113,7 +118,7 @@ export class MediaLibrary {
         for (const [key, pack] of Object.entries(record.packs || {})) pack.enabled = configuration.packs[key] ?? !key.startsWith('builtin-');
         for (const asset of record.assets) asset.enabled = configuration.assets[asset.id] ?? true;
       }
-      settings(record.settings);
+      record.settings = settings(record.settings);
       if (
         record.packs !== undefined &&
         (!record.packs ||
@@ -128,11 +133,12 @@ export class MediaLibrary {
       for (const asset of record.assets)
         if (
           !/^[a-f0-9]{64}$/.test(asset.id) ||
-          !IMAGE_TYPES.has(asset.mediaType) ||
-          !['png', 'jpg', 'gif', 'webp'].includes(asset.extension) ||
+          (!(asset.bytes === 0 && validStickerMd5(asset.nativeSticker?.md5)) && (!IMAGE_TYPES.has(asset.mediaType) || !['png', 'jpg', 'gif', 'webp'].includes(asset.extension))) ||
+          (asset.nativeSticker !== undefined && (!validStickerMd5(asset.nativeSticker?.md5) || typeof asset.nativeSticker.favorite !== 'boolean')) ||
+          (asset.contentSha256 !== undefined && !/^[a-f0-9]{64}$/.test(asset.contentSha256)) ||
           typeof asset.enabled !== 'boolean' ||
           typeof asset.name !== 'string' ||
-          typeof asset.description !== 'string' ||
+          typeof asset.description !== 'string' || (asset.usage !== undefined && typeof asset.usage !== 'string') ||
           !Array.isArray(asset.tags) ||
           (asset.packId !== undefined && !validPackId(asset.packId))
         )
@@ -143,6 +149,7 @@ export class MediaLibrary {
         [{ file: this.indexFile, bytes: Buffer.from(JSON.stringify(mediaSnapshot(this.data), null, 2) + '\n') }]);
       this.data.configurationVersion = 1;
     }
+    retireBuiltinStickers(this);
   }
   assertLocal(file, required = true) {
     const relative = path.relative(this.root, file);
@@ -163,19 +170,19 @@ export class MediaLibrary {
     accountId(id);
     if (create && !Object.hasOwn(data.accounts, id))
       Object.defineProperty(data.accounts, id, {
-        value: { settings: { ...(this.store.config.section('media')[id]?.settings ?? this.store.config.data.mediaDefaults) }, assets: [] },
+        value: { settings: settings(this.store.config.section('media')[id]?.settings ?? this.store.config.data.mediaDefaults), assets: [] },
         enumerable: true,
         writable: true,
         configurable: true,
       });
-    return Object.hasOwn(data.accounts, id) ? data.accounts[id] : { settings: { ...(this.store.config.section('media')[id]?.settings ?? this.store.config.data.mediaDefaults) }, assets: [] };
+    return Object.hasOwn(data.accounts, id) ? data.accounts[id] : { settings: settings(this.store.config.section('media')[id]?.settings ?? this.store.config.data.mediaDefaults), assets: [] };
   }
   folder(id) {
     accountId(id);
     return path.join(this.root, sha(id).slice(0, 24));
   }
   file(id, asset) {
-    return path.join(this.folder(id), asset.id + '.' + asset.extension);
+    return path.join(this.folder(id), (asset.contentSha256 || asset.id) + '.' + asset.extension);
   }
   mutate(action) {
     const next = clone(this.data);
@@ -195,7 +202,7 @@ export class MediaLibrary {
   }
   packs(id) {
     const record = this.account(id);
-    const known = new Set(this.builtins.packs.map((pack) => pack.id));
+    const known = new Set();
     const imported = new Map(
       Object.entries(record.packs || {}).filter(([id]) => !known.has(id) && !id.startsWith('builtin-'))
     );
@@ -210,17 +217,6 @@ export class MediaLibrary {
       };
     };
     return [
-      ...this.builtins.packs.map((pack) => ({
-        id: pack.id,
-        name: pack.name,
-        description: pack.description,
-        builtin: true,
-        enabled: this.packEnabled(record, pack.id),
-        total: pack.items.length,
-        ...counts(pack.id),
-        source: this.builtins.source,
-        previews: pack.items.slice(0, 3).map(({ id, name }) => ({ id, name })),
-      })),
       ...[...imported].map(([id, pack]) => ({
         id,
         name: pack.name,
@@ -244,18 +240,6 @@ export class MediaLibrary {
   }
   configurePack(id, packId, enabled) {
     const pack = this.validatePackSetting(id, packId, enabled);
-    if (pack.builtin && enabled) {
-      const images = this.builtins.get(packId).items.map((item) => {
-        const { content } = this.builtins.read(packId, item.id);
-        return {
-          name: path.basename(item.file),
-          data: content,
-          info: inspectAssetImage(content),
-          metadata: { name: item.name, description: item.description, tags: item.tags },
-        };
-      });
-      return { ...this.importImages(id, { images, kind: 'sticker', pack, enablePack: true }), packId, enabled: true };
-    }
     this.mutate((data) => {
       const record = this.account(id, true, data);
       record.packs ??= {};
@@ -264,13 +248,14 @@ export class MediaLibrary {
     return { packId, enabled };
   }
   configure(id, input) {
-    const next = settings(input);
+    const next = settings(input, this.account(id).settings);
     this.mutate((data) => {
       this.account(id, true, data).settings = next;
     });
     return this.list(id);
   }
-  list(id, { query = '', kind, packId, enabled, offset = 0, limit = 24 } = {}) {
+  list(id, { query = '', kind, packId, source, enabled, offset = 0, limit = 24 } = {}) {
+    if (source && !['favorite', 'chat', 'upload'].includes(source)) throw error('ASSET_SOURCE_INVALID', '请选择微信收藏、聊天收集或自行导入');
     const record = this.account(id),
       normalized = String(query).normalize('NFKC').trim().toLocaleLowerCase();
     if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 100)
@@ -280,9 +265,10 @@ export class MediaLibrary {
         (asset) =>
           (!kind || asset.kind === kind) &&
           (!packId || assetPack(asset) === packId) &&
+          (!source || (source === 'favorite' ? asset.nativeSticker?.favorite === true : source === 'chat' ? !!asset.sourceMessage : !asset.nativeSticker && !asset.sourceMessage)) &&
           (enabled === undefined || this.assetEnabled(record, asset) === enabled) &&
           (!normalized ||
-            [asset.name, asset.description, ...asset.tags]
+            [asset.name, asset.description, asset.usage || '', ...asset.tags]
               .join('\n')
               .normalize('NFKC')
               .toLocaleLowerCase()
@@ -309,7 +295,12 @@ export class MediaLibrary {
         enabled: record.assets.filter((asset) => this.assetEnabled(record, asset)).length,
         described: record.assets.filter((asset) => asset.description).length,
         bytes: record.assets.reduce((sum, asset) => sum + asset.bytes, 0),
+        favorites: record.assets.filter(asset => asset.nativeSticker?.favorite).length,
+        collected: record.assets.filter(asset => asset.sourceMessage).length,
+        native: record.assets.filter(asset => asset.nativeSticker).length,
       },
+      stickerSync: clone(record.stickerSync || null),
+      retiredBuiltinCount: record.retiredBuiltinCount || 0,
       progress: clone(this.jobs.get(id) || null),
       path: this.folder(id),
       limits: MEDIA_LIBRARY_LIMITS,
@@ -330,13 +321,14 @@ export class MediaLibrary {
   getContent(id, assetId, options) {
     const asset = this.resolveAsset(id, assetId, options),
       file = this.file(id, asset);
+    if (!asset.bytes) throw error('STICKER_PREVIEW_UNAVAILABLE', '微信暂未提供表情预览，仍可使用原生表情发送');
     try {
       this.assertLocal(file);
       const stat = fs.statSync(file);
       if (!stat.isFile() || stat.size !== asset.bytes || stat.size > MEDIA_LIBRARY_LIMITS.imageBytes)
         throw error('ASSET_CONTENT_INVALID', '素材文件大小已变化');
       const content = fs.readFileSync(file);
-      if (sha(content) !== asset.id) throw error('ASSET_CONTENT_INVALID', '素材内容已改变，未读取被替换的文件');
+      if (sha(content) !== (asset.contentSha256 || asset.id)) throw error('ASSET_CONTENT_INVALID', '素材内容已改变，未读取被替换的文件');
       return { ...asset, data: content.toString('base64') };
     } catch (failure) {
       if (failure instanceof ChannelError) throw failure;
@@ -346,6 +338,10 @@ export class MediaLibrary {
   async prepareSendContent(id, assetId, signal = new AbortController().signal) {
     signal.throwIfAborted();
     const asset = this.getContent(id, assetId);
+    if (['image/png', 'image/jpeg'].includes(asset.mediaType) && asset.nativeSticker) {
+      const pixels = prepareStickerImage(Buffer.from(asset.data, 'base64')).content;
+      return { ...asset, bytes: pixels.length, data: pixels.toString('base64') };
+    }
     if (['image/png', 'image/jpeg'].includes(asset.mediaType)) return asset;
     const script = path.join(this.runtimePath, 'prepare_reply_image.py');
     if (!fs.existsSync(script) || (path.isAbsolute(this.pythonPath) && !fs.existsSync(this.pythonPath)))
@@ -452,19 +448,47 @@ export class MediaLibrary {
       : { id: UPLOADED_PACK, name: '我导入的图片' };
     return this.importImages(id, { ...bundle, kind, pack });
   }
+  saveWechatSticker(id, input) { return saveWechatSticker(this, id, input); }
+  thumbnail(id, assetId, signal) { return assetThumbnail(this, id, assetId, signal); }
+  reconcileFavorites(id, md5s, fetchedAt) { return reconcileFavorites(this, id, md5s, fetchedAt); }
+  randomSticker(id, { query = '', excludeIds = [], random = Math.random } = {}) {
+    if (!this.account(id).settings.enabled) return null;
+    const record = this.account(id), normalized = query.normalize('NFKC').trim().toLocaleLowerCase();
+    let pool = record.assets.filter(asset => asset.kind === 'sticker' && this.assetEnabled(record, asset) && (!normalized || [asset.name, asset.description, asset.usage || '', ...asset.tags].join(' ').normalize('NFKC').toLocaleLowerCase().includes(normalized)));
+    const favorites = pool.filter(asset => asset.nativeSticker?.favorite);
+    if (favorites.length) pool = favorites;
+    const fresh = pool.filter(asset => !excludeIds.includes(asset.id)); if (fresh.length) pool = fresh;
+    if (!pool.length) return null;
+    return clone(pool[Math.floor(Math.max(0, Math.min(0.999999999, random())) * pool.length)]);
+  }
+  async prepareSendSegment(id, assetId, signal = new AbortController().signal, { nativeReady = true } = {}) {
+    const asset = this.resolveAsset(id, assetId);
+    const native = asset.kind === 'sticker' && asset.nativeSticker && this.account(id).settings.preferNative && nativeReady;
+    let prepared;
+    try { prepared = await this.prepareSendContent(id, assetId, signal); }
+    catch (failure) {
+      signal.throwIfAborted();
+      if (!native || !['STICKER_PREVIEW_UNAVAILABLE', 'ASSET_CONVERTER_MISSING', 'ASSET_CONVERSION_FAILED', 'ASSET_CONVERSION_TIMEOUT'].includes(failure.code)) throw failure;
+    }
+    signal.throwIfAborted(); this.resolveAsset(id, assetId);
+    return { type: native || asset.kind === 'sticker' ? 'face' : 'image', data: {
+      ...(native ? { nativeSticker: { md5: asset.nativeSticker.md5 } } : {}),
+      ...(prepared ? { base64: prepared.data, mediaType: prepared.mediaType } : {}),
+    } };
+  }
   importImages(id, { images, skipped = 0, kind, pack, enablePack }) {
     const previous = this.account(id),
-      known = new Set(previous.assets.map((asset) => asset.id)),
+      known = new Map(previous.assets.map((asset) => [asset.contentSha256 || asset.id, asset.id])),
       added = [],
       duplicateIds = [];
     let bytes = previous.assets.reduce((sum, asset) => sum + asset.bytes, 0);
     for (const image of images) {
       const hash = sha(image.data);
       if (known.has(hash)) {
-        duplicateIds.push(hash);
+        duplicateIds.push(known.get(hash));
         continue;
       }
-      known.add(hash);
+      known.set(hash, hash);
       bytes += image.data.length;
       const basename =
         image.name
@@ -487,6 +511,7 @@ export class MediaLibrary {
           id: hash,
           name: image.metadata?.name ?? basename,
           description: image.metadata?.description ?? '',
+          usage: image.metadata?.usage ?? '',
           tags: image.metadata?.tags ?? [...new Set(folders)],
           kind,
           enabled: true,
@@ -552,7 +577,7 @@ export class MediaLibrary {
       !patch ||
       typeof patch !== 'object' ||
       Array.isArray(patch) ||
-      Object.keys(patch).some((key) => !['name', 'description', 'tags', 'kind', 'enabled', 'revision'].includes(key))
+      Object.keys(patch).some((key) => !['name', 'description', 'usage', 'tags', 'kind', 'enabled', 'revision'].includes(key))
     )
       throw error('ASSET_METADATA_INVALID', '素材设置格式无效');
     if (patch.revision !== undefined && patch.revision !== previous.revision)
@@ -563,6 +588,7 @@ export class MediaLibrary {
       value.description = plain(patch.description, '素材含义', 1600);
       value.descriptionError = null;
     }
+    if (patch.usage !== undefined) { value.usage = plain(patch.usage, '适用情景', 600); value.descriptionError = null; }
     if (patch.tags !== undefined) {
       if (!Array.isArray(patch.tags) || patch.tags.length > 16)
         throw error('ASSET_METADATA_INVALID', '每张素材最多 16 个标签');
@@ -588,12 +614,15 @@ export class MediaLibrary {
       ids = new Set(targets.map((asset) => asset.id));
     this.mutate((next) => {
       const record = this.account(id, true, next);
+      record.deletedStickers = [...new Set([...(record.deletedStickers || []), ...targets.filter(asset => asset.nativeSticker || asset.sourceMessage).flatMap(asset =>
+        [asset.nativeSticker?.md5, asset.id, asset.contentSha256].filter(Boolean))])];
       record.assets = record.assets.filter((asset) => !ids.has(asset.id));
     });
     let retainedFiles = 0;
     for (const asset of targets) {
       try {
         const file = this.file(id, asset);
+        if (!asset.bytes || this.account(id).assets.some(item => this.file(id, item) === file)) continue;
         this.assertLocal(file);
         fs.unlinkSync(file);
       } catch (failure) {
@@ -700,104 +729,7 @@ export class MediaLibrary {
     this.uploads.delete(uploadId);
     return { cancelled: true };
   }
-  async describe(id, assetIds, runner, signal) {
-    accountId(id);
-    if (this.jobs.get(id)?.running) throw error('ASSET_ANALYSIS_BUSY', '当前账号已有素材正在理解，请等待完成');
-    const ids =
-      assetIds === undefined
-        ? this.account(id)
-            .assets.filter((asset) => !asset.description)
-            .map((asset) => asset.id)
-        : assetIds;
-    if (!Array.isArray(ids) || ids.length > 300) throw error('ASSET_SELECTION_INVALID', '每次最多理解 300 张素材');
-    const selected = [...new Set(ids)].map((assetId) => this.resolveAsset(id, assetId, { enabledOnly: false })),
-      targets = selected.filter((asset) => asset.kind === 'image'),
-      stickers = selected.length - targets.length;
-    if (targets.length && typeof runner.describeImages !== 'function' && typeof runner.describeImage !== 'function')
-      throw error('ASSET_VISION_UNAVAILABLE', '当前模型没有可用的图像理解接口');
-    const progress = {
-      running: true,
-      total: selected.length,
-      completed: stickers,
-      succeeded: 0,
-      failed: 0,
-      skipped: stickers,
-      skippedStickers: stickers,
-      startedAt: this.now(),
-      finishedAt: null,
-      error: null,
-    };
-    this.jobs.set(id, progress);
-    try {
-      for (let at = 0; at < targets.length; at += 4) {
-        signal.throwIfAborted();
-        const batch = targets.slice(at, at + 4),
-          loaded = batch.map((asset) => {
-            try {
-              return { asset, image: this.getContent(id, asset.id, { enabledOnly: false }) };
-            } catch (failure) {
-              return { asset, failure };
-            }
-          });
-        const usable = loaded.filter((item) => item.image);
-        let captions = [],
-          modelError;
-        if (usable.length) {
-          try {
-            captions =
-              typeof runner.describeImages === 'function'
-                ? await runner.describeImages(
-                    usable.map((item) => ({ data: item.image.data, mediaType: item.image.mediaType })),
-                    signal
-                  )
-                : await Promise.all(usable.map((item) => runner.describeImage(item.image, signal)));
-          } catch (failure) {
-            if (signal.aborted) throw failure;
-            modelError = failure;
-          }
-        }
-        signal.throwIfAborted();
-        const committed = { completed: 0, succeeded: 0, failed: 0, skipped: 0 };
-        this.mutate((next) => {
-          const record = this.account(id, true, next);
-          for (const item of loaded) {
-            const asset = record.assets.find((value) => value.id === item.asset.id);
-            committed.completed++;
-            if (!asset || asset.revision !== item.asset.revision || asset.description !== item.asset.description) {
-              committed.skipped++;
-              continue;
-            }
-            const caption = captions[usable.findIndex((value) => value.asset.id === asset.id)],
-              failure = item.failure || modelError;
-            if (!failure && typeof caption === 'string' && caption.trim() && caption.length <= 1600) {
-              asset.description = caption.trim();
-              asset.descriptionError = null;
-              asset.describedAt = this.now();
-              committed.succeeded++;
-            } else {
-              asset.descriptionError =
-                failure instanceof ChannelError ? failure.message : '未能理解这张素材，可检查模型后重试或手动填写含义';
-              committed.failed++;
-            }
-            asset.revision++;
-            asset.updatedAt = this.now();
-          }
-        });
-        for (const key of Object.keys(committed)) progress[key] += committed[key];
-      }
-    } catch (failure) {
-      progress.error = signal.aborted
-        ? '素材理解已停止，已完成的结果保留'
-        : failure instanceof ChannelError
-          ? failure.message
-          : '素材理解未完成，已有结果保留';
-      throw failure;
-    } finally {
-      progress.running = false;
-      progress.finishedAt = this.now();
-    }
-    return clone(progress);
-  }
+  describe(id, assetIds, runner, signal, options) { return describeAssets(this, id, assetIds, runner, signal, options); }
   close() {
     for (const upload of [...this.uploads.values()]) this.abortUpload(upload.accountId, upload.id);
   }

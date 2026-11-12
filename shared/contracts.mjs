@@ -391,12 +391,15 @@ export function publicError(error, fallback = '操作失败，请稍后重试') 
     : { code: 'OPERATION_FAILED', message: fallback, details: {} };
 }
 
-export function eligible(settings, message) {
-  return (
-    settings?.enabled &&
-    (message.chatType === 'group' ? settings.groups : settings.privatePeers)?.includes(message.peerId)
-  );
+export const authorizedPerson = (settings, personId) => typeof personId === 'string' && !!personId &&
+  !personId.endsWith('@chatroom') && settings?.privatePeers?.includes(personId) === true;
+
+export function authorizedConversation(settings, message) {
+  return message?.chatType === 'group' ? settings?.groups?.includes(message.peerId) === true :
+    message?.chatType === 'private' && authorizedPerson(settings, message.peerId);
 }
+
+export const eligible = (settings, message) => settings?.enabled === true && authorizedConversation(settings, message);
 
 export function nicknameMentioned(text, names) {
   const normalized = String(text).normalize('NFKC').toLocaleLowerCase();

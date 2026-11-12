@@ -3,6 +3,7 @@ import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { atomicJson } from "../../backend/storage/atomic-json.ts";
 import { ChannelError, eligible } from "../../shared/contracts.mjs";
+import { assertConversationAuthorized, assertPersonAuthorized } from '../../shared/authorization.mjs';
 
 const clone = (value) => structuredClone(value);
 const active = new Set(['pending', 'running']);
@@ -164,6 +165,8 @@ export class TaskScheduler {
           });
       }
     this.save();
+    channel.scheduler = this;
+    channel.authorization?.reconcile();
   }
   save() {
     try {
@@ -173,6 +176,8 @@ export class TaskScheduler {
     }
   }
   authorized(selector, fromChat = false) {
+    assertConversationAuthorized(this.store, selector);
+    for (const target of selector.targets || []) assertPersonAuthorized(this.store, selector.accountId, target.id);
     if (!eligible(this.store.settings(selector.accountId), selector))
       throw new ChannelError('TASK_NOT_AUTHORIZED', '该会话未授权或自动回复已暂停，未执行定时任务');
     if (
@@ -289,6 +294,7 @@ export class TaskScheduler {
     )
       throw new ChannelError('INVALID_TASK', '请选择发送消息或执行 Agent 任务，并填写 1–4000 字的内容');
     const targets = savedTargets(input.targets, scope);
+    for (const target of targets) assertPersonAuthorized(this.store, scope.accountId, target.id);
     const identity = [
       scope.accountId,
       scope.chatType,

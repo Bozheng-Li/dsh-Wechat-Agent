@@ -2,7 +2,7 @@ import { ChannelError } from '../../shared/contracts.mjs';
 import { workResult } from './result.mjs';
 
 const same = (record, scope) => ['accountId', 'chatType', 'peerId', 'senderId'].every(key => record[key] === scope[key]);
-const stages = { wechat_work_list: '查看目录', wechat_work_read: '读取文件', wechat_work_write: '保存文件',
+const stages = { wechat_file: '读取微信附件', wechat_work_list: '查看目录', wechat_work_read: '读取文件', wechat_work_write: '保存文件',
   wechat_work_exec: '执行本机命令', wechat_work_ssh_connect: '验证 SSH', wechat_work_ssh_exec: '读取远端结果',
   wechat_work_output: '登记成果', wechat_work_generate_image: '生成图片', wechat_work_status: '查询状态' };
 
@@ -50,7 +50,6 @@ export async function replyToWork(channel, item, scope, signal) {
   signal.throwIfAborted(); channel.work.assertAllowed(scope, signal);
   const command = item.workCommand;
   return { text: channel.work.handle(command, scope, { defer: true,
-    quotedReferences: item.quotedReferences,
     conversationTurn: ['create', 'continue'].includes(command.action),
     onCreated: job => recordWorkCreation(channel, item, job) }) };
 }

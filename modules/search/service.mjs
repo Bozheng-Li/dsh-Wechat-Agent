@@ -1,6 +1,7 @@
 import { ChannelError, DEFAULT_TAVILY_URL, searchBaseURL } from "../../shared/contracts.mjs";
 
 import { searchWithFallback } from './fallback.mjs';
+import { TIME_DEFAULTS } from '../../shared/time-settings.mjs';
 
 export const SEARCH_CREDENTIALS = Object.freeze({
   dsh: 'WECHAT_AGENT_DEEPSEEK_SEARCH_API_KEY',
@@ -84,10 +85,11 @@ async function responseJSON(response, signal) {
 
 /** Independent search credentials; a chat credential is never copied to a new endpoint. */
 export class SearchService {
-  constructor(ctx, { fetchImpl = globalThis.fetch, loadDeepSeek, attemptTimeoutMs = 45000 } = {}) {
+  constructor(ctx, { fetchImpl = globalThis.fetch, loadDeepSeek, attemptTimeoutMs = TIME_DEFAULTS.searchTimeoutSeconds * 1000, getAttemptTimeoutMs } = {}) {
     this.ctx = ctx;
     this.fetchImpl = fetchImpl;
     this.attemptTimeoutMs = attemptTimeoutMs;
+    this.getAttemptTimeoutMs = getAttemptTimeoutMs ?? (() => this.attemptTimeoutMs);
     this.loadDeepSeek =
       loadDeepSeek ||
       (() => {
@@ -142,7 +144,7 @@ export class SearchService {
   forConfig(config = {}, { assertAllowed = () => {} } = {}) {
     const selected = config.searchProvider ?? 'tavily',
       baseURL = config.tavilyBaseURL ?? DEFAULT_TAVILY_URL;
-    return { search: (request, signal) => searchWithFallback({ primary: selected, request, signal, timeoutMs: this.attemptTimeoutMs, assertAllowed,
+    return { search: (request, signal) => searchWithFallback({ primary: selected, request, signal, timeoutMs: this.getAttemptTimeoutMs(), assertAllowed,
       search: (provider, query, abort, options) => this.search(provider, baseURL, query, abort, options) }) };
   }
   async search(provider, baseURL, request, signal, { requireCredential = false } = {}) {
@@ -200,7 +202,7 @@ export class SearchService {
         'Tavily 搜索尚未配置密钥；请在模型设置中保存 Tavily API Key。'
       );
     const endpoint = searchBaseURL(baseURL) + '/search';
-    const combined = AbortSignal.any([AbortSignal.timeout(45000), ...(signal ? [signal] : [])]);
+    const combined = AbortSignal.any([AbortSignal.timeout(this.getAttemptTimeoutMs()), ...(signal ? [signal] : [])]);
     let response;
     try {
       response = await this.fetchImpl(endpoint, {

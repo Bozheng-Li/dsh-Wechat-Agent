@@ -24,7 +24,7 @@ export function WechatPanel({ connection, catalog }) {
   }, [menuOpen]);
   const { motion, status, page, memoryTab, busy, workspaceRef, action, navigate, navPage, warning } = state;
   const sectionLabel = ['overview', 'authorization', 'records', 'moments'].includes(navPage) ? '日常'
-    : ['tasks', 'work', 'digests'].includes(navPage) ? '自动化' : '管理';
+    : ['tasks', 'work', 'digests', 'traces'].includes(navPage) ? '自动化' : '管理';
   const content = <PanelContent connection={connection} catalog={catalog} state={state} />;
   return (
     <div className="wa-panel" data-motion={motion.enabled ? 'on' : 'off'} data-page={page}>
@@ -58,6 +58,7 @@ export function WechatPanel({ connection, catalog }) {
               [
                 '自动化',
                 [
+                  ['traces', 'history', '任务执行轨迹'],
                   ['tasks', 'clock', '定时任务'],
                   ['work', 'work', '工作任务'],
                   ['digests', 'digest', '群聊简报'],

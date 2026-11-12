@@ -9,6 +9,7 @@ import { TaskRecipients } from "./recipients.jsx";
 import { taskStates, localDateInput, scheduleLabel, TaskBadge, TaskDetails } from "./details.jsx";
 import { PageHead } from '../../components/page-ui.jsx';
 import { Glyph } from '../../components/glyph.jsx';
+import { ScheduleCountdown } from '../../components/schedule-countdown.jsx';
 
 export function TasksPage({ rpc, status, rows, initialPeer }) {
   const peers = rows.filter((peer) => peer.authorized),
@@ -137,6 +138,7 @@ export function TasksPage({ rpc, status, rows, initialPeer }) {
     currentPage = Math.min(page, pageCount - 1);
   const pageEntries = entries.slice(currentPage * 20, currentPage * 20 + 20);
   const rooms = [...new Map(data.tasks.map((task) => [conversationKey(task), task])).values()];
+  const taskPaused = task => task.state === 'paused' || data.error || rows.some(peer => conversationKey(peer) === conversationKey(task) && !peer.authorized);
   return (
     <>
       <PageHead icon="clock" title="定时任务" description="安排提醒与 Agent 任务，查看执行结果。">
@@ -290,7 +292,7 @@ export function TasksPage({ rpc, status, rows, initialPeer }) {
                   </Button>
                   </div>
                 </div>
-                {!status.settings.enabled && <p className="wa-help">请先在会话页开启自动回复。</p>}
+                {!status.settings.enabled && <p className="wa-help">请先在“设置 → 自动功能”中开启自动回复。</p>}
               </fieldset>
             </form>
           )}
@@ -386,6 +388,8 @@ export function TasksPage({ rpc, status, rows, initialPeer }) {
                                   : '下次执行'}
                           </span>
                           <time>{formatTime(task.nextRunAt)}</time>
+                          <ScheduleCountdown at={Math.max(task.nextRunAt, task.retryAt || 0)} running={task.state === 'running'}
+                            paused={taskPaused(task)} status={status} action={task.retryAt > task.nextRunAt ? '重试' : '执行'} />
                         </div>
                         <TaskBadge state={task.state} />
                         <div className="wa-task-actions">
@@ -432,7 +436,7 @@ export function TasksPage({ rpc, status, rows, initialPeer }) {
                         )}
                       <details className="wa-task-details">
                         <summary>查看详情</summary>
-                        <TaskDetails task={task} />
+                        <TaskDetails task={task} paused={taskPaused(task)} status={status} />
                       </details>
                     </article>
                   ))}
@@ -470,7 +474,7 @@ export function TasksPage({ rpc, status, rows, initialPeer }) {
                           ⌄
                         </span>
                       </summary>
-                      <TaskDetails task={entry.task} runs={entry.runs} /><CleanupControl state={cleanupState} kind="tasks.history" ids={[entry.task.id]} label="删除任务历史" />
+                      <TaskDetails task={entry.task} runs={entry.runs} paused={taskPaused(entry.task)} status={status} /><CleanupControl state={cleanupState} kind="tasks.history" ids={[entry.task.id]} label="删除任务历史" />
                     </details>
                   ))}
                 </div>

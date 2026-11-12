@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { timeLimitMs, TIME_DEFAULTS } from '../../shared/time-settings.mjs';
 import { createHash, randomInt, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { ChannelError, publicError } from '../../shared/contracts.mjs';
@@ -14,7 +15,8 @@ import { generateInteractionComments } from './interaction-content.mjs';
 import { automaticInteractionOptions, interactionAutomationSettings } from '../../shared/moments-interaction-settings.mjs';
 import { selectAutomaticInteractions } from './interaction-selection.mjs';
 import { MomentsInteractionSchedule } from './interaction-schedule.mjs';
-import { readMomentsImageContext, momentsImageContextVersion } from './image-context.mjs';
+import { readMomentsImageContext, momentsImageContextVersion, readableMomentsImages, momentsCommentBasis,
+  momentsImageFailure, recoverableMomentsImageError } from './image-context.mjs';
 
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -124,7 +126,9 @@ export class MomentsInteractions {
   }
   track(promise) { this.pending.add(promise); void promise.finally(() => this.pending.delete(promise)).catch(() => {}); return promise; }
   preview(accountId, input, requestId, signal, assertAllowed = () => {}, scope) {
-    const context = this.context(accountId, scope); this.check(context, signal, assertAllowed); const options = interactionOptions(input);
+    const context = this.context(accountId, scope); this.check(context, signal, assertAllowed);
+    const timing = this.channel.store.config?.data?.timeSettings ?? TIME_DEFAULTS;
+    const options = interactionOptions(object(input) ? { intervalSeconds: timing.manualInteractionIntervalSeconds, lookbackDays: timing.manualInteractionLookbackDays, ...input } : input);
     if (typeof requestId !== 'string' || !requestId || requestId.length > 1800) failure('MOMENTS_INTERACTION_INVALID', '缺少本轮互动请求编号');
     const id = digest([this.data.ownerStoreId, context.scopeKey, requestId]), requestHash = digest(options), existing = this.data.runs[id];
     if (existing) {
@@ -136,7 +140,7 @@ export class MomentsInteractions {
       if (active.requestHash !== requestHash) failure('MOMENTS_INTERACTION_CHANGED', '同一请求不能同时挑选不同动态');
       return active.promise.then(result => { this.check(context, signal, assertAllowed); return result; });
     }
-    const combined = AbortSignal.any([this.lifetime.signal, AbortSignal.timeout(90000), ...(signal ? [signal] : [])]);
+    const combined = AbortSignal.any([this.lifetime.signal, AbortSignal.timeout(timeLimitMs(this.channel.store, 'momentsInteractionReadTimeoutSeconds')), ...(signal ? [signal] : [])]);
     const check = () => this.check(context, combined, assertAllowed);
     const promise = this.track((async () => {
       const { posts, scan, targetUserId } = await readInteractionPool(this.channel, options, context, combined, check); check();
@@ -185,8 +189,8 @@ export class MomentsInteractions {
     return this.launch(record, 'running', context, signal, assertAllowed, async (combined, check) => {
       try {
         const { chosen, scan, targetUserId } = await selectAutomaticInteractions(this, record, context, combined, check); check();
-        record.rows = chosen.map(({ post, like, comment, imageContext, commentSkipReason }) => ({ ...interactionRow(post, options), selected: true,
-          ...(imageContext ? { imageContext } : {}), ...(commentSkipReason ? { commentSkipReason } : {}),
+        record.rows = chosen.map(({ post, like, comment, imageContext, imageReadError, commentSkipReason }) => ({ ...interactionRow(post, options), selected: true,
+          ...(imageContext ? { imageContext } : {}), ...(imageReadError ? { imageReadError } : {}), ...(commentSkipReason ? { commentSkipReason } : {}),
           like: { state: like ? 'pending' : 'skipped', message: like ? '' : '本轮未安排点赞' },
           comment: { state: comment ? 'pending' : 'skipped', message: comment ? '' : commentSkipReason || '本轮未安排评论' } }));
         record.scan = scan; record.targetUserId = targetUserId; this.save();
@@ -221,7 +225,7 @@ export class MomentsInteractions {
   launch(record, kind, context, signal, assertAllowed, operation) {
     if (this.active) failure('MOMENTS_INTERACTION_BUSY', '已有一轮互动正在生成或执行，请等待完成或停止当前轮次');
     const controller = new AbortController(), combined = AbortSignal.any([controller.signal, this.lifetime.signal,
-      AbortSignal.timeout(kind === 'generating' ? 300000 : 30 * 60000), ...(signal ? [signal] : [])]);
+      AbortSignal.timeout(timeLimitMs(this.channel.store, kind === 'generating' ? 'momentsCommentTimeoutMinutes' : 'momentsInteractionTimeoutMinutes')), ...(signal ? [signal] : [])]);
     const check = () => this.check(context, combined, assertAllowed);
     const active = { id: record.id, accountId: record.accountId, kind, controller }; this.active = active;
     record.state = kind; record.revision = randomUUID(); record.updatedAt = this.channel.now();
@@ -260,21 +264,27 @@ export class MomentsInteractions {
       if (row.imageCount > 0) {
         record.phase = 'reading-images'; this.save();
         try {
-          if (!record.automatic || row.imageContext?.contentHash !== row.contentHash)
+          if (!record.automatic || row.imageContext?.contentHash !== row.contentHash && !row.imageReadError) {
+            delete row.imageReadError;
             row.imageContext = await readMomentsImageContext(this.channel, { accountId: record.accountId, scopeKey: context.scopeKey,
               postId: row.postId, expectedHash: row.contentHash }, signal, check);
-          if (!row.imageContext.complete) { row.commentText = ''; row.commentSkipReason = '部分图片看不清，已跳过自动评论'; continue; }
+          }
         } catch (error) {
           check(); row.commentText = ''; delete row.imageContext;
-          row.commentSkipReason = publicError(error, '图片读取未完成，已跳过自动评论').message; continue;
+          row.imageReadError = momentsImageFailure(error);
+          if (!recoverableMomentsImageError(error)) { row.commentSkipReason = row.imageReadError.message; continue; }
+        }
+        if (!momentsCommentBasis(row.text, row.imageContext)) {
+          row.commentText = ''; row.commentSkipReason = '配图未读到可用内容，且没有可回复的正文，已跳过自动评论'; continue;
         }
       }
       ready.push(row);
     }
     check(); record.phase = 'generating'; this.save();
     if (ready.length) {
-      const generated = await generateInteractionComments(this.channel, ready, record.options.instructions, signal, check); check();
-      for (const row of ready) { const value = generated.get(row.postId); row.commentText = value.text; row.commentSkipReason = value.skipReason; row.commentSource = 'generated'; }
+      const generated = await generateInteractionComments(this.channel, ready, record.options.instructions, signal, check, record.accountId); check();
+      for (const row of ready) { const value = generated.get(row.postId); row.commentText = value.text; row.commentSkipReason = value.skipReason;
+        row.commentSource = 'generated'; row.commentBasis = momentsCommentBasis(row.text, row.imageContext); }
     }
     delete record.generationError; this.save();
   }
@@ -293,13 +303,18 @@ export class MomentsInteractions {
   }
   async execute(record, rows, context, signal, check) {
     record.startedAt = this.channel.now(); delete record.error; this.save();
+    const skip = (row, message) => {
+      for (const step of [row.like, row.comment]) if (step.state === 'pending') { step.state = 'skipped'; step.message = message; }
+      this.save();
+    };
     try {
       for (const [index, row] of rows.entries()) {
         check();
-        const post = await readInteractionDetail(this.channel, context, row.postId, signal, check);
+        let post;
+        try { post = await readInteractionDetail(this.channel, context, row.postId, signal, check); }
+        catch (error) { check(); if (error.code !== 'OBJECT_NOT_AUTHORIZED') throw error; skip(row, error.message); continue; }
         if (post.deleted || !post.contentAvailable || post.author.userId !== row.userId || interactionContentHash(post) !== row.contentHash) {
-          for (const step of [row.like, row.comment]) if (step.state === 'pending') { step.state = 'skipped'; step.message = '动态内容、作者或可见状态已变化，请重新读取'; }
-          this.save(); continue;
+          skip(row, '动态内容、作者或可见状态已变化，请重新读取'); continue;
         }
         const prior = record.automatic ? this.priorInteractions(context.accountId, record.id).get(row.postId) : null;
         if (row.like.state === 'pending') {
@@ -310,9 +325,11 @@ export class MomentsInteractions {
         check();
         if (row.comment.state === 'pending') {
           if (row.commentSkipReason) row.comment = { state: 'skipped', message: row.commentSkipReason };
-          else if (row.commentSource === 'generated' && row.imageCount > 0 && (row.imageContext?.version !== momentsImageContextVersion ||
-              row.imageContext.complete !== true || row.imageContext.contentHash !== row.contentHash || row.imageContext.accountId !== record.accountId || row.imageContext.postId !== row.postId))
-            row.comment = { state: 'skipped', message: '这条评论尚未结合真实图片，请重新生成后再执行' };
+          else if (row.commentSource === 'generated' && row.imageCount > 0 && !(
+              row.commentBasis === 'text' && readableInteractionText(row.text) && !readableMomentsImages(row.imageContext).length ||
+              row.imageContext?.version === momentsImageContextVersion && readableMomentsImages(row.imageContext).length > 0 &&
+              row.imageContext.contentHash === row.contentHash && row.imageContext.accountId === record.accountId && row.imageContext.postId === row.postId))
+            row.comment = { state: 'skipped', message: '这条评论缺少真实图片或正文依据，请重新生成后再执行' };
           else if (record.options.skipCommented && (prior?.comment?.confirmed || await interactionOwnComment(this.channel, context, post, signal, check)))
             row.comment = { state: 'existing', message: '已有当前账号的评论，按本轮设置跳过' };
           else await this.submit(record, row, 'comment', context, signal, check);

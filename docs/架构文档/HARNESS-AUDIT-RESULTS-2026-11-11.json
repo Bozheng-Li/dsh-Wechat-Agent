@@ -1,0 +1,3102 @@
+{
+  "schemaVersion": 2,
+  "at": "2026-11-11T04:30:22.620Z",
+  "status": "audit-completed-findings-open-at-cutoff",
+  "candidateAllGreen": false,
+  "focusedVerificationCutoff": "2026-11-11T03:09:09Z",
+  "fullSuiteCompletedAt": "2026-11-11T03:10:44.655Z",
+  "scope": {
+    "objective": "当前实际功能深测、harness方案调研及优化方向文档",
+    "productionCodeChangedByAudit": false,
+    "realWechatMessages": 0,
+    "paidModelQualityEvaluation": false,
+    "liveExternalAcceptance": "not-performed",
+    "note": "Native DSH SDK, filesystem, images, PowerShell, RPC, Electron and clock are real; model/provider/WeChat responses are synthetic. Adapting stale fixtures does not repair the original gates."
+  },
+  "baseline": {
+    "commit": "e0568080ab34945d8e3bdecb10ef29b1b5e11494",
+    "dirtyWorktree": true,
+    "sharedWorktreeChangedDuringAudit": true,
+    "node": "v24.16.0",
+    "python": "Python 3.13.5",
+    "dsh": "0.2.1-rc.5",
+    "initialSourceFiles": 493,
+    "sourceManifestSha256": "638c5eb562238b5c29488866083ce91971b3a2aa4dce00bc63073ea75998a5fd",
+    "snapshotPath": "storage/logs/harness-audit-2026-11-11/snapshot.json",
+    "snapshotSha256": "0dc90ae5595bce59695bcb57d4832c92f492c5febc6c12e4cfe7e4e2edfb4b45",
+    "changedSource": [
+      "scripts/test-native-handoff.cjs",
+      "shared/message-references.mjs",
+      "backend/wechat/worker.mjs",
+      "backend/wechat/worker-client.mjs",
+      "backend/wechat/types.ts",
+      "backend/wechat/protocol/reference.ts",
+      "backend/wechat/protocol/file-upload.ts",
+      "backend/wechat/protocol/backend.ts",
+      "modules/work/store.mjs",
+      "modules/work/service.mjs",
+      "modules/work/runner.mjs",
+      "modules/work/result.mjs",
+      "modules/work/outcome.mjs",
+      "modules/work/dialogue.mjs",
+      "modules/tools/work-execution.mjs",
+      "modules/tools/progressive.mjs",
+      "modules/tools/index.mjs",
+      "modules/memory/images/tool.mjs",
+      "modules/memory/images/store.mjs",
+      "modules/memory/images/references.mjs",
+      "backend/storage/state-store.mjs",
+      "tests/worker-send-account.test.mjs",
+      "tests/outbound-media.test.mjs",
+      "tests/image-memory.test.mjs",
+      "tests/generated-image-memory.test.mjs",
+      "tests/exports.mjs",
+      "modules/conversation/tool-notices.mjs",
+      "modules/conversation/reply.mjs",
+      "modules/conversation/incoming.mjs",
+      "prompts/agent/capabilities.mjs",
+      "prompts/memory/context.mjs"
+    ],
+    "secondSnapshotPath": "storage/logs/harness-audit-2026-11-11/snapshot-final.json",
+    "cutoffSnapshotPath": "storage/logs/harness-audit-2026-11-11/source-cutoff.json",
+    "cutoffSourceFiles": 505,
+    "cutoffSourceManifestSha256": "af64ec6e29d693d4e02a56b33a4e9b9dba809b4e6c3c80bf4e56841cbdf26cb5",
+    "lateChanges": [
+      "scripts/test-native-handoff.cjs",
+      "scripts/probe-wechat-file-download.mjs",
+      "backend/wechat/protocol/file-upload.ts",
+      "backend/wechat/protocol/file-loader.mjs",
+      "backend/wechat/protocol/file-download.ts",
+      "backend/wechat/protocol/backend.ts",
+      "tests/inbound-files.test.mjs",
+      "modules/work/store.mjs",
+      "modules/work/outcome.mjs",
+      "modules/tools/files.mjs",
+      "tests/outbound-media.test.mjs",
+      "tests/received-files.test.mjs",
+      "tests/worker-send-account.test.mjs"
+    ],
+    "lateChangeVerification": {
+      "scripts/probe-wechat-file-download.mjs": "Protocol probe reviewed as nonproduct; not run against real WeChat.",
+      "scripts/test-native-handoff.cjs": "Externally updated after the original failure; current script was not fully rerun. Historical native results do not certify it.",
+      "backend/wechat/protocol/file-upload.ts": "Direct-source outbound tests in outbound-media-final.log and memory-latest/targeted-tests.log.",
+      "backend/wechat/protocol/file-download.ts": "Latest inbound-files direct-source tests and memory-latest source manifest.",
+      "backend/wechat/protocol/file-loader.mjs": "Latest inbound-files tests and real isolated same-length cache corruption probe; F13 reproduction now rejected.",
+      "backend/wechat/protocol/backend.ts": "Integration wiring reviewed; latest package builds it, but no real WeChat acceptance was performed.",
+      "modules/tools/files.mjs": "The 10:56-start received-files tests and DOCX paging probe checked contentRead=true. Tool selection recording changed during that run; later behavior is source-reviewed only.",
+      "tests/inbound-files.test.mjs": "Rerun in memory-latest/targeted-tests.log after late protocol changes.",
+      "tests/outbound-media.test.mjs": "Rerun in memory-latest/targeted-tests.log after late protocol changes.",
+      "tests/received-files.test.mjs": "Not part of second full-suite enumeration; 11 cases ran in memory-latest/targeted-tests.log. A twelfth case was added during the run and was not counted as passed.",
+      "modules/work/store.mjs": "The wechat_file whitelist addition was verified by actual tool execution, persistence, reload and existing ACK preservation in runtime-cutoff/persistence-wechat-file.json. The four older missing tool types remained unresolved at the cutoff.",
+      "modules/work/outcome.mjs": "Source-reviewed selection-specific wechat_file retry matching and list exclusion; not treated as a fully executed regression suite for this late change.",
+      "tests/worker-send-account.test.mjs": "Late file IPC account, session replacement and controlled-error cases were source-reviewed, not executed by this audit."
+    },
+    "cutoffSourceManifest": [
+      {
+        "path": "backend/worker.mjs",
+        "sha256": "cca980b9c9feab0ce1eaac287e678c414e97dee89e5bf9b5422491023cd0f094"
+      },
+      {
+        "path": "scripts/visual-inspection.cjs",
+        "sha256": "7a887708fcd2695436453de2d2614e91c871789dca7a8af15b9bf5e4db4e0159"
+      },
+      {
+        "path": "scripts/verify-npm-release.mjs",
+        "sha256": "187ebeeeeab24f789505400287f79accaf2bca050a1ead33895e4ec41b2873d6"
+      },
+      {
+        "path": "scripts/test.mjs",
+        "sha256": "9ec1d941423d1c54ee5fe37ed75a2b308ccc45c6bb555ac8b8705f776b076f89"
+      },
+      {
+        "path": "scripts/test-workbench-ui.cjs",
+        "sha256": "54916a296033908b2bf9be0b8b42dc1f203d6e54f64218d58982d31522ebd5c9"
+      },
+      {
+        "path": "scripts/test-work-tools-native.cjs",
+        "sha256": "3d4fa778089962dc88e19c208278b9d0c564d6c985bfa5469e9cac970b29d1c8"
+      },
+      {
+        "path": "scripts/test-work-parallel-native.cjs",
+        "sha256": "3d4fa778089962dc88e19c208278b9d0c564d6c985bfa5469e9cac970b29d1c8"
+      },
+      {
+        "path": "scripts/test-work-native.cjs",
+        "sha256": "3d4fa778089962dc88e19c208278b9d0c564d6c985bfa5469e9cac970b29d1c8"
+      },
+      {
+        "path": "scripts/test-visual-system.mjs",
+        "sha256": "5b8a5cbcc91209caf6612cd57b0eab8e20f1ab866c3932c51e1cf2beaae959a0"
+      },
+      {
+        "path": "scripts/test-visual-system.cjs",
+        "sha256": "b180fe75da26b7aeff29338bb5f2cfea7285139d6eedf78610532faff490aa1e"
+      },
+      {
+        "path": "scripts/test-ui.mjs",
+        "sha256": "350c087ee98187db7fcccf61962430c09326c68ee023b713db99a64b38dad84e"
+      },
+      {
+        "path": "scripts/test-ui-driver.cjs",
+        "sha256": "22a1520ec0dc94d8a62958773d22b8471c02926b19a534d5c98a6a789bfe8a1b"
+      },
+      {
+        "path": "scripts/test-search-native.cjs",
+        "sha256": "43c25b785933d3af0baff59569a0142a87b4599f989e8efa4426d9a53c5a6e8f"
+      },
+      {
+        "path": "scripts/test-scheduler-clock.mjs",
+        "sha256": "206f0fe6a488c6bf955cd55800704ca5b047177ddff10999055c36a349813f40"
+      },
+      {
+        "path": "scripts/test-role-cards-ui.cjs",
+        "sha256": "f4697c0338395bea1e1d9446f3daaf8901e67c1259bf77d2266fa05eedf944b7"
+      },
+      {
+        "path": "scripts/test-remote-native.cjs",
+        "sha256": "0b2a84a3ea5918134f3cb939b1d5d7ca2e1db08e1ddb6fb670163128fc6c6e82"
+      },
+      {
+        "path": "scripts/test-native-handoff.cjs",
+        "sha256": "8cb405e31349d6fd37c2147799de75e01cb167cc7c9c71df44e287caaf74b4f6"
+      },
+      {
+        "path": "scripts/test-moments-replies-ui.cjs",
+        "sha256": "d156c087534a7cb273a9409a7b103137940c89914adae567fe7fd34cd8f3d114"
+      },
+      {
+        "path": "scripts/test-moments-recovery-ui.cjs",
+        "sha256": "44b4a9aad090402d9da3ebdbbb622da7762a76dca9225f0dd4da2d79e223257d"
+      },
+      {
+        "path": "scripts/test-moments-interactions-ui.cjs",
+        "sha256": "1c2127f97254036824c06f2992fb635a9463953dcf6d42a1973e89475d7bcd7a"
+      },
+      {
+        "path": "scripts/test-generated-images-ui.cjs",
+        "sha256": "1d38674404c9f79733497c0beab53c3fff8fc333261600137e99f937e6a08f6b"
+      },
+      {
+        "path": "scripts/test-dsh-native.cjs",
+        "sha256": "0ddbb6b11d348ac2282f65984b8bc90d40a2940e34ca475975c957847085415c"
+      },
+      {
+        "path": "scripts/test-authorization-ui.cjs",
+        "sha256": "3d3bc2ba43152f8b8fc51557f09006aa7f45f9028062cf7fca8f8f89f474abeb"
+      },
+      {
+        "path": "scripts/prompt-on-demand-image-live-cases.cjs",
+        "sha256": "b12ae23aed90a9fa94301325e29e77faeb9a3fe7e5e8679ec7c947e7de0fc243"
+      },
+      {
+        "path": "scripts/prompt-live-cases.cjs",
+        "sha256": "a35d84af7625f59d251d0dc3e8a1380e8fe2ee26f89c959380c981d61114b1c3"
+      },
+      {
+        "path": "scripts/prompt-config-live-cases.cjs",
+        "sha256": "c6b5bfbc58c8e7cacd4a14c1b9f6d05e9f1d67ee2c1100170cdb6a5fc11b3422"
+      },
+      {
+        "path": "scripts/prompt-compaction-live-cases.cjs",
+        "sha256": "f0e918e8e4f8163846338f11cefbef4727af1b6d52e48e3a1f74bbc86f92f623"
+      },
+      {
+        "path": "scripts/prompt-admin-notes-live-cases.cjs",
+        "sha256": "c4e43c6b2e0cf8918aaf3081fe9f6e0f5cc1cb192e29d5a0b8e44ea42294867d"
+      },
+      {
+        "path": "scripts/probe-wechat-file-download.mjs",
+        "sha256": "9f54348bb89ce4d324e310c1d29899a6ca5456093e740112324261bae6eaea13"
+      },
+      {
+        "path": "scripts/preview-workbench.mjs",
+        "sha256": "b204f1fcd303b8462b4416410925dcda70fdada2848a16c7debdeefa6659afc5"
+      },
+      {
+        "path": "scripts/prepare-wechat-engine.mjs",
+        "sha256": "6c81c9015e841f17c6ec01b658148fc9ea2b97173c68a89fbfa5fecc2d826b19"
+      },
+      {
+        "path": "scripts/persona-upgrade-live-cases.cjs",
+        "sha256": "2e18439e5f5d517568871321389b100b5d925c35f3e2e5edefc02d2b90901afa"
+      },
+      {
+        "path": "scripts/persona-section-live-cases.cjs",
+        "sha256": "b31de57dea494fc4d1c80e88e1615d22ee6ba79685ca9c8cf0dada48c5eb5954"
+      },
+      {
+        "path": "scripts/persona-resume-live-cases.cjs",
+        "sha256": "71718fa5827d2fbf58e1926b77b8738e2b2a3173bdcbd384588a6130bc911b71"
+      },
+      {
+        "path": "scripts/persona-input-ablation.cjs",
+        "sha256": "8eaf959a902f503ab04c28b9d62da395c3e0e6d5df6641bb9464494c2743a70b"
+      },
+      {
+        "path": "scripts/persona-behavior-live-cases.cjs",
+        "sha256": "1ba28b4f2a2e53e93655c2e79c9a9325dd8f4ab28698e71b246f4123b27410c9"
+      },
+      {
+        "path": "scripts/package-resources.mjs",
+        "sha256": "0057def1c20790acd05f681bba6220c11db7fa362bd03679d5736015bbff5143"
+      },
+      {
+        "path": "scripts/memory-behavior-live-cases.cjs",
+        "sha256": "10c40ee1fede8271c2f72d7c0eb2386b1fc2fe942dd0bc0e914bdadef54a6104"
+      },
+      {
+        "path": "scripts/language-live-cases.cjs",
+        "sha256": "239f688b89ba3b80cb4a13738685d23b08bbdf76100168e66beece3ea18653eb"
+      },
+      {
+        "path": "scripts/download-builtin-stickers.mjs",
+        "sha256": "25278db92b60fe864c8b56106b4ee18dbebb11d0dfd8acc2372e285f457600b4"
+      },
+      {
+        "path": "scripts/build-dsh-plugin.mjs",
+        "sha256": "05abc846dbef9e003f063cae287bfd7e834fadd38c9ef44e7549de32e319d787"
+      },
+      {
+        "path": "scripts/audit-dsh-package.mjs",
+        "sha256": "78a252da67212f7643d4f4eb35d4cd91e88d2b5d9c9a082fd5a9fa66c26aff0c"
+      },
+      {
+        "path": "backend/wechat/worker.mjs",
+        "sha256": "23b9748baee497649b5849a742c4b06c6ce45a75ddf2cb89a24a18fbfb0db784"
+      },
+      {
+        "path": "backend/wechat/worker-client.mjs",
+        "sha256": "60f5f2734fd3bce051f7715d97dacfc0b8a17ae383b0c9db01282d8cb57eca5e"
+      },
+      {
+        "path": "backend/wechat/types.ts",
+        "sha256": "ec31524e2fb49a50f21c4d4a7d52265c60e52d16f4bd5da5db2e7d3eb9323447"
+      },
+      {
+        "path": "backend/wechat/send-errors.mjs",
+        "sha256": "d87af6281b45fa249b98a4ef1319934c7fe895b8aae716fb6c6855af602da835"
+      },
+      {
+        "path": "shared/work-image-request.mjs",
+        "sha256": "52c99d622b3a3ac98d59481f96ddf9a12f3a3d51000b602e067115c46e76a7f7"
+      },
+      {
+        "path": "shared/work-artifacts.mjs",
+        "sha256": "61605af53f2934e2d66502e742953a6fa42dab5a50f86d415b981dc56c531526"
+      },
+      {
+        "path": "shared/text.mjs",
+        "sha256": "6e90bee3f0b42322bd922fcc517ab7dd26639105d189711213bb866502af64cc"
+      },
+      {
+        "path": "shared/task-history.mjs",
+        "sha256": "ba8449729389639ac7e4a8ea233c863bc465afc33cd57d4955bdda5fb8eaa539"
+      },
+      {
+        "path": "shared/role-card.mjs",
+        "sha256": "47875b31f4f895d3116dd165b4487119c5a7e4c0660f1096f19d310330695ac2"
+      },
+      {
+        "path": "shared/received-files.mjs",
+        "sha256": "17fa808323fedb0bab519afb696130a67377ec0a288fd78211b32cab6f309c0f"
+      },
+      {
+        "path": "shared/moments.mjs",
+        "sha256": "3ed4ada4e9bc62bf9910ab41eb877fc05041525a98418e8473833f0fc187db3c"
+      },
+      {
+        "path": "shared/moments-subject.mjs",
+        "sha256": "bb16f63d9c868f67732030748675eb09894d209cac9df066b45f4bf9103536b2"
+      },
+      {
+        "path": "shared/moments-publishing.mjs",
+        "sha256": "3df3b9707181c7c3cdd0fd6908452e538f3e99e0a7e538dad84832bd9496fe63"
+      },
+      {
+        "path": "shared/moments-publication.mjs",
+        "sha256": "599b8516eee102977385b18af12f0ec773d1163bec26a14e5705e6a2f2e43215"
+      },
+      {
+        "path": "shared/moments-materials.mjs",
+        "sha256": "a87c3f84fc5a82f009d949aee3e10f048802135954883f36f7b99f8b39691b88"
+      },
+      {
+        "path": "shared/moments-likes.mjs",
+        "sha256": "f58a9870d1a6b608491e3391ed335f06b2f2718af735d6f77fd6db9386cd265a"
+      },
+      {
+        "path": "shared/moments-like-request.mjs",
+        "sha256": "d9dc8fb18278dfcf9fe4d46961ac18387085a3ce726e781b2667613766305926"
+      },
+      {
+        "path": "shared/moments-interactions.mjs",
+        "sha256": "671b923516ba52d68654ea87bf07d4dfd9db6864e25a21d33a7612290dfce2c2"
+      },
+      {
+        "path": "shared/moments-interaction-settings.mjs",
+        "sha256": "3ec293fd85c9d865ab21fe5a5316b7f68d964e1948c65094850852264e3f9928"
+      },
+      {
+        "path": "shared/moments-audience.mjs",
+        "sha256": "a365a1bb5d1200d866aee758cfb959426c8518b67e92ce95c2b6c6e38ebfbfdc"
+      },
+      {
+        "path": "shared/message-references.mjs",
+        "sha256": "5397a361ed1f6af30efaa41114fc8e94d6aea4a9eb066b87436f2f68bf7a10b1"
+      },
+      {
+        "path": "shared/memory-policy.mjs",
+        "sha256": "0610db1830dcbc5547b530603384c8803ea0cba34ea4413b566fad3d36abcebe"
+      },
+      {
+        "path": "shared/image-memory.mjs",
+        "sha256": "bc969f3bc7b14c77d7242a5ea11736328843ab8f7ce8d6ac98496e3b4732fbdd"
+      },
+      {
+        "path": "shared/image-generation.mjs",
+        "sha256": "512970d7ed3854a9cb649a16318cd80de8e27f988daff47a895ab2bf8739178b"
+      },
+      {
+        "path": "shared/contracts.mjs",
+        "sha256": "4d78aee467ec5e858c04ae165b4a2afeb247ab8598b045518de16c7c8cee4328"
+      },
+      {
+        "path": "modules/workbench/store.mjs",
+        "sha256": "8438e810e67cb35b468ae833acc4f01e9963b25ae20e25a4e44094278e19fe24"
+      },
+      {
+        "path": "modules/workbench/service.mjs",
+        "sha256": "6eb5015f708c95ea07763c73a818c73ce6fd0176d27a4a48b0c01771ad08d793"
+      },
+      {
+        "path": "modules/workbench/helpers.mjs",
+        "sha256": "8780783bbc19ac747d2e4a2ce850c222520d0a83b1b0afb99616781b11fb4fcd"
+      },
+      {
+        "path": "prompts/loader.mjs",
+        "sha256": "3f3212e041883da45db691730d1be5b725b40042009c0c8f4505442367ec3b76"
+      },
+      {
+        "path": "frontend/styles/tokens.mjs",
+        "sha256": "b859085894c7eb45c80482691c669526f749a266b07224072d193dac1e02b09d"
+      },
+      {
+        "path": "frontend/styles/settings.mjs",
+        "sha256": "1e1533013babeab1b0e751747374ca5f5d00d8e9955ab855732ca30dfd25b242"
+      },
+      {
+        "path": "frontend/styles/layout.mjs",
+        "sha256": "9403f2774c0bc99aaeebb8885c27c5764bd2d969f79b558d22b945a24909cd92"
+      },
+      {
+        "path": "frontend/styles/interactions.mjs",
+        "sha256": "214a8537d47fb419f499941529cb46f96d8e3a9a0c1dd81a842bcd7c6ef9c44a"
+      },
+      {
+        "path": "frontend/styles/foundation.mjs",
+        "sha256": "25ec687fcf4f21a40f4f65e7c18694556e76e2e050c075a1efafe29c0e9c3b98"
+      },
+      {
+        "path": "frontend/styles/content.mjs",
+        "sha256": "86651d4b620fa980372ab2c0e8c09b9eb37068b0ba1e80f5c56ebce4e318b3a1"
+      },
+      {
+        "path": "frontend/styles/base.mjs",
+        "sha256": "5927a9c66815acf5c50965bffc821cf8b846254e0c29f419393d00f0ea2f3499"
+      },
+      {
+        "path": "frontend/styles/automation.mjs",
+        "sha256": "8886629a856c92c69d0677072ce014119399a2f5a0b445edac3fe1b905d5c206"
+      },
+      {
+        "path": "prompts/work/tools.json",
+        "sha256": "53272897e636bab521077c7b8dbcf329199122e29bccf2271194d332e9bda192"
+      },
+      {
+        "path": "prompts/work/system.md",
+        "sha256": "9a8d16c5f4ee91b5bcde701510510da2a209563bcb98f17557c010a4a9939cd4"
+      },
+      {
+        "path": "prompts/work/routing.md",
+        "sha256": "96c56fc142bd04508df8889ff90bc0f145d69a7def8ede8857f865c264823523"
+      },
+      {
+        "path": "prompts/work/result-polish.md",
+        "sha256": "e955fc15eae2f98cdfa675eeb71b3818c2443cdcb3381a1a9e6433c770355684"
+      },
+      {
+        "path": "prompts/work/progress.md",
+        "sha256": "0c95ed4e300130c9d3b8a7a49e661aa3e659111c6fb36bb563e1a663bbe68f69"
+      },
+      {
+        "path": "prompts/work/dialogue.md",
+        "sha256": "69bac1e8731f85b4d0f453b8b113282a0086033285bce6e2230ba504a8c4c7cf"
+      },
+      {
+        "path": "prompts/work/dialogue-tools.json",
+        "sha256": "f6f3f33d754a7a9b12bb6503f30ac643fecb9b3f14ab2a6ce7828e6925f3bf5b"
+      },
+      {
+        "path": "prompts/identity/default.md",
+        "sha256": "f29c30f33554dd1dc405182e4b6384978c196a3d74a63941fc0470540f92bd51"
+      },
+      {
+        "path": "frontend/shared/rpc.mjs",
+        "sha256": "ad36099ee0a485785c4fe3b90f015944e80302c7c9ecd269fe8ae7d78dfd79c9"
+      },
+      {
+        "path": "frontend/shared/peers.mjs",
+        "sha256": "a9a428d8ac522b277f408360de2822b3f325f8d20f162f85533654082d30864e"
+      },
+      {
+        "path": "frontend/shared/local-date.mjs",
+        "sha256": "52c709624b62fd837af147b5be72e81cb97882f685add3510566c3b335f20f0d"
+      },
+      {
+        "path": "frontend/shared/labels.mjs",
+        "sha256": "d09f1c008824eda13f843c9fa3415d68ed77f60663c53498f9d8dbdfb148f9d5"
+      },
+      {
+        "path": "frontend/shared/drafts.mjs",
+        "sha256": "4259318ee892ce23e20a0a4ad53eb044e3542e868153b19509da68078b456473"
+      },
+      {
+        "path": "prompts/files/tools.json",
+        "sha256": "d2f2437d9e5d9d0de424267c09f9b7c6c879cbde0f381742516505b9047d7fc2"
+      },
+      {
+        "path": "tests/empty-response-recovery.test.mjs",
+        "sha256": "b2806aa3764d80f4d5e24719069940261a12731139eb0423912e7275fb63eb09"
+      },
+      {
+        "path": "tests/dsh-plugin.test.mjs",
+        "sha256": "bddb1d2f6de455fa22d3850fdc1b621297aa42f00b1962acdb95a4e6a1d82841"
+      },
+      {
+        "path": "tests/conversation-preferences.test.mjs",
+        "sha256": "454573b617326130de41bf48122ab5d4f42787b88dd70c2ccf76c21362ad8075"
+      },
+      {
+        "path": "tests/contact-classification.test.mjs",
+        "sha256": "0c50544739243059cf6d7fdf90a2d17ff8d4026fbc569a3a2f07b8e5a4ab931d"
+      },
+      {
+        "path": "tests/builtin-stickers.test.mjs",
+        "sha256": "0704b80699ebeb4c362bb194e88928586345ddf13aa32884e291d80bf6f5b571"
+      },
+      {
+        "path": "tests/automatic-memory-compaction.test.mjs",
+        "sha256": "a29c360ed955414661278707ca958690fd43955cb8293b9d0cbb6e7157679523"
+      },
+      {
+        "path": "tests/agent-workspace.test.mjs",
+        "sha256": "a458a4bcbe8f58c14016728233f076db9d802405835f7514e238bd88083e788e"
+      },
+      {
+        "path": "tests/agent-task-boundaries.test.mjs",
+        "sha256": "83d3753062ed8fbca74ad9cde5609118d803afe74fdf29a3d82caaf7cf566de8"
+      },
+      {
+        "path": "tests/agent-settings.test.mjs",
+        "sha256": "80bc43b1fa82156a64ac36c1480874c9bbab7ebe7149bc7469dcb1c43b50ef1e"
+      },
+      {
+        "path": "backend/wechat/protocol/wire.ts",
+        "sha256": "450628770af8a3349e64b56f7c10edcfe09b52c633d95e0fb2eb6badfe073e04"
+      },
+      {
+        "path": "backend/wechat/protocol/transport.ts",
+        "sha256": "a77e212471943872911de4e1b1eb4b2b239de01813864db83de113e74e7d99c2"
+      },
+      {
+        "path": "backend/wechat/protocol/session.ts",
+        "sha256": "05e3f690707e66f4971760018270a4c87a21b5ce55b90908d9f8a02a7d9a243e"
+      },
+      {
+        "path": "backend/wechat/protocol/reference.ts",
+        "sha256": "553ae944cc0bf63b1ca2f1c4bed8970e0a7ff4e4c343174948cf48ae3b83cdb1"
+      },
+      {
+        "path": "backend/wechat/protocol/moments.ts",
+        "sha256": "6f0f481f478d0f097aefded25fb341bb9cb1c2d14452903c9115034ba17c1a97"
+      },
+      {
+        "path": "backend/wechat/protocol/moments-write.ts",
+        "sha256": "e48730d2aae2af3e3cda41a9b318bc681b3eb4de641e2b88389cd526d0702df5"
+      },
+      {
+        "path": "backend/wechat/protocol/moments-user-page.ts",
+        "sha256": "0c7d089cc7d4f587ee33c760e4759913b3f1b6d0ba181d226695cd6995c2ed35"
+      },
+      {
+        "path": "backend/wechat/protocol/moments-images.ts",
+        "sha256": "9c84e20131b38647411dc7ee4020999e7b55ad29ad86da3cdb946b17e741bc79"
+      },
+      {
+        "path": "backend/wechat/protocol/moments-audience.ts",
+        "sha256": "867db5112ab67ccc30897be7c0d664a583db1ffcb87212a89e877853473c866a"
+      },
+      {
+        "path": "backend/wechat/protocol/media.ts",
+        "sha256": "baa76db68ea6002aa0e3e75c54a1ae8009a28b18138309694606f0c5e4d11af3"
+      },
+      {
+        "path": "backend/wechat/protocol/media-loader.mjs",
+        "sha256": "80afdce405f6ee8693ae73470853ff46da4526bd626f0f2c3779cfb112843e20"
+      },
+      {
+        "path": "backend/wechat/protocol/login.ts",
+        "sha256": "e477707cb1fb0326c7f4d871ce410244f9ab6f97c0eab8b0bac55cfe20f070b1"
+      },
+      {
+        "path": "backend/wechat/protocol/image-session.ts",
+        "sha256": "d74415dcb16dfe7eae5c633ea05354bda29c6ee8d082f67b724c8c8d2e39ce30"
+      },
+      {
+        "path": "backend/wechat/protocol/image-download.ts",
+        "sha256": "721301e40d60af5737b68c889358d3fb6c8e65467ff8ead36264189213392b6f"
+      },
+      {
+        "path": "backend/wechat/protocol/file-upload.ts",
+        "sha256": "24ba7de12be332d8a3a4e807aef978fd8d6b68f8d139c3b5c05b59573683ff99"
+      },
+      {
+        "path": "backend/wechat/protocol/file-message.ts",
+        "sha256": "496e75b94beef37446b8d23fca532194f20e5d62fcfc0c6f7c6246fe3d69fd73"
+      },
+      {
+        "path": "backend/wechat/protocol/file-loader.mjs",
+        "sha256": "8690fa22ffad72fac6e5a11e6d22338412a8cb6d0578a506b37fe03a7078c813"
+      },
+      {
+        "path": "backend/wechat/protocol/file-download.ts",
+        "sha256": "79431c646b8591f878a525c0996d1f68eb6f085089bb44b51213298053b599f2"
+      },
+      {
+        "path": "backend/wechat/protocol/backend.ts",
+        "sha256": "adfd52b858b75a9a329ef0a3f874ca186496a628394428bee85970ceaa8fe42a"
+      },
+      {
+        "path": "backend/wechat/paths.ts",
+        "sha256": "d3c2b9ad8a1d1dda456a91d4a3394dfe4432ab94cf09fae7b8a3298b7c579010"
+      },
+      {
+        "path": "prompts/format/sections.mjs",
+        "sha256": "9c81d18809e239a896fc5796e40e5f259477fa7afabc9da4aa2b1d30c7e4a0cd"
+      },
+      {
+        "path": "tests/identity-persona.test.mjs",
+        "sha256": "68b40a3c6c80492e6aa8ab5a0e8d732415c0314344a37173b280db594182b2db"
+      },
+      {
+        "path": "tests/generated-image-memory.test.mjs",
+        "sha256": "264f0eec40997d8f129855521903840bbb241f53ad0e5d86e58c363515631209"
+      },
+      {
+        "path": "tests/image-generation-providers.test.mjs",
+        "sha256": "35f88f570c2e8dbb70f624965535827323926e978c3c89c9de5d913fd8fa6f98"
+      },
+      {
+        "path": "tests/image-generation-response.test.mjs",
+        "sha256": "1fb35846662bb7cb1008d92db82edca6bc10f98228cae6afed8e5e8364d9997d"
+      },
+      {
+        "path": "prompts/vision/tools.json",
+        "sha256": "4e06c0acd2ad30f19c5024f5289699ac4a3e4988fa27ece286c1dc61efbd52e8"
+      },
+      {
+        "path": "prompts/vision/requests.json",
+        "sha256": "a9a4f6e9cd5e449a5faf54946d8b28900800978d8bd431be1103eefff92b881b"
+      },
+      {
+        "path": "backend/wechat/ai/types.ts",
+        "sha256": "cfba4bbf59d75a2220192a9ab017611758d23b1bcd6ad6bb8e3b61c95123499e"
+      },
+      {
+        "path": "backend/wechat/ai/public-output.ts",
+        "sha256": "1968660dab6a44bb45004070991d725a549575e9dc73b0d9d3022bb57a37acc2"
+      },
+      {
+        "path": "backend/wechat/actions.mjs",
+        "sha256": "e031803cb699992f23fac3d0e6e02252a3465c9fffa1326b35c27bd2e424fb70"
+      },
+      {
+        "path": "frontend/shared/conversations.mjs",
+        "sha256": "acbf6bf6bb44d862975ffb3b39aafa491a741fc07582af5d0ce963b8f4e616ae"
+      },
+      {
+        "path": "frontend/panel.jsx",
+        "sha256": "cb07689e92f5c56ae1ac009569e68b46fc01e0786674af1ca66fa1462f60dbb2"
+      },
+      {
+        "path": "prompts/recovery/templates.json",
+        "sha256": "6c473eedca12ee61d1b4059f6cfb4dbcc1d743b488ddcf866b00d0033fb11486"
+      },
+      {
+        "path": "tests/fixtures/work-dialogue.mjs",
+        "sha256": "ddfaa238f3b0bc2809b5701a1b55b8b2f73a68df3eb9eed0a53789478babf3e0"
+      },
+      {
+        "path": "prompts/diagnostics/templates.json",
+        "sha256": "9f5be9530c6d176dad3fd4b9f8673128b11bb7b1f4441448f85047af787be7c0"
+      },
+      {
+        "path": "tests/fixtures/word.mjs",
+        "sha256": "ec3f0f5aac66f37bcd89da61d0b66c08cde343dc9b8565eed05ae376a5edfbde"
+      },
+      {
+        "path": "tests/fixtures/ui-entry.jsx",
+        "sha256": "54307b99f298c0296b2bbc3d4066a860b666cd05c8bbe7d3f5d80d6d2aa7b2b6"
+      },
+      {
+        "path": "tests/fixtures/prompt-audit-images.py",
+        "sha256": "6886a645c090e1641cb448f889e31a372069085f080c976221508ed4d5a4318a"
+      },
+      {
+        "path": "tests/fixtures/persona-presets-preview8.json",
+        "sha256": "795e2e5991e85f09990873ad20658ebcf79cd9e642f43b897024aa6f3738df6d"
+      },
+      {
+        "path": "tests/fixtures/native-qr-session.mjs",
+        "sha256": "5badd0218ebc1d300b2dcf875154bd8dc81ae7820226375084aa2feba437b6bc"
+      },
+      {
+        "path": "tests/fixtures/model-catalog.mjs",
+        "sha256": "2d5b1534cdef01c3bf2bded383fc1fa9657a0058903a24351f99c85f14f80af5"
+      },
+      {
+        "path": "tests/fixtures/execution-mode-language.mjs",
+        "sha256": "f8c8a50070814015b5e992eb6069318f87dbebecb5685c65873858674c4f32c0"
+      },
+      {
+        "path": "tests/fixtures/agent-identity-preview2.md",
+        "sha256": "757d1597d96c41c4dc5b1eb6713637eb7ebfeb45799777a81a84f0ae54ebe82a"
+      },
+      {
+        "path": "prompts/tasks/templates.json",
+        "sha256": "491051df2d6ef1ad3f058a8a8ea1a9b8985f9083f3718855485dd0961fc4056f"
+      },
+      {
+        "path": "tests/fixtures/agent-identity-before-persona-rewrite.md",
+        "sha256": "28457159960eb61236aa18874ca486fee08a9b64fbc2bd5dbf6047e267682d6a"
+      },
+      {
+        "path": "prompts/digests/templates.json",
+        "sha256": "e6425b3a2293df047a99d7980da518dbf2191514ccd6b753c8b59d64651964a2"
+      },
+      {
+        "path": "tests/factual-search-policy.test.mjs",
+        "sha256": "d9497494d035186bf1e2c794244cb5950d9da1288e047771f31a2fa9b0e5e4e7"
+      },
+      {
+        "path": "tests/exports.mjs",
+        "sha256": "a0d2c77eb418b5868c806952ae7405b5f5f3708e86d1df4d1f4ef9845a84a5cd"
+      },
+      {
+        "path": "tests/execution-mode-control.test.mjs",
+        "sha256": "290aeeacb2d3a68e16f306438169334c4ce4442a016ae205431d745dea43951a"
+      },
+      {
+        "path": "prompts/agent/factual-search.mjs",
+        "sha256": "0232aed8244731b6baf998d3c24f36b75f4f033cfe4f8160067206335fe4843b"
+      },
+      {
+        "path": "prompts/agent/capabilities.mjs",
+        "sha256": "12cc88ae700edf80b1d7b9392c29a5adc1f4382d5676e75aae70b4492f5bcf5a"
+      },
+      {
+        "path": "prompts/conversation/decision.mjs",
+        "sha256": "4943a877d7a230de176ef474621125dc2bb31b54e787fcd70084d3bb4a61682a"
+      },
+      {
+        "path": "tests/inbound-images.test.mjs",
+        "sha256": "832ee54545926c57a488fe03c77521a8b1cf90f253b2b12233d24f1aa125939f"
+      },
+      {
+        "path": "prompts/conversation/templates.json",
+        "sha256": "8a9e06708302eb95fe6092b01060d699c416621144d0dd18c38b09873e17ca5b"
+      },
+      {
+        "path": "tests/inbound-files.test.mjs",
+        "sha256": "9eb6976f2fc919d937e929ecb96ff38eb035d88f9252b4bde41a968fa3055083"
+      },
+      {
+        "path": "tests/image-session.test.mjs",
+        "sha256": "d99664519efc71aee7c23d4bbc95a6d822aba2db57e07c75372d036d4d040d0f"
+      },
+      {
+        "path": "tests/image-reply-grounding.test.mjs",
+        "sha256": "a3b76c68761201d3163eb0d94b75edfa1917c41cf3db8521260195326acef5f3"
+      },
+      {
+        "path": "tests/image-memory.test.mjs",
+        "sha256": "860286e9dc96c3b18c10fd1c488f1d3c372beda76f4b3947d457bd18a45c79a4"
+      },
+      {
+        "path": "tests/media-channel-integration.test.mjs",
+        "sha256": "29ed65f275ac24926ab322c5affa22621122f23710172d0a9dd8fd677c0c6220"
+      },
+      {
+        "path": "tests/long-term-memory.test.mjs",
+        "sha256": "619fbdab2f237537a80c0e4dc794962f9a786a62baf8eb438b0428cee38e13a4"
+      },
+      {
+        "path": "tests/live-model-audit-settings.test.mjs",
+        "sha256": "7667c023e3779616f055d6bf60f4375576156bb393bc98a05ceafe0eb9bb8570"
+      },
+      {
+        "path": "tests/media-library.test.mjs",
+        "sha256": "3536478e1f5010767fa8667adc8ee340db95e44251dff3deebfe3b81b01479f9"
+      },
+      {
+        "path": "tests/memory-behavior-audit.test.mjs",
+        "sha256": "5367670e4c68f61a72333fd563750b61b510bc88a95f65f9f7bae1fc19bb4b37"
+      },
+      {
+        "path": "modules/moments/service.mjs",
+        "sha256": "e387ced923e141b3beb7e9ab05ca808d8fa7f7ff414c1cf26a15ffa5654a27d0"
+      },
+      {
+        "path": "tests/media-conversion.test.mjs",
+        "sha256": "0862876c8f26f6c68111aeca28d29d0fd3dce175de5a163a512a6689d3d8b953"
+      },
+      {
+        "path": "modules/moments/read-state.mjs",
+        "sha256": "e35aca7fb347f8b07b2751733d21955dbe439d4065761f253400c5c578f0d4a3"
+      },
+      {
+        "path": "modules/moments/publishing.mjs",
+        "sha256": "da3ddc1c11a147fcd3d1cc7c22b750d7fab52923d4c31f084a5d2154d9b692b3"
+      },
+      {
+        "path": "modules/moments/publishing-review.mjs",
+        "sha256": "28327e54109a78dce45adbe9974a54ecbe49dc3c849a6cc213b806f5a089edea"
+      },
+      {
+        "path": "modules/moments/publishing-content.mjs",
+        "sha256": "ff8c336fe13a00681899b2e62149bdcdfbbc92021cb43abedd6b8cd7694d99ce"
+      },
+      {
+        "path": "modules/moments/publication-recovery.mjs",
+        "sha256": "b8b984704048a24c49aad6346ff1de6085265a4cfdcd7beb2e05065bf3ccb4f7"
+      },
+      {
+        "path": "modules/moments/public-image.mjs",
+        "sha256": "dabdb82b5f6fd6c3e5b8702f1f51165894e53d42e6e06d5f971ff329977fa620"
+      },
+      {
+        "path": "modules/moments/post-content.mjs",
+        "sha256": "29991dc7ced7aab9755cdc1737320eb6ad55b1f57700bb5f219c188885d6fe54"
+      },
+      {
+        "path": "modules/moments/media.mjs",
+        "sha256": "7a7288b41fc67e04e662928016a8513693694f478f6f9e76af8a918851b0889d"
+      },
+      {
+        "path": "modules/moments/materials.mjs",
+        "sha256": "684710a72c85a77e8353d7200aadef435601497c817103b7eb311fd5a027906b"
+      },
+      {
+        "path": "modules/moments/material-store.mjs",
+        "sha256": "7d7fd9f0fc1bda8b065565e906fc6b226db0385992eee2b6d41a441a9f385d70"
+      },
+      {
+        "path": "modules/moments/material-privacy.mjs",
+        "sha256": "f8a8e6acd1c04f775b12decdb2ee84bc19b8e36c504d97fc0c10d7bcd1407983"
+      },
+      {
+        "path": "modules/moments/likes.mjs",
+        "sha256": "d818c05be559e85367f80c01578bb0b071aa838261dc12839343583064473e6d"
+      },
+      {
+        "path": "modules/moments/like-requests.mjs",
+        "sha256": "9fa102f5ffd94e63f090e70121e9abd38a33fed9560e3f35f2d8f11c34f751d6"
+      },
+      {
+        "path": "modules/moments/interactions.mjs",
+        "sha256": "87d6472ad5103541f79149ddf34b200efd22351f50f5d0a6911fd33e6eb70060"
+      },
+      {
+        "path": "modules/moments/interaction-selection.mjs",
+        "sha256": "93de6a9ff031d191d0795c63859fb16c23219551570873d86fac09a2ccf09d08"
+      },
+      {
+        "path": "modules/moments/interaction-content.mjs",
+        "sha256": "ae793d15ea8ae1ec83f348b383fb8cc7090e93c81fa050b40a42714bd6869179"
+      },
+      {
+        "path": "modules/moments/interaction-schedule.mjs",
+        "sha256": "72c3968f3026bf8a8f955ca6c83cfcf4affe712dab26cfd7b46dfd7a5bf22472"
+      },
+      {
+        "path": "modules/moments/image-stream.mjs",
+        "sha256": "e27a6c13446871040018c3a97e5e34ff5b0eefbd4af67696cc15042f8eb5747e"
+      },
+      {
+        "path": "modules/moments/interaction-read.mjs",
+        "sha256": "416011a3425d0c86d1bf947b5e8a45d72e0bb6128e490249e19d3b481355c41b"
+      },
+      {
+        "path": "modules/work/actions.mjs",
+        "sha256": "06c28e33531ef28e5a440580be8dcd7a22fb80decbbed15d57c00da053a502e2"
+      },
+      {
+        "path": "modules/moments/image-context.mjs",
+        "sha256": "73ad834dfdd95cf73bfd7c8371b1990691d1ec0b23ecb79afb4c89d22682113c"
+      },
+      {
+        "path": "modules/moments/friend-replies.mjs",
+        "sha256": "5feff2cdb4d614964d99fc502cae37bc492248cf26c74e5defc6285d8c13a4b6"
+      },
+      {
+        "path": "modules/moments/automation.mjs",
+        "sha256": "e94bb53184245990a4752a62c0e9e506eb815d62011b58c5418571b98ef0e096"
+      },
+      {
+        "path": "modules/moments/arrangement.mjs",
+        "sha256": "74b20c3b7397e5e0033b78ec40929eb1b120f7cedeea0280c5b3b14c310f98d2"
+      },
+      {
+        "path": "prompts/memory/role-review.mjs",
+        "sha256": "7b3131361a5f2703245594536ec301a34661f33a4d7af1f7d9b5fb0b3f423089"
+      },
+      {
+        "path": "prompts/memory/query.json",
+        "sha256": "d7503e4796d68e745c3bd6dd3c85ce193738996a0d5d32e990ccb1e8b6696522"
+      },
+      {
+        "path": "prompts/memory/extraction.json",
+        "sha256": "5d296f96c44a7f5ec58f5b4edc2ba3df36261d1015d04405791ef1dbd532b271"
+      },
+      {
+        "path": "prompts/memory/context.mjs",
+        "sha256": "ac5c8a34b6259075d1ead37eb650f36d6f4e4880a1136123031452298483fb16"
+      },
+      {
+        "path": "prompts/memory/compaction.mjs",
+        "sha256": "2789570130d131f5d69dc21a7f8af239ed475dfc743e2d0063ffc695aaddaeb8"
+      },
+      {
+        "path": "prompts/moments/content-review.md",
+        "sha256": "9e594f8b39d0e04ff5cbc5d56525a90c0b9eabcdecb6581c4faebad30250e8ae"
+      },
+      {
+        "path": "prompts/moments/friend-reply.md",
+        "sha256": "92504035910de42edcfe380dbe541370a865d0a3c9ae34704c167e3c8f750d79"
+      },
+      {
+        "path": "backend/storage/workspace.mjs",
+        "sha256": "6b465f1cf12f01d2744b5966c0904f65ff7be4928991abbfb0c7325c9a3b46b2"
+      },
+      {
+        "path": "backend/storage/state-store.mjs",
+        "sha256": "94e114571864c6ee8f588022812d19328ec86f1dc22d611003e50205648a9890"
+      },
+      {
+        "path": "backend/storage/role-cards.mjs",
+        "sha256": "44cfd2738f39d40b9820bda6fdf7aca7a36847e8221ad246bb557264de151f95"
+      },
+      {
+        "path": "backend/storage/persona-migrations.mjs",
+        "sha256": "e2837be3beeb4adfedbc5481cde0aadbc46f1de93a1d86df8342869a7e4b7a60"
+      },
+      {
+        "path": "backend/storage/paths.mjs",
+        "sha256": "5046beab22afbb3aaf3487149cf5e5aecbdd1d36299bb515819c479ee145511f"
+      },
+      {
+        "path": "backend/storage/locks.mjs",
+        "sha256": "700078b051d85788060682a6e1bf909b6752e9f9c82c4e0f7b4e349e35d407b5"
+      },
+      {
+        "path": "backend/storage/keys.mjs",
+        "sha256": "d0aa7bff423eda33eb5c61c73088d0e2d0a56395afa4cac4796057b1d2b188ac"
+      },
+      {
+        "path": "backend/storage/json.mjs",
+        "sha256": "2fe8ce0ae890a55faa468aebddd48c882898e3c1fd86ff2a4ec21f49ba7983b2"
+      },
+      {
+        "path": "backend/storage/initialize.mjs",
+        "sha256": "a039fd3e22480c7538d81a71e7e685f3b2db0545619aa59228123ed7d1d36642"
+      },
+      {
+        "path": "backend/storage/helpers.mjs",
+        "sha256": "5d7c44a262ecc2ce62ce68d68a7830f77fc5b5d29ba3e1a1f9129944e329e329"
+      },
+      {
+        "path": "backend/storage/atomic-text.mjs",
+        "sha256": "38b41de8487bbc0228af5c4e54b0b1142deb69a701ac782f623d91701ff5b222"
+      },
+      {
+        "path": "backend/storage/atomic-json.ts",
+        "sha256": "52e496c410131ceec7f2955e0de12a88740d63d569d4a136cf70f6b17febf834"
+      },
+      {
+        "path": "backend/storage/archive.mjs",
+        "sha256": "c41dbc01d5c6365e0c427a5d4d3041493a92f14695cba43eabc4fa3343b818f0"
+      },
+      {
+        "path": "prompts/personas/text.mjs",
+        "sha256": "a889e1865e0874befdc90857f7ac237fbe675fa33e0c61fa489c99f9d2ecc9dc"
+      },
+      {
+        "path": "prompts/personas/default.mjs",
+        "sha256": "8a1e455f284814ef7a8a4b76505811431b68099da59d07a5ad5dac9a786b8c36"
+      },
+      {
+        "path": "prompts/personas/catalog.mjs",
+        "sha256": "9a3939c24b2c1ed563d25f85785e3be9d24d12033cb2bff4cd91c584b256be6b"
+      },
+      {
+        "path": "prompts/remote/messages.json",
+        "sha256": "4ce61b585697b009f7e3e2363dad4a65599e6b2f5ba8372907c3818706d7dea5"
+      },
+      {
+        "path": "modules/files/docx.mjs",
+        "sha256": "ffe4ec28cf1208391a676003fb4813557121c96647d96b930ca74ae471d1936d"
+      },
+      {
+        "path": "modules/files/access.mjs",
+        "sha256": "71531fd0655bcd3f3bfb016ad5b3cff0c5b586bf3bffa68f2180dbf2ae0ce808"
+      },
+      {
+        "path": "prompts/moments/reply.md",
+        "sha256": "d382eb272d17ca34d2e53d8473bbc3f83aa65c51060e413350ae697521a620b9"
+      },
+      {
+        "path": "prompts/moments/publish.md",
+        "sha256": "213472599038e3157b4c0618150e5960b0ebce0f56060580098802f9c919f741"
+      },
+      {
+        "path": "prompts/moments/materials.md",
+        "sha256": "c889be25ac147270ac483fc66338b3a205767a6a558213601642482929fec7af"
+      },
+      {
+        "path": "prompts/moments/material-review.md",
+        "sha256": "f91a38fcbd9f5bed6c147e9c185adabf1dda6ce643588decf24d853a733f7baf"
+      },
+      {
+        "path": "prompts/moments/interactions.md",
+        "sha256": "d76a3cf80e568efe93261c18fa79b32f95c02e40b12fd3f325f423a84caaee5b"
+      },
+      {
+        "path": "prompts/moments/image-read.md",
+        "sha256": "ee6af07baef63be7ed0834c66ce4ed917fb33cfc8c6861956d1bd4804a39d1fb"
+      },
+      {
+        "path": "modules/work/tools.mjs",
+        "sha256": "cc12c01293f0e88ac2ca47f536f67dc3ae8b465e2d434185f64741d9043bc306"
+      },
+      {
+        "path": "modules/work/store.mjs",
+        "sha256": "f49612dba5af4644167cc5c0e4478c153a514f162f045f8ee0628ae1bdd8e6dd"
+      },
+      {
+        "path": "modules/work/session-history.mjs",
+        "sha256": "1a75b5ce7b5aa88efded778810f1d6f11c1269c805a21ab16db95ff145d4e974"
+      },
+      {
+        "path": "modules/work/service.mjs",
+        "sha256": "f6e546def5017c9f488467ac33c955eabe0f54b4c674a9815b98d934ef21018a"
+      },
+      {
+        "path": "modules/work/runner.mjs",
+        "sha256": "97c3088cd877c321612dd6a0ff32732059a4694b40bd1b3eb16c6c17f6a7ebb8"
+      },
+      {
+        "path": "modules/work/routing.mjs",
+        "sha256": "50ad649104ef558e5bd425e2a8cd381d915f9f6fcc76e6e875d4759b3db8eded"
+      },
+      {
+        "path": "modules/work/routing-context.mjs",
+        "sha256": "a43f96bb2aa7f3a1dae9a43e368b2babed39d019cd67e8848ed29673806e8cb2"
+      },
+      {
+        "path": "modules/work/result.mjs",
+        "sha256": "62a1e4b32984ed82ad7a5d3b22bb26f28f8bb423a01c9f02cb4a006e51e53a84"
+      },
+      {
+        "path": "modules/work/projects.mjs",
+        "sha256": "39bb69763d9f86a2949ca8f3a3021d827ebb9cef62a68f41dbca98117c2c6af4"
+      },
+      {
+        "path": "modules/work/progress.mjs",
+        "sha256": "4307ff73c6337d029cdbb9849a1edc294cd7daebbc6acbb9c5d2e01b7d6ad4b3"
+      },
+      {
+        "path": "modules/work/presentation.mjs",
+        "sha256": "6a1afb4d91e97eca98d1903afaa9062a5e04496b6d7837d43d22c3d602c9e632"
+      },
+      {
+        "path": "modules/work/polish.mjs",
+        "sha256": "94e0d0bd61b77a0bbb4a562bb5d9f71f89d41cd190d168598b49fd044c2c97c4"
+      },
+      {
+        "path": "modules/work/policy.mjs",
+        "sha256": "45bd9a2a36ddf051f7c440384b5087771afd9f1079c2211c2152531c7573df95"
+      },
+      {
+        "path": "modules/work/permissions.mjs",
+        "sha256": "8ccce48ae61c008db7a6684c3fb804e90bd68c59b0f29c936ae42dc143aad653"
+      },
+      {
+        "path": "modules/work/outcome.mjs",
+        "sha256": "970a48ab62f75cc020939ab03f5ce7069625a82803a03116fcba2c8085dbdcff"
+      },
+      {
+        "path": "prompts/reply/rules.mjs",
+        "sha256": "d8f9b8c9e6820060ecee176275232c315e3841d4f55793e46030334e305e07c6"
+      },
+      {
+        "path": "prompts/reply/progressive.mjs",
+        "sha256": "e449f554c0c4b112537c74ec2fb8fd6cbf9a7cab7754e633483904fcebb02914"
+      },
+      {
+        "path": "prompts/reply/progressive-dialogue.mjs",
+        "sha256": "5c7138c872927b05ee0ff556725fc76978cb7ed0461dc83cd1a8f304ed84f105"
+      },
+      {
+        "path": "prompts/reply/language.mjs",
+        "sha256": "fde9aab3222bd9648f2ee72e1d9ef5479680a7b6fc46d17ec364270f54a288e1"
+      },
+      {
+        "path": "prompts/reply/language.md",
+        "sha256": "4e8cb77ad1ffe23af0df86feb2b4178ebdcdf2afe1e8b61b9f53a55a7c51c3ea"
+      },
+      {
+        "path": "prompts/reply/delivery.mjs",
+        "sha256": "0088e371c5797c6f3f73df2222b1eb90dbf844d11157775b50f967fdff4b7d12"
+      },
+      {
+        "path": "prompts/reply/defaults.md",
+        "sha256": "e717099ab50b9792f75bda6252012797b4c32d42047c5eb0ba889b0a92ba1137"
+      },
+      {
+        "path": "prompts/reply/default-task.md",
+        "sha256": "6413cb3e1536e79c6f435dc618b1309a3e2e34b15f7b9057f27949672e49450a"
+      },
+      {
+        "path": "prompts/reply/current-turn.md",
+        "sha256": "1ef2522928b57d62b6a883612a639ffdabf3fa94a8724b30b4d27977f17519b7"
+      },
+      {
+        "path": "prompts/reply/continuing-chat.md",
+        "sha256": "89da52702161827bc91f1ce62e55942d7a736fb5d8056d3644ddb02406c06649"
+      },
+      {
+        "path": "prompts/reply/configured-task.md",
+        "sha256": "48057a30760a13d081f4014b975c6e9003945725bbb8233c295017f9551eb982"
+      },
+      {
+        "path": "prompts/reply/compose.mjs",
+        "sha256": "1168d9c4978b64084179c7de1c16aa8ce1451078c82c33b6f08a691150286da5"
+      },
+      {
+        "path": "prompts/reply/chat-task.md",
+        "sha256": "e9c619d06267b902f4a9bd93535154ec9cca793af416d26da38bc7d5a79ced08"
+      },
+      {
+        "path": "backend/rpc/handler.mjs",
+        "sha256": "26ce9f09e6a8f5da6244f19ed2dbfed223373fa3d5799ba1b2f95f3502541f2f"
+      },
+      {
+        "path": "backend/rpc/actions.mjs",
+        "sha256": "843834973628abfbd922d6ab372d33ee1e21c7c0c27cecc8d9022a3daada694d"
+      },
+      {
+        "path": "modules/tools/files.mjs",
+        "sha256": "e6f033e4ec600b9b469b5de4dbafa7d32746038eaca86d638475d1df369632bd"
+      },
+      {
+        "path": "modules/digests/service.mjs",
+        "sha256": "7d4e8f307ebb7db48c8b88b3cb491718ce8a486f6d9968fadfc2e337d820a24b"
+      },
+      {
+        "path": "frontend/pages/work/page.jsx",
+        "sha256": "161f69c0a8257a77ecca977eb0c1b4568d64d59771310a3245c3347f75bd13bc"
+      },
+      {
+        "path": "modules/tools/work-sessions.mjs",
+        "sha256": "84d8da9df4ed6528984563041fadced07144f75249e170ef460aab42f4c8f95f"
+      },
+      {
+        "path": "modules/tools/work-execution.mjs",
+        "sha256": "8a63b017f915e40822a0b2612c8c6d7b5240ea586f1eeb38c0914a2a9824a38f"
+      },
+      {
+        "path": "modules/tools/registry.mjs",
+        "sha256": "1cbbe46616c37d0e8dc2f60250e0b82a4ca0dc037ef2e4655da1bfaac250b0ed"
+      },
+      {
+        "path": "modules/tools/progressive.mjs",
+        "sha256": "26edc48e03ddf8d2fd97988b21bd196cdd67cc1d392456a12d56af6b30c97894"
+      },
+      {
+        "path": "modules/tools/moments.mjs",
+        "sha256": "c2bbf6fcd3eddb03debb5696a8416b45bdb5cf958b042fcfe41a7c4f467e328d"
+      },
+      {
+        "path": "modules/tools/moments-publishing.mjs",
+        "sha256": "31319831fd6be89183da74509c51f2ce5fe3c5e6a069f03849d07e04dadb244e"
+      },
+      {
+        "path": "modules/tools/moments-materials.mjs",
+        "sha256": "af3e4a5f26fe6326746aa56180ce657ed134a00c87cc560b6efc4cf0253f8992"
+      },
+      {
+        "path": "modules/tools/moments-likes.mjs",
+        "sha256": "ffbde7d84b70437e7fc94a4e4724e4a5c566ae9fe46d7ff02fc92a00195287a5"
+      },
+      {
+        "path": "modules/tools/moments-interactions.mjs",
+        "sha256": "2878d93fd60d7b221b0c35aa318e84c21bb73091dc71ba0099d0fc657a7605c8"
+      },
+      {
+        "path": "modules/tools/moments-images.mjs",
+        "sha256": "e40015ca27695f5e93bf19b511f0688c63c36a656c736bc57eaf93bd726b1c5d"
+      },
+      {
+        "path": "modules/tools/index.mjs",
+        "sha256": "2799f26223449188349138e5d247262cc0186e7a120a1e18029c34dd3efd6779"
+      },
+      {
+        "path": "modules/work/delivery.mjs",
+        "sha256": "117634e0fa8cdb17d9c2ce8d868341bfdd2108e53ccbf674e947fadf7bfd01c7"
+      },
+      {
+        "path": "modules/work/connections.mjs",
+        "sha256": "eb26978c161e58e38fe950ff9d81f352d4178d20f808533aa60355a6a40236a3"
+      },
+      {
+        "path": "modules/work/commands.mjs",
+        "sha256": "a9e4619f66bdafd0c2ab94f4bcea12c1cf0cd46de9bf724c6b14dc2f2aa5de25"
+      },
+      {
+        "path": "modules/work/artifacts.mjs",
+        "sha256": "60d5c51bd55513458701adb9e90fc89f23ea52b0ee3f5bb0500c672dbe679a57"
+      },
+      {
+        "path": "modules/work/image-generation.mjs",
+        "sha256": "4c24b4de0f365645023369faa8aa1ed35b755fd1b6915ac0b043a42800ce5a2d"
+      },
+      {
+        "path": "modules/work/dialogue.mjs",
+        "sha256": "8adc571d07a1c092bba99910d28c01d0561c787608471e1be843417bc74e02ca"
+      },
+      {
+        "path": "modules/work/image-response.mjs",
+        "sha256": "cb5ae62707867c0fe3b32c9ef0466a5cb3e0167375bfca051628567d306b2358"
+      },
+      {
+        "path": "modules/work/image-storage.mjs",
+        "sha256": "dcd0c3d281e4808b60018cd6cf76c403633125b57b3c72658f6178b3a329a625"
+      },
+      {
+        "path": "modules/media/zip.mjs",
+        "sha256": "253b0050cd3dde1e8dde52a5d67ae47da3ac0037e269d3a56f8d199969446e52"
+      },
+      {
+        "path": "modules/media/wechat-image-stream.mjs",
+        "sha256": "20103c44f7f83f6dfcca870683f3b091d9b80c488ed3d5e51eaef581d256b51e"
+      },
+      {
+        "path": "modules/media/validation.mjs",
+        "sha256": "408d8cecb17a10209f7dda7a268e5ec766de5a19508956940633ee64d97c782d"
+      },
+      {
+        "path": "modules/media/limits.mjs",
+        "sha256": "cbf61380bf95b085609f3be2df545428ee7265963de111467f12f9b42c0ae053"
+      },
+      {
+        "path": "modules/media/library.mjs",
+        "sha256": "6ccf7aa4d93fe19f2299fb361f95fe22f62081a9fe687adc606a4af4afccc4c4"
+      },
+      {
+        "path": "modules/media/image-format.mjs",
+        "sha256": "419c7ac4d2a76c6f6d9ceec6697021a31b46a450784b5a2119876eb4efd326de"
+      },
+      {
+        "path": "modules/media/builtin-stickers.mjs",
+        "sha256": "7e8607e8630c14e9df5c12677f21334d1972ad5edffa3b37486d60347d8aa6fc"
+      },
+      {
+        "path": "modules/media/actions.mjs",
+        "sha256": "4d688671f85b203cb8f574bc24ff8dd3dbc8dde145d03c56ec1ca37c34063042"
+      },
+      {
+        "path": "modules/memory/actions.mjs",
+        "sha256": "e1d20a75df4f5c357c3324d49fcef13dd4cc2e3c48dbe1a2e69dfcbaffa585c0"
+      },
+      {
+        "path": "modules/work/modes/service.mjs",
+        "sha256": "7a0766c863690964ce53f785bbd85ae4bd70117703b0aaa4775f0c373895a726"
+      },
+      {
+        "path": "modules/work/modes/commands.mjs",
+        "sha256": "f3e0f6143e6004999705745ddb677e5e47d3bae29e1395fc8572f1c6cb68fa4b"
+      },
+      {
+        "path": "modules/memory/conversation/store.mjs",
+        "sha256": "5e8528b4303986810edde9605813c98c225f799cc947022f04c52e3965f4c19f"
+      },
+      {
+        "path": "modules/memory/conversation/compaction.mjs",
+        "sha256": "c030bbb80039fe4319f73b9685fa93df17c12334850767c44909bcfa3c9047e3"
+      },
+      {
+        "path": "backend/platform/resources.mjs",
+        "sha256": "29520eceb1feb51d967ec1685314144608da4ee6cb52724fc173c08a7f472589"
+      },
+      {
+        "path": "backend/index.mjs",
+        "sha256": "60d2b506796f63c5689d9a509472224a57623cf5636b6fcd4cb2d9b3b0da5a4e"
+      },
+      {
+        "path": "modules/memory/roles/retrieval.mjs",
+        "sha256": "ac93b9cdf19c9c81caf70787464243eb6e2b67435bd1c8ab5f8976e5d27b5ca9"
+      },
+      {
+        "path": "modules/memory/roles/reflection.mjs",
+        "sha256": "05e9f2680651854f97e051be62eb7bac7e4f01c2565249de706b5116f48c3bdc"
+      },
+      {
+        "path": "modules/memory/roles/references.mjs",
+        "sha256": "bc6a1af5027a37aa216f64de35b1313f16b24eeda612ae83683296e5482d9766"
+      },
+      {
+        "path": "modules/memory/roles/people.mjs",
+        "sha256": "1e6450b30e50137a2d5dc2618388f604368519bc27ae359eff8da5787857ac0f"
+      },
+      {
+        "path": "modules/memory/roles/extraction.mjs",
+        "sha256": "60bab1b40547c4b1555cbd3e7e6e927e1bef2458f4e0c9ea601f2ef6daa24aba"
+      },
+      {
+        "path": "modules/agent/workspace.mjs",
+        "sha256": "48e0deb4731e3bded992f9c8473a907248fedd119742a77680e876f365a80912"
+      },
+      {
+        "path": "modules/memory/roles/context.mjs",
+        "sha256": "9e5cd22931560250a54c49d156bd1912b1af12ec6f52d03835c43de81862f267"
+      },
+      {
+        "path": "modules/agent/runner.mjs",
+        "sha256": "b8a49fcb7b861af1fff68511e14a0c834cd198127545a7bb8f1588a06e2749ae"
+      },
+      {
+        "path": "modules/agent/request-metrics.mjs",
+        "sha256": "c683394242ef4616771150753e4cd7a04f110306f4ecca6ddb55e175a9c0e6b9"
+      },
+      {
+        "path": "modules/agent/request-context.mjs",
+        "sha256": "5edc419ea76032b06a8b3a493abb46dfa9774ac8d79c52b9d65cce0ef9e55446"
+      },
+      {
+        "path": "modules/agent/reply-style.mjs",
+        "sha256": "5557c5ced35af45bffc8a50dbed850cbdf58f2a605835a6b05cfed59441bebe9"
+      },
+      {
+        "path": "modules/agent/persona-input.mjs",
+        "sha256": "7c2d77be01400babd308ca706f68baa88361c49f1afea9e1209e54d70a2d1b89"
+      },
+      {
+        "path": "modules/agent/output.mjs",
+        "sha256": "e052ca8ccf208e11ec68a8d3d82086a8c185e79e65923c40de17309a2dc5fa7c"
+      },
+      {
+        "path": "modules/agent/models.mjs",
+        "sha256": "4fa965d82e09c42f5b6a28f573ef54ba563818e617e789e8723e9b0d38ce55ff"
+      },
+      {
+        "path": "modules/agent/identity.mjs",
+        "sha256": "daac01c7c7c7572f921f70abec6584f722c722eda3bdd9790b34566032baad79"
+      },
+      {
+        "path": "modules/agent/conversation-preferences.mjs",
+        "sha256": "1614cc56187691f495667239210a60814bfe802b89fa5541ee3eed5d41655f7b"
+      },
+      {
+        "path": "modules/agent/actions.mjs",
+        "sha256": "5aa8d91a18b7b5e3c65092df9cace9e99de9fc5481f1ad569396e3c883debe31"
+      },
+      {
+        "path": "modules/conversation/channel.mjs",
+        "sha256": "3b871cbf2069cbb423f218dc9e8f581299cf1ea858599f57aeb64f9bafc2223c"
+      },
+      {
+        "path": "tests/moments-interaction-automation.test.mjs",
+        "sha256": "8a9f3e98818248ceaa3942b128bcf1e54d261bdb98069f4488e453b0982abb83"
+      },
+      {
+        "path": "modules/tasks/scheduler.mjs",
+        "sha256": "a421d0b8c6ceb1ef7e857c4f9ae55f7dcae1efaa046bcefc4690107804e368d3"
+      },
+      {
+        "path": "modules/tasks/conversation-tools.mjs",
+        "sha256": "7366080017c85c6bbb8bd749246f598513c3a803d07079e99497fc4734b0c2de"
+      },
+      {
+        "path": "modules/tasks/actions.mjs",
+        "sha256": "94e8e4647631f60e4fb39cd04f3d6c0ec1f87f15e2d8391a996755ca039cb2c0"
+      },
+      {
+        "path": "modules/conversation/actions.mjs",
+        "sha256": "5d9b17c66029578212408d4fb5c7c5c937df79be70c270a40db8330a27ab9107"
+      },
+      {
+        "path": "modules/memory/long-term/store.mjs",
+        "sha256": "23e96e9d5e8a9f65b6f3aa57a5c7bdc6595ab43c24fcf899e35bed3aa07d1f9c"
+      },
+      {
+        "path": "frontend/pages/digests/page.jsx",
+        "sha256": "447ceb1c758c7c569eedd0b5202934f70300f62b57118e22fc39c8240270b716"
+      },
+      {
+        "path": "modules/diagnostics/service.mjs",
+        "sha256": "f4c7b44b542a1a018e5e413c6aac7e3cd7a1842c0ee96855ebf2e4d5ebd482a0"
+      },
+      {
+        "path": "tests/model-info.test.mjs",
+        "sha256": "2d285e61cf52b411930fc480e848712cabef09c502b3f13e4792e300f02be9f2"
+      },
+      {
+        "path": "tests/model-capability-settings.test.mjs",
+        "sha256": "680eeb13874b5e5a95b98f939e140ad88861288b992d21f261109f6194ee1260"
+      },
+      {
+        "path": "tests/message-references.test.mjs",
+        "sha256": "ad5f4b0bc5df1a06651605e308a684d85050471c99562db57c852b51fb129af2"
+      },
+      {
+        "path": "tests/memory-tool-combined.test.mjs",
+        "sha256": "53d15ae72ec76ff27487887981a3b64b692af75721576f40edb21d77801667aa"
+      },
+      {
+        "path": "tests/memory-retention.test.mjs",
+        "sha256": "75de029272a6afd8aa1c9fe0c40f1795d88e10366d6c6f73e1a07121f8cffcf9"
+      },
+      {
+        "path": "tests/memory-quality.test.mjs",
+        "sha256": "357a449ae8e3ea5068bc80e74a4e2df15f21a21340e4260182eab100b96cabb2"
+      },
+      {
+        "path": "tests/memory-integrity.test.mjs",
+        "sha256": "e767266a15fd2184e3d5183eb58ee57a821523013404f82a4e5ddfe1527aedfc"
+      },
+      {
+        "path": "tests/memory-compaction-reliability.test.mjs",
+        "sha256": "8b2ad85c30c5f2a8f24ee048095a3189bc026620826d4aea8d6fd2e8964358d7"
+      },
+      {
+        "path": "tests/module-acceptance.test.mjs",
+        "sha256": "0260b095a5ba343e9b51e11dee00c1041c94a710e46b1a1643e5997b8c2cc4d3"
+      },
+      {
+        "path": "tests/model-reasoning-selection.test.mjs",
+        "sha256": "7507fbab26e8875b02da9a0bf0c1657eae729d334225e8313e2f19e33fc40424"
+      },
+      {
+        "path": "tests/model-reasoning-runner.test.mjs",
+        "sha256": "f9fd8a8f11b9e94cf583b69c20a8c14c72ff451227b47a11fab8af59d605b459"
+      },
+      {
+        "path": "tests/model-output-tokens.test.mjs",
+        "sha256": "db8875ab92f87e10906bae4762b656b0213a3434557b6401345e45050c73589a"
+      },
+      {
+        "path": "tests/moments-automation.test.mjs",
+        "sha256": "9fba33f8407c91fc7a134f41157ea8a856c60c3ce7279a4a028d715e2684c7ad"
+      },
+      {
+        "path": "tests/moments-arrangement.test.mjs",
+        "sha256": "2ddd134d2b9fbb826dcbb616f8af064258e62da3e6b69a195cd8d7fdc2a571a3"
+      },
+      {
+        "path": "tests/moments-friend-replies.test.mjs",
+        "sha256": "471287c1a22bc3220d44b5712921c6238259a298e2df23ea312843b1f45b2d97"
+      },
+      {
+        "path": "tests/native_engine_test.py",
+        "sha256": "f950b0d09032fca5a0e8e7f1c6b59583d61b1b6ce042ffe6497176adaf1a396f"
+      },
+      {
+        "path": "tests/moments-tools.test.mjs",
+        "sha256": "8f43c9e3536796cf7b49a09e73cb1d94c7c15b1047b429aab9885dd9682145b0"
+      },
+      {
+        "path": "tests/moments-subject.test.mjs",
+        "sha256": "d9b273896918d252b43a733552f3bd481845bd6cefa5f3cba6509ea436c868e3"
+      },
+      {
+        "path": "tests/moments-recency.test.mjs",
+        "sha256": "40e2728b2e6d70d398dc2b6403a994fe13dfa456b9d2cd03e6471d7891e39831"
+      },
+      {
+        "path": "tests/moments-publishing.test.mjs",
+        "sha256": "7ac9cb4b21030cf42a734944a8c68777625f05751d9f1e3270dd2bea70443064"
+      },
+      {
+        "path": "tests/moments-publication-recovery.test.mjs",
+        "sha256": "698d85588634671fc9af719a13c9a20e77effd04f366644d075cc6da65d5189e"
+      },
+      {
+        "path": "tests/moments-protocol.test.mjs",
+        "sha256": "8bd5698d80a00e0eb5aca1da66401d0983709b1b661aa429022a2345ac4943e7"
+      },
+      {
+        "path": "tests/moments-materials.test.mjs",
+        "sha256": "23680f4ad42cd8f26524cd130cf632440ac0762879eb6677fdcd105f4812b6f2"
+      },
+      {
+        "path": "tests/moments-likes.test.mjs",
+        "sha256": "c27ef1f764409146927892c620067701b78ff75d16697e98f8c5ba553cde69a8"
+      },
+      {
+        "path": "tests/moments-likes-rpc.test.mjs",
+        "sha256": "e44aab0adf7ba57d0c99730ea18ef21fb1508aac7c9acfb46fc97c984f1196c9"
+      },
+      {
+        "path": "tests/moments-like-requests.test.mjs",
+        "sha256": "a8fc0e7fde9134882ef3515b21027c230c0721becafc7170428ba834457f7d2b"
+      },
+      {
+        "path": "frontend/pages/overview/page.jsx",
+        "sha256": "38961a95c83ab35b0d7a2464492370b902addcb75789edc6307332be1ebe6675"
+      },
+      {
+        "path": "tests/moments-interactions.test.mjs",
+        "sha256": "c02a484288dfc45c321a2622b451223fa4ed43e87022a207b749a690ae1c8c8a"
+      },
+      {
+        "path": "frontend/pages/overview/account-card.jsx",
+        "sha256": "14cdf38c6262a7437c5e0a081cc3d856b429101a864ef8d5337b5347201fd7d2"
+      },
+      {
+        "path": "tests/moments-interactions-rpc.test.mjs",
+        "sha256": "267db3281881be794c2a6523b2c0d8dd2e3c2eeeb33e32af7bd2ee4ee04f87ee"
+      },
+      {
+        "path": "tests/persona-input.test.mjs",
+        "sha256": "e2db07b1840a1c35335ee2424bd5ff8d752b87e720410a82823a7d5fa9a8eb86"
+      },
+      {
+        "path": "tests/persona-delivery.test.mjs",
+        "sha256": "0ff94d28397d4c6dd4dfd29ce85ac28e1f6f3a419fc96b433c56436a72db68a5"
+      },
+      {
+        "path": "tests/package-resources.test.mjs",
+        "sha256": "f8d1f52ae91bee3348f3db0b1b27abb9fbdee74f02f0d8e50477fd635731d998"
+      },
+      {
+        "path": "tests/owner-cleanup.test.mjs",
+        "sha256": "ec45744c070a5ea3b809b1f2abcc115b1da50536a0040f42bd1aaded0436282b"
+      },
+      {
+        "path": "tests/outbound-media.test.mjs",
+        "sha256": "8462ce80f788469ec0fe643ad31a0338ba7ed45efff3106e53f1a81b46a115a1"
+      },
+      {
+        "path": "tests/on-demand-image-understanding.test.mjs",
+        "sha256": "c3b69afe6e74f8a0b9261619cd42ef7020298c1a5e4f68de26b3588b6ed663d7"
+      },
+      {
+        "path": "tests/natural-chat.test.mjs",
+        "sha256": "284e20c95dd1aa8bc853f09f07be13a99de34c1ef5655c48d15fa1ece8997808"
+      },
+      {
+        "path": "tests/progressive-context.test.mjs",
+        "sha256": "d3e3795d7b28eb05ca1b13efdf300d29b9ec1e32ac3fcd436d2a97441f4fccc7"
+      },
+      {
+        "path": "tests/plugin-service.test.mjs",
+        "sha256": "78682ca865b79be3cb60bb389c01ebc0db04b8e50a307ef5894fb40d95193a29"
+      },
+      {
+        "path": "tests/persona-migrations.test.mjs",
+        "sha256": "581dd9527aa5e281276bdf1070c4821eb54ea5ab2cf5aec58aa0ea6128dbbc1b"
+      },
+      {
+        "path": "tests/persona-memory-tasks.test.mjs",
+        "sha256": "7e8207fd936ed7d4af35e4e464b56324385077031b1673f8bc22967571a1eade"
+      },
+      {
+        "path": "tests/progressive-prompt.test.mjs",
+        "sha256": "d81ad2ca05b74d42c6a2921e5351f93cc738318205602905b722bbfe9c211889"
+      },
+      {
+        "path": "tests/progressive-dialogue.test.mjs",
+        "sha256": "6e3fdf63ea1d75982bdfedd9e5a98cd1174f934697d407aa46f81a234a11b94e"
+      },
+      {
+        "path": "tests/progressive-retrieval-v12.test.mjs",
+        "sha256": "83f61bda104a834d0a4d3fb300ae579ad08b1f18dd14bebd878ef2f1a3e92b02"
+      },
+      {
+        "path": "tests/moments-image-stream.test.mjs",
+        "sha256": "a648222c1ca22f19fd8c4db5e311edd91b6f8c50dad01bac431c1a6136070f71"
+      },
+      {
+        "path": "tests/progressive-work-output.test.mjs",
+        "sha256": "7a2ffce1f13cca14cf7c5c8067ad9e95a7a022d35f56e0bf2f7b17702cc86f11"
+      },
+      {
+        "path": "tests/progressive-tools.test.mjs",
+        "sha256": "2a60c65beec9e1e08be99bbcb707027bdd39c5600daf3e3fe9752f4fc67b6bb5"
+      },
+      {
+        "path": "tests/prompt-admin-notes-live-cases.test.mjs",
+        "sha256": "b817f33cf7dc2b81d646e300c3d694499e8b2e07b3873cd9ceffc48647fc1e2c"
+      },
+      {
+        "path": "frontend/pages/diagnostics/page.jsx",
+        "sha256": "4169b647d5b62b6dd5aec826eaff0a98f23214dd768cc59cb001db2807812da7"
+      },
+      {
+        "path": "modules/search/service.mjs",
+        "sha256": "d7d222a8cef369aa1a8df98003ded7205a0dcf59419e4b242150d18607a2ee1f"
+      },
+      {
+        "path": "modules/search/fallback.mjs",
+        "sha256": "c0ca0fa33118553c4b22c1d2eb5d3f2a6e44c934e9aa73eff197bdb643146cf6"
+      },
+      {
+        "path": "modules/search/errors.mjs",
+        "sha256": "b2ce96e8d454f2a5b599d025bbe528ab52e38822fb3972207d12ea3aee2a82ce"
+      },
+      {
+        "path": "modules/memory/images/tool.mjs",
+        "sha256": "db0f896538bed2bee3f7c0d6ebd6b3f885f587775ffe7c6a43e063422bcb9fae"
+      },
+      {
+        "path": "backend/config/transaction.mjs",
+        "sha256": "e07952026eae8ad592aedb1f780c1b6491162e7972e129b80a4a143a0961eb80"
+      },
+      {
+        "path": "modules/memory/images/store.mjs",
+        "sha256": "07b6ed4f7bde5c5f530901b3b336942608633fc48025bc0a3c852bcdece39227"
+      },
+      {
+        "path": "modules/memory/images/request-tool.mjs",
+        "sha256": "897932e228972abf86a50e2122c656bf238bc7e6729b3cae95cd50ee35ba3c6e"
+      },
+      {
+        "path": "modules/memory/images/reply-grounding.mjs",
+        "sha256": "6136d376d8115ffec916d2f06d69ca77713ace5410df1d5cba3aac6d1d685027"
+      },
+      {
+        "path": "modules/memory/images/references.mjs",
+        "sha256": "3447f16169a9bb3c18e04b63c172caf3cbd6f44609c0979c0de9ae7bb62ca9bb"
+      },
+      {
+        "path": "modules/memory/images/recent.mjs",
+        "sha256": "f9c2591c471ce036c36f1467bbb6b62d3900cce4a645e20c83d071bc05b6c2b7"
+      },
+      {
+        "path": "modules/memory/images/generated.mjs",
+        "sha256": "7e7feb35e4c46271cec5f6fed6d611d564d153cec3a759f6ca8a2e092cadf816"
+      },
+      {
+        "path": "modules/memory/query/tool.mjs",
+        "sha256": "0fcd86e69b255e9eca7f535cc2002f0a8357cd3ae6e6ffd6bf88a4d197a55c81"
+      },
+      {
+        "path": "tests/remote-administrators.test.mjs",
+        "sha256": "28dcb3983b8472e467e0c97388ce1940a649237bc8f35369c4b78088df186eea"
+      },
+      {
+        "path": "tests/release-version.test.mjs",
+        "sha256": "b0bd4695b6aa5473813d45a97b17d2518bd3143cf8a1ab28e9d203d55b38507c"
+      },
+      {
+        "path": "tests/received-files.test.mjs",
+        "sha256": "0d538c23ce5fd62c202b8555c7978ecd69483e9dd02e9425137770f169041675"
+      },
+      {
+        "path": "tests/public-language.test.mjs",
+        "sha256": "55378061bdf40c38134d0940b1e56a33e77c30f96fdca988744459e380efd78e"
+      },
+      {
+        "path": "tests/prompt-composition.test.mjs",
+        "sha256": "bc31f2a5e69dbb458cf5bb7166b7f577e524bae8420d262cb02a7b3e3543ce7e"
+      },
+      {
+        "path": "tests/reply-context.test.mjs",
+        "sha256": "d3889c9d80bdb9e501a155cb53896d9ab4b884ffa757ee5bb12f4100e60e99f8"
+      },
+      {
+        "path": "tests/reply-context-budget.test.mjs",
+        "sha256": "a747b0dc1273e668285175b88f32ea710efbd29305cb172778210f5c999ab83c"
+      },
+      {
+        "path": "tests/remote-task-status.test.mjs",
+        "sha256": "92027e98a62ec59b074faf0f97bdedf93254ee7b1147c086edf06300f4157826"
+      },
+      {
+        "path": "tests/reply-modes.test.mjs",
+        "sha256": "e605e2e4c80e57caf0a387ee38f2347783ce872bbd38d8160eb738729ac9cb9d"
+      },
+      {
+        "path": "tests/reply-review-final.test.mjs",
+        "sha256": "d760ae09b340891748c4670ce49d134fda1efc873c0d7fc0fbc80114fae02a27"
+      },
+      {
+        "path": "modules/conversation/tool-notices.mjs",
+        "sha256": "619293390e360ca3587d9c636f1cad4c5c8fbb632ca85810c4074589b9fddf41"
+      },
+      {
+        "path": "modules/memory/query/work-tool.mjs",
+        "sha256": "8c922ca31b0a4c064b4fa8d7561d2f6753dbaca848fe928b7026af8e7a26e486"
+      },
+      {
+        "path": "modules/conversation/task-confirmation.mjs",
+        "sha256": "ca87d587dff189daa28665a5a234e58b0230cc9a909ac96970a4742b98e01b39"
+      },
+      {
+        "path": "modules/conversation/reply.mjs",
+        "sha256": "0088741806aa691ed5a2c753ec56002831b90c9086cfd45b7e5d31d25f92748a"
+      },
+      {
+        "path": "modules/conversation/reply-context.mjs",
+        "sha256": "f69c6da3768bea7e7a71e5a45d698fe0e6bfe25d1aef9483d33707c64a5efbd9"
+      },
+      {
+        "path": "modules/conversation/natural-chat.mjs",
+        "sha256": "bc94b5020e5463feb536f015a824e624fa6697f8b8f270fe357c8ff4fa436154"
+      },
+      {
+        "path": "modules/conversation/memory-maintenance.mjs",
+        "sha256": "1620cb3f9db9a7efc212e310e3bff733a3a878fba70bac0013292929c64ac09b"
+      },
+      {
+        "path": "backend/config/repository.mjs",
+        "sha256": "53c50d83291cf64daab1d46a9ac55d65bd794ac66398b90490e0897531e43fab"
+      },
+      {
+        "path": "modules/conversation/incoming.mjs",
+        "sha256": "a954371669b98cc2d12526bc3173baf72b0b9419d23a39944a3be4d735c52b5f"
+      },
+      {
+        "path": "modules/conversation/helpers.mjs",
+        "sha256": "9f126957dae4bc0c9900d1f0d607c4ec09ffef8a12649c9e8263e0d5d8553e90"
+      },
+      {
+        "path": "tests/reply-review-regressions.test.mjs",
+        "sha256": "3f020ab06a09844bea6647c74f61af2b928b57a77a49be689c982098f579a850"
+      },
+      {
+        "path": "frontend/index.jsx",
+        "sha256": "bd8ce04d98ea9f46ba53c6d8eca70a0cf60f08835781df3710543895d60021b5"
+      },
+      {
+        "path": "frontend/page-content.jsx",
+        "sha256": "784f89ddf32387b6169c0853551ea3c0d06225fb732dfac3051d76f530e502f5"
+      },
+      {
+        "path": "modules/recovery/service.mjs",
+        "sha256": "0e787d4d525bf4bba0f7894288b2f2139164aa98effbcf722a9c17d5b65893dd"
+      },
+      {
+        "path": "modules/cleanup/service.mjs",
+        "sha256": "d7f64aab6c385014a969a6d913965a8ae3c4a95c814059a12307668dbf3b84b4"
+      },
+      {
+        "path": "backend/app/service.mjs",
+        "sha256": "5c63fb7439778229ed2bb2ba56413670afd50fce7c885e3a8060ded0289348ef"
+      },
+      {
+        "path": "backend/app/runtime.mjs",
+        "sha256": "742eceef0c863014ea5d4b79f948cbf99c8fa3583015bd81b882322e9a3d42b5"
+      },
+      {
+        "path": "frontend/pages/conversations/settings-page.jsx",
+        "sha256": "4d7556c60ccf6591780eb26b57938332c05904edef2eddb441d5370565843df0"
+      },
+      {
+        "path": "backend/app/plugin.mjs",
+        "sha256": "a0700378d6086c705fc2348645367d7e2c1cf891ff124230f1cea7ede5596643"
+      },
+      {
+        "path": "frontend/pages/conversations/natural-settings.jsx",
+        "sha256": "119486f315f261b779247f0344c574c839d72a9af93b409a1804355914ea90ed"
+      },
+      {
+        "path": "frontend/pages/conversations/authorization-page.jsx",
+        "sha256": "e5808e71cd7e59eb318bb959fc3a3d696f6ee9d70ae8f85d24dafab2cfc8cb3a"
+      },
+      {
+        "path": "frontend/pages/moments/interactions-page.jsx",
+        "sha256": "a51c1c3c894a4c566a87149f7b62b6785c2b59ab98bc4e841e94cd902fc1f90a"
+      },
+      {
+        "path": "frontend/pages/moments/interaction-automation.jsx",
+        "sha256": "3bcb4929343e341a093561252507cec6fa41178251dc62ca52de2fda412443fc"
+      },
+      {
+        "path": "frontend/pages/moments/friends-page.jsx",
+        "sha256": "ab0ab6261c5b0db8dabbb946f26e39c50fd17c01f24dbe9023bf1c6d5736c679"
+      },
+      {
+        "path": "frontend/pages/moments/audience-picker.jsx",
+        "sha256": "90d3997f7a0618b2e1f8539e99798f269f38364c8deb0035696cfc3ec89edc79"
+      },
+      {
+        "path": "frontend/pages/moments/arrangement-fields.jsx",
+        "sha256": "d59f90a36944f89d02b6baf567c125e6c3ee577d51e15933e628feb14389a66f"
+      },
+      {
+        "path": "frontend/pages/moments/page.jsx",
+        "sha256": "06e3d3af510011b4ebdcd1a9f6e0483e07e40f1b2eab2a54581d3c3015e890be"
+      },
+      {
+        "path": "frontend/pages/moments/materials-page.jsx",
+        "sha256": "11767a0d70766555322d61222d184a8fb421cbc7b05e8f831ff6a24c23a6c856"
+      },
+      {
+        "path": "frontend/pages/moments/publishing-page.jsx",
+        "sha256": "33ef7743b324b93b998d10bd185b4d369c254ab687d2deb228226d6e92d58de0"
+      },
+      {
+        "path": "frontend/pages/moments/reply-schedule.jsx",
+        "sha256": "2e45841f88c292e5f00c6882b5f4cebd4129bb7e52c51b630b034026e3ec6682"
+      },
+      {
+        "path": "frontend/pages/tasks/details.jsx",
+        "sha256": "cc244d9eee4fb58bc91817f99c2597a5e6eb4557f3903314e7b94c8c0f067998"
+      },
+      {
+        "path": "frontend/pages/tasks/page.jsx",
+        "sha256": "84214acfa208ab99e80994093012db470fd6f6bb71dfde55a8f2fad7d1574c08"
+      },
+      {
+        "path": "frontend/entry.jsx",
+        "sha256": "9026f5ac95e1a02ed19e7fd692014be3f49a50466fa72a1e3c7b37065cd0bcad"
+      },
+      {
+        "path": "frontend/pages/moments/use-interactions.mjs",
+        "sha256": "2a872c5c4d16ee1a03a704ffd8443c918338333416990e54ddf64a28e57a7033"
+      },
+      {
+        "path": "frontend/pages/media/library-page.jsx",
+        "sha256": "bad3d6fc950c48ef8e256c2e4d7523abbf455a82ebbf23d8758ef4b002cb4cdf"
+      },
+      {
+        "path": "tests/runtime-workspace.test.mjs",
+        "sha256": "797e59a96c227cc13831c3b833463e06d531670620ea8a46d0a69e68a4b3da1e"
+      },
+      {
+        "path": "tests/role-memory-production.test.mjs",
+        "sha256": "78be58ec564dcd4bb2cf621e3b9be25aab9d4e768df35a2022021032303700bd"
+      },
+      {
+        "path": "tests/role-memory-practical.test.mjs",
+        "sha256": "d019d0542f4e0eb01ab8aef6d0177a2d57a463e9b1a452791ee4037e9c78f61b"
+      },
+      {
+        "path": "tests/request-metrics-isolation.test.mjs",
+        "sha256": "7d651f304956b61b99957e807fbbdbc9b10ba97762ddf78ba4843b855ce02b0e"
+      },
+      {
+        "path": "tests/request-context.test.mjs",
+        "sha256": "e09acd53ac7a918dbec52f2b1c6518c0e0c7c3b19961b6a8c7395a3099448722"
+      },
+      {
+        "path": "tests/reply-style.test.mjs",
+        "sha256": "e8965b060ae65c1a5f3c4aa91bb231362d0f8563b71b512d9d71b3dc8900a822"
+      },
+      {
+        "path": "frontend/pages/tasks/recipients.jsx",
+        "sha256": "b00ff9b85980a7fcc1b2f0016b3bf11a8760848fdbc273ec29853ce11adb480a"
+      },
+      {
+        "path": "frontend/pages/media/workspace.jsx",
+        "sha256": "cc885ad72e9d1ca122b8b9fbf3c79e2d5bb9bbb1fb8d7b27b0e4db8691fd4642"
+      },
+      {
+        "path": "tests/source-structure.test.mjs",
+        "sha256": "32a194503704937ed9cce0a0a51e4b19f4be25c5b3935068719c03c0af0590ed"
+      },
+      {
+        "path": "tests/task-history.test.mjs",
+        "sha256": "b139a835689d4675c86bc3db41371f2003e942650f24b1fe47c44a2a3ecb5e2b"
+      },
+      {
+        "path": "tests/search-fallback.test.mjs",
+        "sha256": "506057047650a7eba094f3bc04610d17fe53a9fc99cc4523c904dbf8db16674b"
+      },
+      {
+        "path": "tests/storage-v2.test.mjs",
+        "sha256": "f5fd1ed951b55d79ee4eeeb65bd970bb76a8367c4d886c939c331377a1aa1719"
+      },
+      {
+        "path": "tests/task-mentions.test.mjs",
+        "sha256": "c9ff13ea7e00c55fabf40f294dad732303150f98407619a74d81c6d84968e0c3"
+      },
+      {
+        "path": "tests/tool-notices.test.mjs",
+        "sha256": "d9f32fd74099a4d69b76f6bb03799378ea8859630e481ea65261e22aadc4b6ee"
+      },
+      {
+        "path": "frontend/pages/records/references.jsx",
+        "sha256": "e31ea14d90e518d776b27d0be60ed7f6fc1abe1182614eceb3d06aa057fda291"
+      },
+      {
+        "path": "frontend/pages/records/page.jsx",
+        "sha256": "0a5171a3fad38e466c6bc588326131e9242dc7cd07929e25ef2a98703fc48f92"
+      },
+      {
+        "path": "tests/scheduled-features.test.mjs",
+        "sha256": "413d88f903c7b29bcf4e970ee183d7ea9ff85549493f884fe72eabcd1bdd1158"
+      },
+      {
+        "path": "modules/remote/service.mjs",
+        "sha256": "259da76c953e8c22175f8a6c8f1fb3c4f16aaeb6fb293f555355166d914c5546"
+      },
+      {
+        "path": "tests/web-search.test.mjs",
+        "sha256": "cefc8543a34c7dd708c5fa361787110624ae17533d2ccc977291362e976b08a9"
+      },
+      {
+        "path": "tests/vision-routing.test.mjs",
+        "sha256": "28cea2af48bcadaa6863a4818de4f5c4c40ea113d0c93620fb4a11da92fe1d96"
+      },
+      {
+        "path": "tests/wechat-emoji-vision.test.mjs",
+        "sha256": "e52b0f8425faa7c9d93eb80661d35eb4a4dfd6f87dd6a1b62d3e1927a1c189dd"
+      },
+      {
+        "path": "frontend/pages/memory/conversation-page.jsx",
+        "sha256": "eb1789dd6e8d3445b5f170e8c325cb66c1451911ab766847cdd97923f073efe4"
+      },
+      {
+        "path": "frontend/pages/memory/images-page.jsx",
+        "sha256": "d3e615904f232adf1121353cad2a52c2aa2eb2000ee1fd232ff74cf40c418d4c"
+      },
+      {
+        "path": "tests/work-artifacts.test.mjs",
+        "sha256": "4377d3d175b75ec4506cab1d2a49eabb0d6dbbf00571ffa8b263a07fe7fc3cb7"
+      },
+      {
+        "path": "frontend/hooks/use-workbench.mjs",
+        "sha256": "b983c51e287880a5d08bed42aa89be9aa428d97e48c522dfb201b6f0966a836f"
+      },
+      {
+        "path": "frontend/hooks/use-panel.mjs",
+        "sha256": "aacaf053a9d2555b6eaba2a116ab97eb9ec7edff2e2f89393a86043ad3849848"
+      },
+      {
+        "path": "frontend/hooks/use-model-info.mjs",
+        "sha256": "683a9aff502c2a79ba41a341d095241b84d0d85daa52986cb027c38bc7e9283d"
+      },
+      {
+        "path": "tests/work-connections.test.mjs",
+        "sha256": "68626b091578526227f971038e4fb73fbdb1214e34159bc53df9aa9389f7e2d2"
+      },
+      {
+        "path": "tests/work-image-storage.test.mjs",
+        "sha256": "25b70f0f31a1f6d8d281bcda77a93aa2eafb3a9b646c8743739e499f6e84f2cc"
+      },
+      {
+        "path": "frontend/pages/memory/review-page.jsx",
+        "sha256": "5039757e75bedf7d722c7277d14a3a18c44e80e7760ebaeb5282d74ef00eaa4b"
+      },
+      {
+        "path": "frontend/pages/memory/long-term-page.jsx",
+        "sha256": "81743a4c8e45612e76aa1f72a3f4352088b253359a4387f40367c32c9684d17f"
+      },
+      {
+        "path": "tests/work-mode.test.mjs",
+        "sha256": "59a832316aa7882006d2a7a879b5865828c6a39092c7956a3664c664f7c1cd74"
+      },
+      {
+        "path": "frontend/pages/memory/role-cards-page.jsx",
+        "sha256": "579150dd325a4bd878328dfdf4530d0c43f12a8687972f76616efdb5e3863f70"
+      },
+      {
+        "path": "frontend/pages/memory/visuals.jsx",
+        "sha256": "aba51a3b471bdaca6923bed97b1b36f93e27ffe22e7631abc429a2e7ff06829b"
+      },
+      {
+        "path": "frontend/pages/memory/workspace.jsx",
+        "sha256": "2404c437633a85b4db51e96caba3880d9a72848471974ec92416a0cf7698d9c5"
+      },
+      {
+        "path": "frontend/components/admin-picker.jsx",
+        "sha256": "0a55277205d76bb15017a2772b7527df7aca255caa9698675c216dd3dfeecb67"
+      },
+      {
+        "path": "frontend/components/automation-ui.jsx",
+        "sha256": "13fc6984c04278308b05682a612325e42d349933a3b4418b1af3c15288d83706"
+      },
+      {
+        "path": "tests/work-outcome.test.mjs",
+        "sha256": "056e9c3a0006622f77ad8406b06fba75ac61ef48aa7fd9c6dc422a06e1bce384"
+      },
+      {
+        "path": "tests/work-parallel.test.mjs",
+        "sha256": "5eea47a5f257c4a92f0bfb33d057447e4a0469431211028498755614943ec267"
+      },
+      {
+        "path": "modules/remote/authorization/actions.mjs",
+        "sha256": "4ff9752cd602fac56c909ed52af2d89b22a63ae3f1cdfad8de229a4d7b6d1edd"
+      },
+      {
+        "path": "modules/remote/commands/index.mjs",
+        "sha256": "8d5aa095474a9ddf19ed8daf9c26c387d900620beada0036300d5e75c0a582ba"
+      },
+      {
+        "path": "modules/remote/computer/status.mjs",
+        "sha256": "506e2670d1c6e028b58fbc683743b52786b2b59d2bf68f87d7d417aa82de2765"
+      },
+      {
+        "path": "modules/remote/authorization/policy.mjs",
+        "sha256": "70991c4da4de8f2ef21c16dbd2e46c0fec92a2bfa3df5aa032d1137cec9c5b35"
+      },
+      {
+        "path": "tests/work-permissions.test.mjs",
+        "sha256": "3005acf8dc35d76bac6c567b145eefd0b41334cab0d2de30917a48c4aa66f736"
+      },
+      {
+        "path": "frontend/components/button.jsx",
+        "sha256": "705f4029793bc49c75217a3ac1004b1f42f9ecdebc5c3ee3e2a2a2c0543525c3"
+      },
+      {
+        "path": "frontend/pages/recovery/page.jsx",
+        "sha256": "3d915efca73e4913d45fcfb7110163652abad4b7205455ad748cd52eb9646c8f"
+      },
+      {
+        "path": "tests/work-progress.test.mjs",
+        "sha256": "4624115229597d03c1e7d0124406618df010f7f2ef9a76c79117a4aaef219a3b"
+      },
+      {
+        "path": "tests/work-polish-status.test.mjs",
+        "sha256": "7cd9d76c36ccf9f2b7b5e96de6f159c9b0d09f51bd167842e19f1eb220552144"
+      },
+      {
+        "path": "tests/work-result-polish.test.mjs",
+        "sha256": "9d9e948ecead750ebc2a964fa5901fab698a156ac729be5112bf1cef7e0d058a"
+      },
+      {
+        "path": "frontend/pages/settings/administrators-page.jsx",
+        "sha256": "67e51b6e0d8f64768c3ec653b2ce15d6a6c7f3a04acf7ec13d6da6b9b755bdbe"
+      },
+      {
+        "path": "frontend/pages/settings/changelog-page.jsx",
+        "sha256": "eedffa2bbf0db26e7b6c53868e08d9074960b8c4d78ff028d7d304013e7bc15b"
+      },
+      {
+        "path": "frontend/components/cleanup-control.jsx",
+        "sha256": "b603528b6abba2c15cfc4606b41288471f820b22e3713e09581e20f3d64b669e"
+      },
+      {
+        "path": "frontend/components/form-ui.jsx",
+        "sha256": "72b7540ecaaf48778bc728709dfdf5de4e9be8b878a5a256c76aedb0d4c9dfbe"
+      },
+      {
+        "path": "modules/remote/intent/index.mjs",
+        "sha256": "6eac3595726bce53e84199d47add39234ba2655cea56bd065749fae5e59c8331"
+      },
+      {
+        "path": "tests/work-route-review.test.mjs",
+        "sha256": "36b531ed1999dca4d9e857ed8c61c355f712310e7169639d3f98253d53ba13da"
+      },
+      {
+        "path": "frontend/pages/settings/identity-page.jsx",
+        "sha256": "f52b0561db454879d9459d88f8bf38b3283eebde0de44d245ab7aae2cbc15b54"
+      },
+      {
+        "path": "frontend/components/glyph.jsx",
+        "sha256": "f140b9b901424cd372efb16843999ca477f913f475666f9b66538c518fd98581"
+      },
+      {
+        "path": "modules/remote/tasks/status.mjs",
+        "sha256": "7ea7acf6c309f6023b71cb1ddc0f686370571c45ed599d918dee403a64eed07f"
+      },
+      {
+        "path": "modules/remote/tasks/format.mjs",
+        "sha256": "e28f907ceb61a8f24f6279eca5739badf31b177ad62f9841166fccfd12c06749"
+      },
+      {
+        "path": "frontend/components/workspace-tabs.jsx",
+        "sha256": "9a0a24607042bca3858eafca74aa050e3a45ef717bb79061fd359e842f548785"
+      },
+      {
+        "path": "tests/work-session-history.test.mjs",
+        "sha256": "ded243b31841d70fc8724f43e41859ee6c31c788ebf65b986ea3cb85e92d4d38"
+      },
+      {
+        "path": "frontend/components/workbench-ui.jsx",
+        "sha256": "1ba18897d6c6de6e2d4dd3cc5a29c9150a3df8120ac7977c2f1238b0e0359202"
+      },
+      {
+        "path": "frontend/pages/settings/storage-page.jsx",
+        "sha256": "30a511ec2d019aefae14babb40870a176b3853e5220abaad4eda5305ff1bce70"
+      },
+      {
+        "path": "frontend/components/visuals.jsx",
+        "sha256": "56658513a6bdf1e25cab18a0652c0574bf16143417c529dc3c17ec6006e993c0"
+      },
+      {
+        "path": "tests/work-sender-routing.test.mjs",
+        "sha256": "5da049af9792826a1a0d51e5453ce85dff2aac29d55fdf0ed350dd548aa9793b"
+      },
+      {
+        "path": "frontend/pages/settings/search-settings.jsx",
+        "sha256": "4619e5c12988b3ba76e0868901ccc362cb00fec0dfce02ff804d9dec3596b5a4"
+      },
+      {
+        "path": "frontend/pages/settings/persona-page.jsx",
+        "sha256": "993f51be42f093624d4f1d2f8f9babb88476c85d4f825e6a05c7ea5141164555"
+      },
+      {
+        "path": "frontend/components/room-picker.jsx",
+        "sha256": "773c5e0fac18dfbfaf76ad8b1388c5deeed573ae1a1fe3b442a3f7da9c58d058"
+      },
+      {
+        "path": "tests/work-routing.test.mjs",
+        "sha256": "97d8d7e5306cec5adf6b6cb20e211075701cbb8e0c30bed38fd21ff4560d99fd"
+      },
+      {
+        "path": "frontend/pages/settings/page.jsx",
+        "sha256": "a7c45733f5441ab6205e62efd84d26025eedb2aa205b552c8ef0a232dbf7a2af"
+      },
+      {
+        "path": "frontend/components/page-ui.jsx",
+        "sha256": "8f69e53b7f49d3b888e8e056dd7a67dd33463089efda5efbec5a592f089916c4"
+      },
+      {
+        "path": "tests/work-routing-context.test.mjs",
+        "sha256": "20269c4914982677ea5b25cfee085e05e94b0a42174edab27ded34125bd00f41"
+      },
+      {
+        "path": "frontend/pages/settings/model-picker.jsx",
+        "sha256": "9da98a6dfc3cab16e5e889b75dcc2854ecc80bbca0c2aebf5f7577c7810d5617"
+      },
+      {
+        "path": "tests/workbench-deletion.test.mjs",
+        "sha256": "93df7e793c189bb3a95bb4cc36b8f68d4e2bae1f9940d0005e7e8e5d5e1805d2"
+      },
+      {
+        "path": "tests/work-tools.test.mjs",
+        "sha256": "e0ccb9e5259981707258a1c02be7931162bcca23339a0f3845c909d30dfce0b6"
+      },
+      {
+        "path": "tests/workbench-store-compatibility.test.mjs",
+        "sha256": "96de998ad2de7668bd96ace2aab2da54cd8af3eaff4ba3ea3d566dbbc0888db7"
+      },
+      {
+        "path": "tests/workbench.test.mjs",
+        "sha256": "5937bde2d30e75b82953d32e2471eb2ed29c4fe0d273bb4e760247d3b7cffbf6"
+      },
+      {
+        "path": "frontend/pages/settings/image-generation-page.jsx",
+        "sha256": "527a49b5a06595cd0d2453ba2406115e227da27fec77ad97581c922bbe68d937"
+      },
+      {
+        "path": "frontend/pages/settings/model-page.jsx",
+        "sha256": "828b58135978850828c5ea2672caa594e13e6d0da984c5d1b8b9f918f7078036"
+      },
+      {
+        "path": "tests/worker-transfer-wait.test.mjs",
+        "sha256": "a0f030361b456669cc34c5d111b89ba4c2fa6bdc17f7573c6fac92dfc70fedff"
+      },
+      {
+        "path": "tests/worker-send-account.test.mjs",
+        "sha256": "a29cf2794001d625546af8d6280edf017f752f991317e32dff838f4b483bc429"
+      },
+      {
+        "path": "tests/yaml-configuration.test.mjs",
+        "sha256": "3892f77cd8856f2b6aeb619f57b925418a7ca61b5fb2716e797a3b30494bc7dc"
+      },
+      {
+        "path": "tests/workspace-root.test.mjs",
+        "sha256": "964136d73a3c26b5a18de7de92c8754abbf233f9adc588646f582881cc02ffd7"
+      }
+    ],
+    "secondFullSuiteVersionBoundary": "The suite enumerated 121 files after the 10:38 build; external 10:48 and later rebuilds occurred while it ran. No per-child bundle snapshot was taken, so the run is not represented as a single frozen candidate.",
+    "latestSupplementVerification": {
+      "at": "2026-11-11T03:03:42.922Z",
+      "capturedAt": "2026-11-11T02:56:54.444Z",
+      "files": [
+        {
+          "file": "modules/memory/images/store.mjs",
+          "before": "07b6ed4f7bde5c5f530901b3b336942608633fc48025bc0a3c852bcdece39227",
+          "after": "07b6ed4f7bde5c5f530901b3b336942608633fc48025bc0a3c852bcdece39227",
+          "unchanged": true
+        },
+        {
+          "file": "modules/memory/images/tool.mjs",
+          "before": "db0f896538bed2bee3f7c0d6ebd6b3f885f587775ffe7c6a43e063422bcb9fae",
+          "after": "db0f896538bed2bee3f7c0d6ebd6b3f885f587775ffe7c6a43e063422bcb9fae",
+          "unchanged": true
+        },
+        {
+          "file": "modules/memory/roles/reflection.mjs",
+          "before": "05e9f2680651854f97e051be62eb7bac7e4f01c2565249de706b5116f48c3bdc",
+          "after": "05e9f2680651854f97e051be62eb7bac7e4f01c2565249de706b5116f48c3bdc",
+          "unchanged": true
+        },
+        {
+          "file": "modules/agent/models.mjs",
+          "before": "4fa965d82e09c42f5b6a28f573ef54ba563818e617e789e8723e9b0d38ce55ff",
+          "after": "4fa965d82e09c42f5b6a28f573ef54ba563818e617e789e8723e9b0d38ce55ff",
+          "unchanged": true
+        },
+        {
+          "file": "modules/files/access.mjs",
+          "before": "71531fd0655bcd3f3bfb016ad5b3cff0c5b586bf3bffa68f2180dbf2ae0ce808",
+          "after": "71531fd0655bcd3f3bfb016ad5b3cff0c5b586bf3bffa68f2180dbf2ae0ce808",
+          "unchanged": true
+        },
+        {
+          "file": "modules/files/docx.mjs",
+          "before": "ffe4ec28cf1208391a676003fb4813557121c96647d96b930ca74ae471d1936d",
+          "after": "ffe4ec28cf1208391a676003fb4813557121c96647d96b930ca74ae471d1936d",
+          "unchanged": true
+        },
+        {
+          "file": "modules/tools/files.mjs",
+          "before": "6957a679037d69cae132a833efa8fa6989e7a48912937b6f9cddb7aeb58bab77",
+          "after": "e6f033e4ec600b9b469b5de4dbafa7d32746038eaca86d638475d1df369632bd",
+          "unchanged": false
+        },
+        {
+          "file": "shared/received-files.mjs",
+          "before": "17fa808323fedb0bab519afb696130a67377ec0a288fd78211b32cab6f309c0f",
+          "after": "17fa808323fedb0bab519afb696130a67377ec0a288fd78211b32cab6f309c0f",
+          "unchanged": true
+        },
+        {
+          "file": "backend/wechat/protocol/file-message.ts",
+          "before": "496e75b94beef37446b8d23fca532194f20e5d62fcfc0c6f7c6246fe3d69fd73",
+          "after": "496e75b94beef37446b8d23fca532194f20e5d62fcfc0c6f7c6246fe3d69fd73",
+          "unchanged": true
+        },
+        {
+          "file": "backend/wechat/protocol/file-download.ts",
+          "before": "79431c646b8591f878a525c0996d1f68eb6f085089bb44b51213298053b599f2",
+          "after": "79431c646b8591f878a525c0996d1f68eb6f085089bb44b51213298053b599f2",
+          "unchanged": true
+        },
+        {
+          "file": "backend/wechat/protocol/file-loader.mjs",
+          "before": "8690fa22ffad72fac6e5a11e6d22338412a8cb6d0578a506b37fe03a7078c813",
+          "after": "8690fa22ffad72fac6e5a11e6d22338412a8cb6d0578a506b37fe03a7078c813",
+          "unchanged": true
+        },
+        {
+          "file": "backend/wechat/protocol/wire.ts",
+          "before": "450628770af8a3349e64b56f7c10edcfe09b52c633d95e0fb2eb6badfe073e04",
+          "after": "450628770af8a3349e64b56f7c10edcfe09b52c633d95e0fb2eb6badfe073e04",
+          "unchanged": true
+        },
+        {
+          "file": "tests/inbound-files.test.mjs",
+          "before": "9eb6976f2fc919d937e929ecb96ff38eb035d88f9252b4bde41a968fa3055083",
+          "after": "9eb6976f2fc919d937e929ecb96ff38eb035d88f9252b4bde41a968fa3055083",
+          "unchanged": true
+        },
+        {
+          "file": "tests/received-files.test.mjs",
+          "before": "2f0208ca53b90ddcb48675b63fbde5443e9a047c9ef791c6233c5d105de168bf",
+          "after": "0d538c23ce5fd62c202b8555c7978ecd69483e9dd02e9425137770f169041675",
+          "unchanged": false
+        },
+        {
+          "file": "tests/outbound-media.test.mjs",
+          "before": "8462ce80f788469ec0fe643ad31a0338ba7ed45efff3106e53f1a81b46a115a1",
+          "after": "8462ce80f788469ec0fe643ad31a0338ba7ed45efff3106e53f1a81b46a115a1",
+          "unchanged": true
+        },
+        {
+          "file": "lib/testing.js",
+          "before": "53a23153b5f015ccb1337be58fa2159d72a1f7c39f0f13438c244ded59c89e00",
+          "after": "d2d053595c78702a86857a60c0716741c5557f00762730fbe379d5bf4366455e",
+          "unchanged": false
+        }
+      ],
+      "allUnchanged": false
+    },
+    "bundles": [
+      {
+        "path": "lib/index.js",
+        "sha256": "ba33ad7aca265a02892ed33810715fc818f9f0f70bdd6ab5c518a2e5b3fde6f5",
+        "initialSha256": "2790f5e46ab57b49467f6805ed4721d2cb975ee597d6de5b66ddef6749d7830b",
+        "secondFullSuiteStartSha256": "a3c6a4eab7d3c4e6c5b51c804a0bee54d84347527af246a0947e8bcee14932b3",
+        "matchesInitialBuild": false,
+        "matchesSecondFullSuiteBuild": false
+      },
+      {
+        "path": "lib/client.js",
+        "sha256": "7f78efdec13380eb6c833715bddd75494e74bf193a0efd43e0df95e61433c296",
+        "initialSha256": "7f78efdec13380eb6c833715bddd75494e74bf193a0efd43e0df95e61433c296",
+        "secondFullSuiteStartSha256": "7f78efdec13380eb6c833715bddd75494e74bf193a0efd43e0df95e61433c296",
+        "matchesInitialBuild": true,
+        "matchesSecondFullSuiteBuild": true
+      },
+      {
+        "path": "lib/testing.js",
+        "sha256": "d2d053595c78702a86857a60c0716741c5557f00762730fbe379d5bf4366455e",
+        "initialSha256": "56a519e9e03df03b4a6bd6c86d8433769b3407d1877d78313fab6130d602efcf",
+        "secondFullSuiteStartSha256": "2ecfc7d11c17c22f00323ea2e7cd143692ecf9487be4cfb96f4eb1deea549a4d",
+        "matchesInitialBuild": false,
+        "matchesSecondFullSuiteBuild": false
+      },
+      {
+        "path": "lib/worker.cjs",
+        "sha256": "1286722682e0e70588b54015fe702367fd73edbe8e54f8911c0b71216939c974",
+        "initialSha256": "9c729a2377609789dba712792d91ab58153107931d707c1402458f9bb890cb4b",
+        "secondFullSuiteStartSha256": "d3b5cdde827c1bc392e826a9680db9d95a398c58302d3ebcab38a58ff7c2160e",
+        "matchesInitialBuild": false,
+        "matchesSecondFullSuiteBuild": false
+      }
+    ],
+    "snapshotBoundaryNote": "Cutoff manifests are historical; no current repository input is silently substituted for a tested candidate."
+  },
+  "tests": [
+    {
+      "command": "npm test",
+      "exitCode": 1,
+      "files": 120,
+      "tests": 2051,
+      "pass": 2049,
+      "fail": 2,
+      "cancelled": 0,
+      "skipped": 0,
+      "durationMs": 437896.1672,
+      "log": "storage/logs/harness-audit-2026-11-11/npm-test.log",
+      "failures": [
+        {
+          "location": "tests/image-memory.test.mjs:229",
+          "type": "product-time-boundary-defect"
+        },
+        {
+          "location": "tests/work-mode.test.mjs:50",
+          "type": "stale-method-ban-fixture"
+        }
+      ],
+      "logSha256": "3e4301e713da51413717a36e6ba5b3574516135841c606b78487584ba109b899"
+    },
+    {
+      "command": "npm run test:python",
+      "exitCode": 0,
+      "tests": 28,
+      "pass": 28,
+      "fail": 0,
+      "durationSeconds": 9.124,
+      "log": "storage/logs/harness-audit-2026-11-11/python-test.log",
+      "logSha256": "04c12657e6fdfef18da98fbc71abeaaa0408c290aeabd08cdec289f76cc8c7df"
+    },
+    {
+      "command": "memory targeted suite (7 files; see appendix)",
+      "exitCode": 1,
+      "tests": 83,
+      "pass": 82,
+      "fail": 1,
+      "skipped": 0,
+      "overlapsFullSuite": true,
+      "log": "storage/logs/harness-audit-2026-11-11/memory/targeted-tests.log",
+      "logSha256": "0a58fa744fcebd35053dd57b2c2866d72bb23127545b24f2c1b51008d0b2e48c"
+    },
+    {
+      "command": "npm test",
+      "phase": "second-full-suite",
+      "files": 121,
+      "tests": 2068,
+      "pass": 2067,
+      "fail": 1,
+      "skipped": 0,
+      "cancelled": 0,
+      "durationMs": 1942589.1707,
+      "exitCode": 1,
+      "log": "storage/logs/harness-audit-2026-11-11/npm-test-final.log",
+      "enumerationNote": "Included inbound-files; received-files appeared later and is covered by the supplements.",
+      "singleFrozenCandidate": false,
+      "failures": [
+        {
+          "location": "tests/work-mode.test.mjs:50",
+          "type": "stale-method-ban-fixture"
+        }
+      ],
+      "logSha256": "6e376b7da73b000b70924cc7d55575f552668cc6831de69948f4caa69e4ce060"
+    },
+    {
+      "command": "node --test tests/image-memory.test.mjs tests/inbound-files.test.mjs tests/received-files.test.mjs",
+      "phase": "final-supplement",
+      "exitCode": 0,
+      "tests": 46,
+      "pass": 46,
+      "fail": 0,
+      "skipped": 0,
+      "overlapsFullSuite": true,
+      "log": "storage/logs/harness-audit-2026-11-11/memory-final/targeted-tests.log",
+      "logSha256": "4c7d855cb8d8fff9d5a30ab3e08f144d313f5d2d213eac8b772e75062bee285d"
+    },
+    {
+      "command": "node --test tests/outbound-media.test.mjs",
+      "phase": "late-protocol-change",
+      "exitCode": 0,
+      "tests": 65,
+      "pass": 65,
+      "fail": 0,
+      "skipped": 0,
+      "overlapsFullSuite": true,
+      "log": "storage/logs/harness-audit-2026-11-11/outbound-media-final.log",
+      "logSha256": "63da192b83e38e4fa624137afff2fdcadf7fe55e036fd1de675fc4d54ed2139b"
+    },
+    {
+      "command": "node --test tests/inbound-files.test.mjs tests/received-files.test.mjs tests/outbound-media.test.mjs",
+      "phase": "1056-start-file-supplement",
+      "exitCode": 0,
+      "tests": 98,
+      "pass": 98,
+      "fail": 0,
+      "skipped": 0,
+      "cancelled": 0,
+      "durationMs": 344855.5888,
+      "overlapsFullSuite": true,
+      "log": "storage/logs/harness-audit-2026-11-11/memory-latest/targeted-tests.log",
+      "singleFrozenCandidate": false,
+      "versionNote": "13 of 16 observed inputs unchanged; tool selection recording, received-files test and testing bundle changed during the run. A new twelfth received-files test was not executed.",
+      "logSha256": "d8df40d9a627d37382c8e945be378c8a3d7bf53cf9adf65057f4fea5bc111bc6"
+    },
+    {
+      "command": "node scripts/test-dsh-native.cjs D:/deepseek-harness",
+      "variant": "original-low-load-repeat",
+      "exitCode": 0,
+      "requests": 76,
+      "assertionGroups": 68,
+      "initialAttempt": "45-second watchdog under concurrent load; retained in runtime appendix"
+    },
+    {
+      "command": "node scripts/test-native-handoff.cjs D:/deepseek-harness",
+      "variant": "initial-original",
+      "exitCode": 1,
+      "reason": "fixture tool-set assertion does not include new memory tools",
+      "latestScriptStatus": "externally updated later; not fully rerun by this audit"
+    },
+    {
+      "command": "isolated test-native-handoff-instrumented.cjs",
+      "variant": "isolated-fixture-adaptation",
+      "exitCode": 0,
+      "assertionGroups": 49,
+      "nativeRequests": 58,
+      "routingRequests": 25,
+      "polishRequests": 57,
+      "powershellCalls": 6
+    },
+    {
+      "command": "node scripts/test-remote-native.cjs D:/deepseek-harness",
+      "variant": "original",
+      "exitCode": 1,
+      "reason": "fixture waits indefinitely for internal maintenance request"
+    },
+    {
+      "command": "isolated remote-native-adapted.cjs",
+      "variant": "isolated-fixture-adaptation",
+      "exitCode": 0,
+      "assertionGroups": 10,
+      "mainRequests": 2,
+      "auxiliaryRequests": 2
+    },
+    {
+      "command": "node scripts/test-search-native.cjs D:/deepseek-harness",
+      "exitCode": 0,
+      "overallCleanPass": false,
+      "mainCases": 7,
+      "requests": 15,
+      "reason": "background native-turn assertion despite main-case success"
+    },
+    {
+      "command": "node scripts/test-scheduler-clock.mjs",
+      "exitCode": 0,
+      "realClockSeconds": 61.202,
+      "lateSeconds": 1.199,
+      "reminderCount": 1,
+      "transport": "synthetic-server-ack"
+    }
+  ],
+  "ui": {
+    "note": "Do not add counts across overlapping originals, repeats and adaptations; visual errors are ten width/theme instances of one overflow symptom.",
+    "reports": [
+      {
+        "name": "ui",
+        "report": "storage/logs/harness-audit-2026-11-11/ui/report.json",
+        "sha256": "d691c8a8735b973a245ddabb8965d4939089d091887692672a10b5c5e9cee4b5",
+        "ok": false,
+        "variant": "original",
+        "assertionGroups": 34,
+        "screenshots": 33,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": "Error: UI wait timed out: tab => document.activeElement?.id === 'wa-memory-tab-' + tab && document.activeElement.getAttribute('aria-selected') === 'true'\n    at waitFor (D:\\Learn-data\\github-Project\\wechat-agent\\dsh-Wechat-Agent\\scripts\\test-ui-driver.cjs:44:9)\n    at async verifyMemory (D:\\Learn-data\\github-Project\\wechat-agent\\dsh-Wechat-Agent\\scripts\\test-ui-driver.cjs:470:5)\n    at async D:\\Learn-data\\github-Project\\wechat-agent\\dsh-Wechat-Agent\\scripts\\test-ui-driver.cjs:1830:25"
+      },
+      {
+        "name": "ui-adapted",
+        "report": "storage/logs/harness-audit-2026-11-11/ui-adapted/report.json",
+        "sha256": "dd2501fa1809519a49338e84ae32a832c3fcc1c42abe8788d76aa59740705b2d",
+        "ok": true,
+        "variant": "isolated-fixture-adaptation",
+        "assertionGroups": 55,
+        "screenshots": 77,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": null
+      },
+      {
+        "name": "ui-admin",
+        "report": "storage/logs/harness-audit-2026-11-11/ui-admin/report.json",
+        "sha256": "45f86a2ea73ebcb13deff404bb4334889a67376b4e9281194abc68684ecd9230",
+        "ok": false,
+        "variant": "original",
+        "assertionGroups": 0,
+        "screenshots": 0,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": "AssertionError [ERR_ASSERTION]: The expression evaluated to a falsy value:\n\n  assert(await evaluate(() => document.body.textContent.includes('直接用文字查询') && document.body.textContent.includes('DSH 任务跑到哪了') && document.body.textContent.includes('保存管理员后，还需要')))\n\n    at verifyAdministrators (D:\\Learn-data\\github-Project\\wechat-agent\\dsh-Wechat-Agent\\scripts\\test-ui-driver.cjs:708:3)\n    at async D:\\Learn-data\\github-Project\\wechat-agent\\dsh-Wechat-Agent\\scripts\\test-ui-driver.cjs:1372:7"
+      },
+      {
+        "name": "ui-admin-adapted",
+        "report": "storage/logs/harness-audit-2026-11-11/ui-admin-adapted/report.json",
+        "sha256": "9ce3ceea5b4d16332c63b6016dd8afb61e9ba582eca3011ffaf86e703308ee4c",
+        "ok": true,
+        "variant": "isolated-fixture-adaptation",
+        "assertionGroups": 4,
+        "screenshots": 4,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": null
+      },
+      {
+        "name": "ui-arrangement",
+        "report": "storage/logs/harness-audit-2026-11-11/ui-arrangement/report.json",
+        "sha256": "460f58f181c1c32d85d3b2bfe456e4a646a50ac704f287c593513000c37593a4",
+        "ok": false,
+        "variant": "original",
+        "assertionGroups": 3,
+        "screenshots": 6,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": "Error: UI wait timed out: async (source, args) => (0, eval)('(' + source + ')')(await window.__uiFixture('state'), ...args)\n    at waitFor (D:\\Learn-data\\github-Project\\wechat-agent\\dsh-Wechat-Agent\\scripts\\test-ui-driver.cjs:44:9)\n    at async stateMatches (D:\\Learn-data\\github-Project\\wechat-agent\\dsh-Wechat-Agent\\scripts\\test-ui-driver.cjs:74:3)\n    at async D:\\Learn-data\\github-Project\\wechat-agent\\dsh-Wechat-Agent\\scripts\\test-ui-driver.cjs:1042:7"
+      },
+      {
+        "name": "ui-arrangement-controlled",
+        "report": "storage/logs/harness-audit-2026-11-11/ui-arrangement-controlled/report.json",
+        "sha256": "56e146d55289e763ea2d4e63ec97ee352492b23ad446a843a7413cb685400f1b",
+        "ok": false,
+        "variant": "diagnostic-fixture-copy",
+        "assertionGroups": 4,
+        "screenshots": 7,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": "AssertionError [ERR_ASSERTION]: completion of an older save must preserve the newer editable draft\n\n'3' !== '4'\n\n    at D:\\Learn-data\\github-Project\\wechat-agent\\dsh-Wechat-Agent\\storage\\tmp\\harness-ui-audit-20261111\\instrumented\\arrangement-controlled.cjs:1073:14"
+      },
+      {
+        "name": "ui-arrangement-observe",
+        "report": "storage/logs/harness-audit-2026-11-11/ui-arrangement-observe/report.json",
+        "sha256": "7c3e0dc37b896f520f0533b7e153d6bcc1c8db636ae659ae70ccbceaf5385cfa",
+        "ok": true,
+        "variant": "diagnostic-fixture-copy",
+        "assertionGroups": 5,
+        "screenshots": 6,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": null
+      },
+      {
+        "name": "ui-arrangement-repeat",
+        "report": "storage/logs/harness-audit-2026-11-11/ui-arrangement-repeat/report.json",
+        "sha256": "258f14f016dd1c6c8b5f8dc139b8a09e76b4ec3878608446f02d772c838032b4",
+        "ok": false,
+        "variant": "original-repeat",
+        "assertionGroups": 3,
+        "screenshots": 6,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": "Error: UI wait timed out: async (source, args) => (0, eval)('(' + source + ')')(await window.__uiFixture('state'), ...args)\n    at waitFor (D:\\Learn-data\\github-Project\\wechat-agent\\dsh-Wechat-Agent\\scripts\\test-ui-driver.cjs:44:9)\n    at async stateMatches (D:\\Learn-data\\github-Project\\wechat-agent\\dsh-Wechat-Agent\\scripts\\test-ui-driver.cjs:74:3)\n    at async D:\\Learn-data\\github-Project\\wechat-agent\\dsh-Wechat-Agent\\scripts\\test-ui-driver.cjs:1042:7"
+      },
+      {
+        "name": "ui-arrangement-settled",
+        "report": "storage/logs/harness-audit-2026-11-11/ui-arrangement-settled/report.json",
+        "sha256": "78306457881db0d9c361128c1737744f92ac9a566601652eac3d95840f45ad19",
+        "ok": true,
+        "variant": "isolated-fixture-adaptation",
+        "assertionGroups": 5,
+        "screenshots": 6,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": null
+      },
+      {
+        "name": "ui-authorization",
+        "report": "storage/logs/harness-audit-2026-11-11/ui-authorization/report.json",
+        "sha256": "06cc48766bf5e4f655a2e810fce85d9d935320491e409c3070669933d1cecbf4",
+        "ok": true,
+        "variant": "original",
+        "assertionGroups": 15,
+        "screenshots": 5,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": null
+      },
+      {
+        "name": "ui-cleanup",
+        "report": "storage/logs/harness-audit-2026-11-11/ui-cleanup/report.json",
+        "sha256": "df703a45ac6ad82ca0d4f87fc60a50a7c4632562459d2b010de5c134ba1d1e0d",
+        "ok": true,
+        "variant": "original",
+        "assertionGroups": 7,
+        "screenshots": 2,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": null
+      },
+      {
+        "name": "ui-generated-images",
+        "report": "storage/logs/harness-audit-2026-11-11/ui-generated-images/report.json",
+        "sha256": "abc7ee9fb9641639db01983ccb5faa44398446675a850fd41c2f9df6a6595464",
+        "ok": true,
+        "variant": "original",
+        "assertionGroups": 10,
+        "screenshots": 9,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": null
+      },
+      {
+        "name": "ui-interactions",
+        "report": "storage/logs/harness-audit-2026-11-11/ui-interactions/report.json",
+        "sha256": "1b9ae38d7cd0054f6e67db137aafa85a1f3a4ac42561386fee3da423b86a1d44",
+        "ok": true,
+        "variant": "original",
+        "assertionGroups": 13,
+        "screenshots": 8,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": null
+      },
+      {
+        "name": "ui-likes",
+        "report": "storage/logs/harness-audit-2026-11-11/ui-likes/report.json",
+        "sha256": "93caf61a1e9a91088ec23569259f6b08e904fa0d80673f01b2336ea78f373651",
+        "ok": true,
+        "variant": "original",
+        "assertionGroups": 8,
+        "screenshots": 3,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": null
+      },
+      {
+        "name": "ui-materials",
+        "report": "storage/logs/harness-audit-2026-11-11/ui-materials/report.json",
+        "sha256": "dbe5c36ab9aefed6d61c8ca37e736eed2ec806157121e38d1f44ed1a299759e6",
+        "ok": true,
+        "variant": "original",
+        "assertionGroups": 10,
+        "screenshots": 7,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": null
+      },
+      {
+        "name": "ui-memory",
+        "report": "storage/logs/harness-audit-2026-11-11/ui-memory/report.json",
+        "sha256": "5e7cbe62fabef102d197e0eb511617c7433962a14778c25ed787b3b0683854ef",
+        "ok": true,
+        "variant": "original",
+        "assertionGroups": 3,
+        "screenshots": 2,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": null
+      },
+      {
+        "name": "ui-moments",
+        "report": "storage/logs/harness-audit-2026-11-11/ui-moments/report.json",
+        "sha256": "4eb87294fa6a19d6d832d7d7b93d6cb5b0437d9f61ca411f3f913912d06a205c",
+        "ok": true,
+        "variant": "original",
+        "assertionGroups": 21,
+        "screenshots": 7,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": null
+      },
+      {
+        "name": "ui-moments-recovery",
+        "report": "storage/logs/harness-audit-2026-11-11/ui-moments-recovery/report.json",
+        "sha256": "d18807968ed50a9568443046c34a00365b0c1146e39e176a21d95f8319522008",
+        "ok": true,
+        "variant": "original",
+        "assertionGroups": 3,
+        "screenshots": 3,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": null
+      },
+      {
+        "name": "ui-persona",
+        "report": "storage/logs/harness-audit-2026-11-11/ui-persona/report.json",
+        "sha256": "dda89677072594934be7aaa227d7ab7f3c8591781256f81930450877f586ef9f",
+        "ok": true,
+        "variant": "original",
+        "assertionGroups": 3,
+        "screenshots": 3,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": null
+      },
+      {
+        "name": "ui-prompt",
+        "report": "storage/logs/harness-audit-2026-11-11/ui-prompt/report.json",
+        "sha256": "588c17d1baabc8774adc8a3ea064f4465eb417bfde47a0d8051a72a8f18b80a3",
+        "ok": true,
+        "variant": "original",
+        "assertionGroups": 1,
+        "screenshots": 2,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": null
+      },
+      {
+        "name": "ui-replies",
+        "report": "storage/logs/harness-audit-2026-11-11/ui-replies/report.json",
+        "sha256": "09ce5e1a65d3202763ba65b015c1687096f0aac8c5dea9b5dc04931bf0c92cf4",
+        "ok": true,
+        "variant": "original",
+        "assertionGroups": 10,
+        "screenshots": 7,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": null
+      },
+      {
+        "name": "ui-role-cards",
+        "report": "storage/logs/harness-audit-2026-11-11/ui-role-cards/report.json",
+        "sha256": "4d9e5b64accba3f4e9d7f976c5ab077862582b618cc95484edda963d56fd1f28",
+        "ok": true,
+        "variant": "original",
+        "assertionGroups": 6,
+        "screenshots": 3,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": null
+      },
+      {
+        "name": "ui-search",
+        "report": "storage/logs/harness-audit-2026-11-11/ui-search/report.json",
+        "sha256": "45be689389a1462818cc0611486ab69537f5b18740a2fa90d9612b8eb64ba630",
+        "ok": true,
+        "variant": "original",
+        "assertionGroups": 10,
+        "screenshots": 4,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": null
+      },
+      {
+        "name": "ui-tasks",
+        "report": "storage/logs/harness-audit-2026-11-11/ui-tasks/report.json",
+        "sha256": "10774010fc259817401ba4ad731b94f1b21b888718730bbe920bd33dc230ebd6",
+        "ok": true,
+        "variant": "original",
+        "assertionGroups": 4,
+        "screenshots": 11,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": null
+      },
+      {
+        "name": "ui-work",
+        "report": "storage/logs/harness-audit-2026-11-11/ui-work/report.json",
+        "sha256": "80dffc667ff6c05840419e03fb1019bbe8b84a8e8461c94b890486e11a62e876",
+        "ok": false,
+        "variant": "original",
+        "assertionGroups": 4,
+        "screenshots": 2,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": "AssertionError [ERR_ASSERTION]: false == true\n    at D:\\Learn-data\\github-Project\\wechat-agent\\dsh-Wechat-Agent\\scripts\\test-ui-driver.cjs:1421:7"
+      },
+      {
+        "name": "ui-work-adapted",
+        "report": "storage/logs/harness-audit-2026-11-11/ui-work-adapted/report.json",
+        "sha256": "1709c0176703bd40c71a052656230b6dc844b903416f566cbcddb4afe8b3293e",
+        "ok": false,
+        "variant": "isolated-fixture-adaptation",
+        "assertionGroups": 7,
+        "screenshots": 3,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": "AssertionError [ERR_ASSERTION]: The expression evaluated to a falsy value:\n\n  assert(await evaluate(() => document.querySelector('.wa-workspace details')?.open === true))\n\n    at D:\\Learn-data\\github-Project\\wechat-agent\\dsh-Wechat-Agent\\storage\\tmp\\harness-ui-audit-20261111\\instrumented\\work-adapted.cjs:1436:7"
+      },
+      {
+        "name": "ui-work-adapted-2",
+        "report": "storage/logs/harness-audit-2026-11-11/ui-work-adapted-2/report.json",
+        "sha256": "5c5162f72b441e33235663b04a20d7b120c254bd02d4d17c725ec44073e7daf5",
+        "ok": true,
+        "variant": "isolated-fixture-adaptation",
+        "assertionGroups": 13,
+        "screenshots": 6,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": null
+      },
+      {
+        "name": "visual",
+        "report": "storage/logs/harness-audit-2026-11-11/visual/report.json",
+        "sha256": "00e420ddd0ea70cb742d85a8de4667f6bd64b199864c6a2f1429ef68cd0f3312",
+        "ok": false,
+        "variant": "original",
+        "assertionGroups": 91,
+        "screenshots": 1312,
+        "layoutSamples": 793,
+        "errors": [
+          "Document vertical overflow outside the workspace at moments-interactions-1280-light: {\"viewport\":942,\"document\":{\"client\":942,\"scroll\":1068},\"body\":{\"client\":942,\"scroll\":942},\"roots\":[{\"selector\":\"#root\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-panel\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-shell\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-workspace\",\"client\":942,\"scroll\":1944}]}",
+          "Document vertical overflow outside the workspace at moments-interactions-1280-dark: {\"viewport\":942,\"document\":{\"client\":942,\"scroll\":1068},\"body\":{\"client\":942,\"scroll\":942},\"roots\":[{\"selector\":\"#root\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-panel\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-shell\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-workspace\",\"client\":942,\"scroll\":1944}]}",
+          "Document vertical overflow outside the workspace at moments-interactions-768-light: {\"viewport\":942,\"document\":{\"client\":942,\"scroll\":1260},\"body\":{\"client\":942,\"scroll\":942},\"roots\":[{\"selector\":\"#root\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-panel\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-shell\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-workspace\",\"client\":890,\"scroll\":2077}]}",
+          "Document vertical overflow outside the workspace at moments-interactions-768-dark: {\"viewport\":942,\"document\":{\"client\":942,\"scroll\":1260},\"body\":{\"client\":942,\"scroll\":942},\"roots\":[{\"selector\":\"#root\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-panel\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-shell\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-workspace\",\"client\":890,\"scroll\":2077}]}",
+          "Document vertical overflow outside the workspace at moments-interactions-430-light: {\"viewport\":942,\"document\":{\"client\":942,\"scroll\":1597},\"body\":{\"client\":942,\"scroll\":942},\"roots\":[{\"selector\":\"#root\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-panel\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-shell\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-workspace\",\"client\":892,\"scroll\":2700}]}",
+          "Document vertical overflow outside the workspace at moments-interactions-430-dark: {\"viewport\":942,\"document\":{\"client\":942,\"scroll\":1597},\"body\":{\"client\":942,\"scroll\":942},\"roots\":[{\"selector\":\"#root\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-panel\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-shell\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-workspace\",\"client\":892,\"scroll\":2700}]}",
+          "Document vertical overflow outside the workspace at moments-interactions-375-light: {\"viewport\":942,\"document\":{\"client\":942,\"scroll\":1703},\"body\":{\"client\":942,\"scroll\":942},\"roots\":[{\"selector\":\"#root\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-panel\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-shell\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-workspace\",\"client\":892,\"scroll\":2828}]}",
+          "Document vertical overflow outside the workspace at moments-interactions-375-dark: {\"viewport\":942,\"document\":{\"client\":942,\"scroll\":1703},\"body\":{\"client\":942,\"scroll\":942},\"roots\":[{\"selector\":\"#root\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-panel\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-shell\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-workspace\",\"client\":892,\"scroll\":2828}]}",
+          "Document vertical overflow outside the workspace at moments-interactions-320-light: {\"viewport\":942,\"document\":{\"client\":942,\"scroll\":1752},\"body\":{\"client\":942,\"scroll\":942},\"roots\":[{\"selector\":\"#root\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-panel\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-shell\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-workspace\",\"client\":892,\"scroll\":2876}]}",
+          "Document vertical overflow outside the workspace at moments-interactions-320-dark: {\"viewport\":942,\"document\":{\"client\":942,\"scroll\":1752},\"body\":{\"client\":942,\"scroll\":942},\"roots\":[{\"selector\":\"#root\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-panel\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-shell\",\"client\":942,\"scroll\":942},{\"selector\":\".wa-workspace\",\"client\":892,\"scroll\":2876}]}"
+        ],
+        "failure": "Error: Visual audit found 10 issues; see report.json for exact elements and ratios\n    at D:\\Learn-data\\github-Project\\wechat-agent\\dsh-Wechat-Agent\\scripts\\test-visual-system.cjs:404:37"
+      },
+      {
+        "name": "workbench-ui",
+        "report": "storage/logs/harness-audit-2026-11-11/workbench-ui/report.json",
+        "sha256": "3d2d10fd74eb63106ef534421e3615ecf74e028adffffb00e4d1a70a15dcbf03",
+        "ok": true,
+        "variant": "original",
+        "assertionGroups": 16,
+        "screenshots": 21,
+        "layoutSamples": null,
+        "errors": [],
+        "failure": null
+      }
+    ]
+  },
+  "diagnostics": [
+    {
+      "report": "storage/logs/harness-audit-2026-11-11/runtime-cutoff/persistence-wechat-file.json",
+      "mode": "actual-tool-persist-reload",
+      "result": "F02 wechat_file branch closes at 11:09:09; operation and existing ACK preserved, six relevant files stable. Four older tool whitelist omissions remain open at that cutoff."
+    },
+    {
+      "report": "storage/logs/harness-audit-2026-11-11/memory-latest/file-experiments.json",
+      "mode": "real-isolated-file-cache",
+      "result": "F13 historical same-length corruption now rejects with FILE_INTEGRITY_FAILED; pinned SHA remains the first downloaded bytes. Local integrity is not remote authenticity."
+    },
+    {
+      "report": "storage/logs/harness-audit-2026-11-11/memory-latest/audit-experiments.json",
+      "mode": "latest-memory-reproduction",
+      "result": "F01 remains closed for the reproduced time boundary; F03/F04/F05 remain reproducible."
+    },
+    {
+      "report": "storage/logs/harness-audit-2026-11-11/memory/overflow-probe/report.json",
+      "mode": "temporary-DOM-CSS-ablation-no-product-change",
+      "comparisons": 60,
+      "screenshots": 20,
+      "result": "manual fieldset position:relative fixes document overflow in all ten width/theme combinations; workspace content height unchanged"
+    },
+    {
+      "report": "storage/logs/harness-audit-2026-11-11/ui-arrangement-controlled/controlled-draft.json",
+      "mode": "held-local-RPC-with-user-editable-controls",
+      "result": "new draft 4 overwritten by completion of earlier save 3; real regression expectation fails; deletion control preserves draft"
+    }
+  ],
+  "package": {
+    "initial": {
+      "ok": true,
+      "files": 455,
+      "bytes": 192229666,
+      "sha256": "583e795306d685e7bb5cc35f299d8cb539c026b6f965547bc60cadd3a7997ec0",
+      "assertionGroups": 9,
+      "report": "storage/logs/harness-audit-2026-11-11/package-audit.json"
+    },
+    "laterCandidate": {
+      "status": "not-packaged-by-this-audit",
+      "reason": "After the interruption, the shared tree changed substantially beyond the tested candidates. The initial audited package is retained; no current package is presented as certified by earlier tests."
+    },
+    "deployed": false,
+    "published": false
+  },
+  "postCutoffObservation": {
+    "at": "2026-11-11T04:27:35.032Z",
+    "report": "storage/logs/harness-audit-2026-11-11/source-resume-observation.json",
+    "onlyTracksPreviouslyEnumeratedFiles": true,
+    "changesAfterCutoff": [
+      {
+        "path": "scripts/test-native-handoff.cjs",
+        "cutoffSha256": "8cb405e31349d6fd37c2147799de75e01cb167cc7c9c71df44e287caaf74b4f6",
+        "observedSha256": "cca683190829725f58668911e39c87b160919739646931ecbe8e244a6e9f56af",
+        "status": "changed"
+      },
+      {
+        "path": "backend/wechat/worker.mjs",
+        "cutoffSha256": "23b9748baee497649b5849a742c4b06c6ce45a75ddf2cb89a24a18fbfb0db784",
+        "observedSha256": "74d5055674034f283a3698ade63198d89bc411310e80b660b82ee79450af8321",
+        "status": "changed"
+      },
+      {
+        "path": "backend/wechat/worker-client.mjs",
+        "cutoffSha256": "60f5f2734fd3bce051f7715d97dacfc0b8a17ae383b0c9db01282d8cb57eca5e",
+        "observedSha256": "48dadd7cb4935f6988a54ace1acfdf21f86d813429044eb11904cc59e6fcbaef",
+        "status": "changed"
+      },
+      {
+        "path": "shared/role-card.mjs",
+        "cutoffSha256": "47875b31f4f895d3116dd165b4487119c5a7e4c0660f1096f19d310330695ac2",
+        "observedSha256": "a7b717d69ac9f4be218341a5cbcf993c42c4f3d0ced6a435820d462d5effc357",
+        "status": "changed"
+      },
+      {
+        "path": "shared/moments-publishing.mjs",
+        "cutoffSha256": "3df3b9707181c7c3cdd0fd6908452e538f3e99e0a7e538dad84832bd9496fe63",
+        "observedSha256": "2c8955dfda636d6312508e419d419ef7c5f5e039dd8ec90935fc1fb1a0fdbdbc",
+        "status": "changed"
+      },
+      {
+        "path": "shared/message-references.mjs",
+        "cutoffSha256": "5397a361ed1f6af30efaa41114fc8e94d6aea4a9eb066b87436f2f68bf7a10b1",
+        "observedSha256": "92fb2b96e92be8782e211167817670ac7947719b83b15e84fbd08f58bba38c28",
+        "status": "changed"
+      },
+      {
+        "path": "shared/image-generation.mjs",
+        "cutoffSha256": "512970d7ed3854a9cb649a16318cd80de8e27f988daff47a895ab2bf8739178b",
+        "observedSha256": "fa815effa93be4bcaacbe1e567aae9f7c830f4176a51098116a7d0355da504ba",
+        "status": "changed"
+      },
+      {
+        "path": "prompts/work/tools.json",
+        "cutoffSha256": "53272897e636bab521077c7b8dbcf329199122e29bccf2271194d332e9bda192",
+        "observedSha256": "7daeea25bdd89f1ca049b68eb877484bfe4a5328619e7e5faf692442ffcc2a3d",
+        "status": "changed"
+      },
+      {
+        "path": "prompts/work/routing.md",
+        "cutoffSha256": "96c56fc142bd04508df8889ff90bc0f145d69a7def8ede8857f865c264823523",
+        "observedSha256": "185395042fd40017bc47e6e48a140542acdb9166b697ca02979086c700f1f0cf",
+        "status": "changed"
+      },
+      {
+        "path": "prompts/files/tools.json",
+        "cutoffSha256": "d2f2437d9e5d9d0de424267c09f9b7c6c879cbde0f381742516505b9047d7fc2",
+        "observedSha256": "505aba6c293626bfe82a1f27f88171cfcf320f0a5a9ed40ea6b352af0fb20187",
+        "status": "changed"
+      },
+      {
+        "path": "backend/wechat/protocol/backend.ts",
+        "cutoffSha256": "adfd52b858b75a9a329ef0a3f874ca186496a628394428bee85970ceaa8fe42a",
+        "observedSha256": "22a19519af84c407792f7114284824be971e091647a86652357530e657b037ca",
+        "status": "changed"
+      },
+      {
+        "path": "tests/image-generation-providers.test.mjs",
+        "cutoffSha256": "35f88f570c2e8dbb70f624965535827323926e978c3c89c9de5d913fd8fa6f98",
+        "observedSha256": "7f5f0f2758aae2f8de8bdf40cba675747939f113d9fb58ab236c77793e50f14b",
+        "status": "changed"
+      },
+      {
+        "path": "tests/image-generation-response.test.mjs",
+        "cutoffSha256": "1fb35846662bb7cb1008d92db82edca6bc10f98228cae6afed8e5e8364d9997d",
+        "observedSha256": "be2790d382928af37bb75b6cc301c6e2ce1bf09f3dd4508d9aef4d3b077f275b",
+        "status": "changed"
+      },
+      {
+        "path": "tests/fixtures/word.mjs",
+        "cutoffSha256": "ec3f0f5aac66f37bcd89da61d0b66c08cde343dc9b8565eed05ae376a5edfbde",
+        "observedSha256": "09c185d88e2617f91c0bf123d327e9194f9b8b84cb7c7c983461b3c1be4a80ad",
+        "status": "changed"
+      },
+      {
+        "path": "prompts/agent/capabilities.mjs",
+        "cutoffSha256": "12cc88ae700edf80b1d7b9392c29a5adc1f4382d5676e75aae70b4492f5bcf5a",
+        "observedSha256": "fb14cd22c9a7f8e5aaa2c0ff714a71de4ae748d61ead1968231892d56df2e974",
+        "status": "changed"
+      },
+      {
+        "path": "tests/inbound-files.test.mjs",
+        "cutoffSha256": "9eb6976f2fc919d937e929ecb96ff38eb035d88f9252b4bde41a968fa3055083",
+        "observedSha256": "3c289500cee4064aaa42356a6b158c77c7eee102fc046fdd63893bd94d417fb9",
+        "status": "changed"
+      },
+      {
+        "path": "modules/moments/publishing.mjs",
+        "cutoffSha256": "da3ddc1c11a147fcd3d1cc7c22b750d7fab52923d4c31f084a5d2154d9b692b3",
+        "observedSha256": "ef9f4b8668d86e857d5bfb41d2e98eb6492e5c6d9fd301f2f8495a2f3d229e22",
+        "status": "changed"
+      },
+      {
+        "path": "modules/moments/publishing-review.mjs",
+        "cutoffSha256": "28327e54109a78dce45adbe9974a54ecbe49dc3c849a6cc213b806f5a089edea",
+        "observedSha256": "dbdfd8d081970e5d41fa501e2c1e14d9f4059f3f0c00794a02e8fad72a13cb22",
+        "status": "changed"
+      },
+      {
+        "path": "modules/moments/publishing-content.mjs",
+        "cutoffSha256": "ff8c336fe13a00681899b2e62149bdcdfbbc92021cb43abedd6b8cd7694d99ce",
+        "observedSha256": "99060a306c9d123f1c9535c45be0c6197808d26ad774965dd7aff196d131795e",
+        "status": "changed"
+      },
+      {
+        "path": "prompts/moments/content-review.md",
+        "cutoffSha256": "9e594f8b39d0e04ff5cbc5d56525a90c0b9eabcdecb6581c4faebad30250e8ae",
+        "observedSha256": "a6a79f0c0978fdbc645eba27f3ffdab2037e6a7925e27a27206e386ed9c52e52",
+        "status": "changed"
+      },
+      {
+        "path": "backend/storage/role-cards.mjs",
+        "cutoffSha256": "44cfd2738f39d40b9820bda6fdf7aca7a36847e8221ad246bb557264de151f95",
+        "observedSha256": "9f72a87c5d16cb68b54a656379b434661cc2582a207a846fed28462421dd81f9",
+        "status": "changed"
+      },
+      {
+        "path": "prompts/moments/publish.md",
+        "cutoffSha256": "213472599038e3157b4c0618150e5960b0ebce0f56060580098802f9c919f741",
+        "observedSha256": "5f066e465e235a62d07bbb9e0cc3ce285f2b7a5bd08228a6e8fb6dcb3f603174",
+        "status": "changed"
+      },
+      {
+        "path": "backend/rpc/handler.mjs",
+        "cutoffSha256": "26ce9f09e6a8f5da6244f19ed2dbfed223373fa3d5799ba1b2f95f3502541f2f",
+        "observedSha256": "511819015c95ce1e6893464459963cb47c2c2a767d5fcab797e96abce0944351",
+        "status": "changed"
+      },
+      {
+        "path": "modules/tools/files.mjs",
+        "cutoffSha256": "e6f033e4ec600b9b469b5de4dbafa7d32746038eaca86d638475d1df369632bd",
+        "observedSha256": "e35b623e0cc166a547538264f5e54441a363618ce893593ac22e5d0e74df7ab9",
+        "status": "changed"
+      },
+      {
+        "path": "modules/tools/work-execution.mjs",
+        "cutoffSha256": "8a63b017f915e40822a0b2612c8c6d7b5240ea586f1eeb38c0914a2a9824a38f",
+        "observedSha256": "7087fdbc96a5d287aa14af7ddef94a1ed73b04e68166448646e707e4a50817c0",
+        "status": "changed"
+      },
+      {
+        "path": "modules/work/image-generation.mjs",
+        "cutoffSha256": "4c24b4de0f365645023369faa8aa1ed35b755fd1b6915ac0b043a42800ce5a2d",
+        "observedSha256": "f3650fcba05d9866c9bf448d71693c53fc66ad0068168fb501169ebcaefc9818",
+        "status": "changed"
+      },
+      {
+        "path": "tests/moments-publishing.test.mjs",
+        "cutoffSha256": "7ac9cb4b21030cf42a734944a8c68777625f05751d9f1e3270dd2bea70443064",
+        "observedSha256": "21c032370f8ce647c2c59fc1b7a487028eb7e3e51f97e336c315941269da8271",
+        "status": "changed"
+      },
+      {
+        "path": "tests/received-files.test.mjs",
+        "cutoffSha256": "0d538c23ce5fd62c202b8555c7978ecd69483e9dd02e9425137770f169041675",
+        "observedSha256": "82d10cd0e2bfc718713adaf949eafc93e705e0035a767ec41c54e931d626ed01",
+        "status": "changed"
+      },
+      {
+        "path": "backend/app/service.mjs",
+        "cutoffSha256": "5c63fb7439778229ed2bb2ba56413670afd50fce7c885e3a8060ded0289348ef",
+        "observedSha256": "f96f35701ff9227504dcef47f381d94652a85b2369cb0a70511dbee58f31b5bd",
+        "status": "changed"
+      },
+      {
+        "path": "frontend/pages/moments/page.jsx",
+        "cutoffSha256": "06e3d3af510011b4ebdcd1a9f6e0483e07e40f1b2eab2a54581d3c3015e890be",
+        "observedSha256": "2dc22a9cd0bfd7abf57dad442af275932c338dc2db74efc432a91720043ca561",
+        "status": "changed"
+      },
+      {
+        "path": "frontend/pages/moments/publishing-page.jsx",
+        "cutoffSha256": "33ef7743b324b93b998d10bd185b4d369c254ab687d2deb228226d6e92d58de0",
+        "observedSha256": "a1107935838c162776f728efaabb04d65a3218c943e6e33b7db6cd6219ef8cfa",
+        "status": "changed"
+      },
+      {
+        "path": "frontend/hooks/use-workbench.mjs",
+        "cutoffSha256": "b983c51e287880a5d08bed42aa89be9aa428d97e48c522dfb201b6f0966a836f",
+        "observedSha256": "3705bcc5b503bdabbf1f615f652c4a05e164fb31222600d23ab9be85a614dd12",
+        "status": "changed"
+      },
+      {
+        "path": "tests/work-mode.test.mjs",
+        "cutoffSha256": "59a832316aa7882006d2a7a879b5865828c6a39092c7956a3664c664f7c1cd74",
+        "observedSha256": "6d2dea9fee04967dfc04d27128c9763406df695afff7faf422c96bed0d504c33",
+        "status": "changed"
+      },
+      {
+        "path": "frontend/pages/settings/image-generation-page.jsx",
+        "cutoffSha256": "527a49b5a06595cd0d2453ba2406115e227da27fec77ad97581c922bbe68d937",
+        "observedSha256": "b49de00b347eef03ebf047eb44bd96cf45774650c66c38afd8b9859fa9a3a701",
+        "status": "changed"
+      },
+      {
+        "path": "tests/worker-send-account.test.mjs",
+        "cutoffSha256": "a29cf2794001d625546af8d6280edf017f752f991317e32dff838f4b483bc429",
+        "observedSha256": "97d160bda45f86de6ba1230cf8bffa54a2ed185ed66903982b1826793119e52a",
+        "status": "changed"
+      }
+    ],
+    "bundles": [
+      {
+        "path": "lib/index.js",
+        "sha256": "5a5c70d3a9968ac576011b9e7a88fc1a1b98fe1fa4f81bf10a7ccb2672d054a8"
+      },
+      {
+        "path": "lib/client.js",
+        "sha256": "7f78efdec13380eb6c833715bddd75494e74bf193a0efd43e0df95e61433c296"
+      },
+      {
+        "path": "lib/testing.js",
+        "sha256": "a321b76521a99ac9b5bbc047a6e472981be68a8c92da844ced4cc3a8eee07962"
+      },
+      {
+        "path": "lib/worker.cjs",
+        "sha256": "0fa9bfda66f27b88aea24873bd0c121f26323711b4ed9dae052ea13fb9197dc5"
+      }
+    ],
+    "validationStatus": "Not evaluated by this audit. Do not infer current defects or current passing status from the cutoff findings."
+  },
+  "research": {
+    "verifiedPrimarySources": 13,
+    "appendix": "HARNESS-RESEARCH-2026-11-11.md",
+    "supportingDirections": 22
+  },
+  "findings": {
+    "asOf": "2026-11-11T03:09:09Z",
+    "closedReproductions": [
+      "F01",
+      "F13"
+    ],
+    "partlyClosed": {
+      "F02": "wechat_file branch repaired; four earlier tool types still missing from persistence whitelist at cutoff"
+    },
+    "open": [
+      "F02",
+      "F03",
+      "F04",
+      "F05",
+      "F06",
+      "F07",
+      "F08",
+      "F11",
+      "F12"
+    ],
+    "fixtureGateIssues": [
+      "F09",
+      "F10"
+    ],
+    "fixAttribution": "F01, F13 and the F02 file branch were repaired by external parallel work, not by this documentation audit.",
+    "scopeNote": "Status applies to observed candidates and recorded cases. Later working-tree changes are not classified as still failing or passing without a new verification."
+  },
+  "deliverable": {
+    "primary": "HARNESS-OPTIMIZATION-2026-11-11.md",
+    "consolidatedDirections": 30,
+    "businessFixesImplemented": false,
+    "implementationAndLiveGates": "documented as follow-up requirements"
+  }
+}

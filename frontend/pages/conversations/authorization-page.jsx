@@ -21,7 +21,7 @@ export function Authorization({
   onGrant,
   onGrantMany,
   onDetail,
-  onToggle,
+  onNavigate,
 }) {
   const [nameQuery, setNameQuery] = useState(''),
     [nameType, setNameType] = useState('all'),
@@ -183,12 +183,15 @@ export function Authorization({
   };
   return (
     <>
-      <PageHead icon="people" title="会话授权" description="管理 Agent 可以回复的群聊和联系人。">
+      <PageHead icon="people" title="会话授权" description="授权限定回复、自动操作和资料整理的对象。群聊授权不会扩展为成员的私聊或朋友圈授权。">
         <Button icon="refresh" disabled={disabled || !status.online} onClick={() => onAction('contacts')}>
           {busy === 'contacts' ? '正在同步…' : '同步已发现会话'}
         </Button>
       </PageHead>
       <Notice notice={notice} area="authorization" />
+      {status.authorization?.error && <p className="wa-alert is-error" role="alert">{status.authorization.error}，相关操作保持停止，后台会自动重试。</p>}
+      {!status.authorization?.error && status.authorization?.pendingCount > 0 &&
+        <p className="wa-help" role="status">正在清空 {status.authorization.pendingCount} 个撤销对象的数据，相关操作已停止。</p>}
       {!status.account ? (
         <section className="wa-card">
           <Empty icon="shield" title="先连接一个微信账号" description="连接后按名字搜索联系人和群聊。" />
@@ -204,16 +207,10 @@ export function Authorization({
                   : '授权、记忆与任务继续保留，当前暂停回复和定时发送。'}
               </p>
             </div>
-            <label className="wa-toggle">
-              <input
-                type="checkbox"
-                checked={status.settings.enabled}
-                disabled={disabled}
-                onChange={(event) => onToggle(event.target.checked)}
-                aria-label="启用自动回复"
-              />
-              <span>{status.settings.enabled ? '已开启' : '已暂停'}</span>
-            </label>
+            <div className="wa-row">
+              <span className="wa-badge">{status.settings.enabled ? '已开启' : '已暂停'}</span>
+              <Button quiet icon="settings" onClick={() => onNavigate('automation', 'authorization')}>自动功能设置</Button>
+            </div>
           </div>
           <div className="wa-tabs" role="tablist" aria-label="会话来源" onKeyDown={changeTabWithKeyboard}>
             <button
@@ -248,7 +245,7 @@ export function Authorization({
           </div>
           {selectionBar(filtered, 'main', '全选当前列表')}
           <p className="wa-help wa-authorization-scope" id="wa-authorization-selection-scope">
-            授权和取消授权都只处理勾选的会话。
+            取消授权会停止相关操作，并永久清空该对象的本机资料、记忆、任务与记录。重新授权后从新资料开始。
           </p>
           <div className="wa-session-list">
             {!!filtered.length && <div className="wa-session-columns" aria-hidden="true"><span>会话</span><span>回复方式与权限</span></div>}

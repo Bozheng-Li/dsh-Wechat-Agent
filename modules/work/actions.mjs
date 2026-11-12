@@ -1,5 +1,6 @@
 import { imageGenerationSettings } from '../../shared/image-generation.mjs';
 import { ChannelError } from '../../shared/contracts.mjs';
+import { preserveTimeValues } from '../../shared/time-settings.mjs';
 
 export const endpoints = ['imageGeneration.configure', 'imageGeneration.credential', 'work.retryDelivery'];
 export async function workMutation({ store, channel, lifetime, assertLive, status, currentAccount, conversation }, endpoint, payload, signal) {
@@ -14,6 +15,7 @@ export async function workMutation({ store, channel, lifetime, assertLive, statu
   if (!channel?.work?.imageGeneration) throw new ChannelError('IMAGE_GENERATION_UNAVAILABLE', '工作生图组件尚未就绪');
   if (endpoint === 'imageGeneration.configure') {
     const settings = imageGenerationSettings(payload.settings), next = store.config.snapshot(store.data);
+    if (payload.preserveTimeSettings) settings.providers = settings.providers.map(provider => preserveTimeValues('provider', provider, next.imageGeneration.providers.find(row => row.id === provider.id)));
     next.imageGeneration = settings; store.config.commit(next);
     await channel.work.imageGeneration.refreshCredential();
   } else if (endpoint === 'imageGeneration.credential') await channel.work.imageGeneration.configureCredential(payload.apiKey, combined, { providerId: payload.providerId, endpoint: payload.endpoint });

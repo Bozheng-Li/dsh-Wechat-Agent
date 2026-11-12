@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { formatTime } from "../../shared/conversations.mjs";
 import { Button } from "../../components/button.jsx";
 import { Field } from "../../components/form-ui.jsx";
+import { ScheduleCountdown } from '../../components/schedule-countdown.jsx';
 
 export function NaturalChatSettings({ draft, blocked, onChange, status, error, onResume }) {
   const [resumeConfirmed, setResumeConfirmed] = useState(false);
@@ -15,6 +16,7 @@ export function NaturalChatSettings({ draft, blocked, onChange, status, error, o
       <p className="wa-help">
         结合当前话题择机开口，有人接话时继续聊，无人回应时逐渐退让。
       </p>
+      <p className="wa-help">检查间隔、连续对话窗口和活跃时段统一在“设置 → 时间设置”中修改，可选择此群单独设置。</p>
       <div className="wa-natural-basics">
       <Field
         label="参与倾向"
@@ -33,65 +35,6 @@ export function NaturalChatSettings({ draft, blocked, onChange, status, error, o
           <option value="lively">活跃 · 更积极地参与</option>
         </select>
       </Field>
-      <Field
-        label="按时间检查开话题"
-        id="wa-natural-interval"
-        help="分钟数决定何时检查，不保证每次发言。已确认发言或完成判断后再计时；无人回应或跳过后自动延长。"
-      >
-        <select
-          className="wa-select"
-          id="wa-natural-interval"
-          value={draft.intervalMode}
-          disabled={blocked}
-          onChange={(event) => change('intervalMode', event.target.value)}
-        >
-          <option value="random">在分钟区间内随机</option>
-          <option value="fixed">固定分钟数</option>
-        </select>
-      </Field>
-      </div>
-      <div className="wa-number-range">
-        <span>每</span>
-        {draft.intervalMode === 'fixed' ? (
-          <input
-            className="wa-input"
-            aria-label="自然陪聊固定分钟数"
-            type="number"
-            min="1"
-            max="1440"
-            step="1"
-            value={draft.fixedMinutes}
-            disabled={blocked}
-            onChange={(event) => change('fixedMinutes', event.target.value)}
-          />
-        ) : (
-          <>
-            <input
-              className="wa-input"
-              aria-label="自然陪聊最少分钟数"
-              type="number"
-              min="1"
-              max="1440"
-              step="1"
-              value={draft.minMinutes}
-              disabled={blocked}
-              onChange={(event) => change('minMinutes', event.target.value)}
-            />
-            <span>—</span>
-            <input
-              className="wa-input"
-              aria-label="自然陪聊最多分钟数"
-              type="number"
-              min="1"
-              max="1440"
-              step="1"
-              value={draft.maxMinutes}
-              disabled={blocked}
-              onChange={(event) => change('maxMinutes', event.target.value)}
-            />
-          </>
-        )}
-        <span>分钟判断一次</span>
       </div>
       <label className="wa-check-row wa-section-space">
         <input
@@ -104,60 +47,9 @@ export function NaturalChatSettings({ draft, blocked, onChange, status, error, o
         <span>智能跳过不合适或重复的话题</span>
       </label>
       <p className="wa-help">关闭后尽量接话，活跃时段、冷却与无人回应限制仍生效。@、/agent 和昵称唤醒始终优先回复。</p>
-      <label className="wa-check-row wa-section-space">
-        <input
-          type="checkbox"
-          aria-label="限制自然陪聊活跃时段"
-          checked={draft.activeHours}
-          disabled={blocked}
-          onChange={(event) => change('activeHours', event.target.checked)}
-        />
-        <span>只在活跃时段主动参与</span>
-      </label>
-      {draft.activeHours && (
-        <div className="wa-form-grid">
-          <Field label="开始时间 · 北京时间" id="wa-natural-start">
-            <input
-              className="wa-input"
-              id="wa-natural-start"
-              type="time"
-              value={draft.startTime}
-              disabled={blocked}
-              onChange={(event) => change('startTime', event.target.value)}
-            />
-          </Field>
-          <Field label="结束时间 · 北京时间" id="wa-natural-end">
-            <input
-              className="wa-input"
-              id="wa-natural-end"
-              type="time"
-              value={draft.endTime}
-              disabled={blocked}
-              onChange={(event) => change('endTime', event.target.value)}
-            />
-          </Field>
-        </div>
-      )}
       <details className="wa-subsection">
         <summary>连续对话与发言分寸</summary>
         <div className="wa-natural-limits">
-        <Field
-          label="连续对话窗口（秒）"
-          id="wa-natural-followup"
-          help="唤醒后接同一成员的相关后续；主动开话题后可接群友回应。窗口内最多判断 3 条，0 表示关闭。"
-        >
-          <input
-            className="wa-input"
-            id="wa-natural-followup"
-            type="number"
-            min="0"
-            max="600"
-            step="1"
-            value={draft.followupSeconds}
-            disabled={blocked}
-            onChange={(event) => change('followupSeconds', event.target.value)}
-          />
-        </Field>
         <Field
           label="连续无人接话后暂停（次）"
           id="wa-natural-unanswered"
@@ -175,23 +67,6 @@ export function NaturalChatSettings({ draft, blocked, onChange, status, error, o
             onChange={(event) => change('maxUnanswered', event.target.value)}
           />
         </Field>
-        <Field
-          label="主动发言最短间隔（分钟）"
-          id="wa-natural-gap"
-          help="时间和条数共用冷却。你亲自用当前微信账号接话后，也按此间隔暂缓主动参与。"
-        >
-          <input
-            className="wa-input"
-            id="wa-natural-gap"
-            type="number"
-            min="1"
-            max="60"
-            step="1"
-            value={draft.minGapMinutes}
-            disabled={blocked}
-            onChange={(event) => change('minGapMinutes', event.target.value)}
-          />
-        </Field>
         </div>
       </details>
       {error && (
@@ -207,7 +82,8 @@ export function NaturalChatSettings({ draft, blocked, onChange, status, error, o
             </strong>
           </p>
           {status.reason && <p>{status.reason}</p>}
-          {!status.paused && status.nextCheckAt && <p>下一次判断：{formatTime(status.nextCheckAt, true)}</p>}
+          {status.nextCheckAt && <p className="wa-schedule-time"><span>下一次判断：{formatTime(status.nextCheckAt, true)}</span>
+            <ScheduleCountdown at={status.nextCheckAt} running={status.pending} paused={status.paused} action="判断" /></p>}
           <p className="wa-help">
             连续无人接话：{status.unanswered} 次。{status.followupUntil ? '正在接续相关对话。' : ''}
           </p>

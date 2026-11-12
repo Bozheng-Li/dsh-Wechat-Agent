@@ -2,7 +2,8 @@ import { BridgeError } from '@napcat-wechat/protocol';
 import type { Moment, PageRequest } from './moments.js';
 
 type Position = Pick<Moment, 'id' | 'createdAt'>;
-interface Source { page: PageRequest; boundary?: Position; exhausted: boolean; pages: number; scanned: number }
+interface Source { page: PageRequest; boundary?: Position; exhausted: boolean; pages: number; scanned: number;
+  unavailable?: { code: string; ret?: number } }
 export interface UserMomentsState {
   profile: Source; timeline: Source; pending: Moment[]; emittedIds: Set<string>; offset: number;
 }
@@ -24,8 +25,18 @@ export async function readUserMomentsPage(userId: string, limit: number, previou
     : { profile: source({ action: 'user', userId }), timeline: source({ action: 'timeline' }), pending: [], emittedIds: new Set(), offset: 0 };
   const pending = new Map(state.pending.map(post => [post.id, post]));
   const sources = [state.profile, state.timeline]; let requests = 0;
+  const recoverable = (error: any) => error?.code === 'ERR_MOMENTS_TARGET_UNAVAILABLE' ||
+    error?.code === 'ERR_MOMENTS_REJECTED' && error.details?.ret === -2;
   const fetchPage = async (stream: Source) => {
-    const result = await request(stream.page); requests++;
+    requests++;
+    let result: Response;
+    try { result = await request(stream.page); }
+    catch (error: any) {
+      if (!recoverable(error)) throw error;
+      stream.pages++; stream.unavailable = { code: error.code, ...(error.details?.ret != null ? { ret: error.details.ret } : {}) };
+      if (sources.every(source => source.unavailable)) throw error;
+      return;
+    }
     stream.pages++; stream.scanned += result.items.length;
     if (!result.items.length) { stream.exhausted = true; return; }
     if (stream.page.action === 'user' && result.items.some(post => post.author.userId !== userId))
@@ -46,13 +57,13 @@ export async function readUserMomentsPage(userId: string, limit: number, previou
       pending.set(post.id, post);
     }
   };
-  const isConfirmed = (post: Moment) => sources.every(stream => stream.exhausted || stream.boundary && newestFirst(post, stream.boundary) <= 0);
+  const isConfirmed = (post: Moment) => sources.every(stream => stream.unavailable || stream.exhausted || stream.boundary && newestFirst(post, stream.boundary) <= 0);
   const confirmed = () => [...pending.values()].filter(post => !post.deleted && isConfirmed(post)).sort(newestFirst);
   // A fresh user read must check both sources, even when the profile alone has
   // enough rows. Cursor reads continue their own frozen, requester-bound scan.
   for (const stream of sources) if (!stream.pages) await fetchPage(stream);
   while (requests < MAX_REQUESTS && confirmed().length < limit) {
-    const active = sources.filter(stream => !stream.exhausted);
+    const active = sources.filter(stream => !stream.exhausted && !stream.unavailable);
     if (!active.length) break;
     active.sort((a, b) => newestFirst(a.boundary!, b.boundary!));
     await fetchPage(active[0]);
@@ -61,10 +72,17 @@ export async function readUserMomentsPage(userId: string, limit: number, previou
   for (const post of items) { pending.delete(post.id); state.emittedIds.add(post.id); }
   for (const [id, post] of pending) if (post.deleted && isConfirmed(post)) { pending.delete(id); state.emittedIds.add(id); }
   state.pending = [...pending.values()]; state.offset += items.length;
-  const hasMore = state.pending.length > 0 || sources.some(stream => !stream.exhausted);
-  return { items, state, hasMore, requests, selection: { basis: 'profile-and-timeline', order: 'createdAt-desc', offset,
-    complete: items.length === limit || !hasMore, profilePages: state.profile.pages, timelinePages: state.timeline.pages,
-    message: items.length < limit && hasMore
+  const hasMore = state.pending.length > 0 || sources.some(stream => !stream.exhausted && !stream.unavailable);
+  const recencyVerified = !sources.some(stream => stream.unavailable);
+  return { items, state, hasMore, requests, selection: {
+    basis: state.profile.unavailable ? 'timeline' : state.timeline.unavailable ? 'profile' : 'profile-and-timeline',
+    order: 'createdAt-desc', offset, recencyVerified,
+    complete: recencyVerified && (items.length === limit || !hasMore), profilePages: state.profile.pages, timelinePages: state.timeline.pages,
+    ...(recencyVerified ? {} : { unavailableSources: sources.filter(stream => stream.unavailable)
+      .map(stream => ({ action: stream.page.action, ...stream.unavailable })) }),
+    message: !recencyVerified
+      ? '一路微信接口暂不可用，已从另一条实时接口恢复本账号可见的目标动态；可见范围不完整，不能据此断言这是对方最新动态或没有其他动态'
+      : items.length < limit && hasMore
       ? '本页仅返回已核实时间顺序的动态；仍有未覆盖范围，请用 nextCursor 继续，不能用旧帖补作最新动态'
       : '已合并好友主页与当前账号可见动态流，按真实发布时间排序；仅代表微信实际返回的可见范围' } };
 }

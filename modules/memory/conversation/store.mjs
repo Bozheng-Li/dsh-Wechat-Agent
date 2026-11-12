@@ -6,11 +6,12 @@ import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { atomicJson } from "../../../backend/storage/atomic-json.ts";
 import { ChannelError } from "../../../shared/contracts.mjs";
-import { conversationFolder, conversationKey, identity } from "../../../backend/storage/keys.mjs";
+import { conversationFolder, identity } from "../../../backend/storage/keys.mjs";
 import { ImageMemory } from "../images/store.mjs";
 import { defaultMemoryExpiry } from "../../../shared/memory-policy.mjs";
 import { summarizeMemory } from './compaction.mjs';
-import { withMessageReferences, describeReferencedImage } from '../../../shared/message-references.mjs';
+import { describeMessageImage } from '../../../shared/message-content.mjs';
+import { assertConversationAuthorized } from '../../../shared/authorization.mjs';
 
 const clone = (value) => structuredClone(value);
 const indexSnapshot = (index) => {
@@ -75,10 +76,8 @@ export class ConversationMemory {
     this.images = new ImageMemory(store, { now });
   }
   selector(input) {
-    const key = conversationKey(input.accountId, input.chatType, input.peerId);
-    const known = this.store.conversations(input.accountId).find((item) => item.key === key);
-    if (!known) throw new ChannelError('MEMORY_CONVERSATION_MISSING', '请先选择已授权或有历史记录的会话');
-    return { key, accountId: input.accountId, chatType: input.chatType, peerId: input.peerId, name: known.name };
+    assertConversationAuthorized(this.store, input);
+    return this.store.conversationSelector(input?.accountId, input?.chatType, input?.peerId);
   }
   file(selector) {
     const entry = this.index.conversations[selector.key];
@@ -152,10 +151,12 @@ export class ConversationMemory {
     return doc;
   }
   save(doc) {
+    assertConversationAuthorized(this.store, doc);
     doc.revision++;
     doc.updatedAt = this.now();
     write(this.file(doc), doc);
   }
+  saveIndex() { write(this.indexFile, indexSnapshot(this.index)); }
   expire(doc, persist = false) {
     const entries = doc.entries.filter(
       (entry) => this.expiry(entry.rememberedAt ?? doc.createdAt) > this.now()
@@ -184,7 +185,10 @@ export class ConversationMemory {
     );
   }
   seed() {
-    for (const metadata of Object.values(this.store.data.conversations)) this.load(metadata);
+    for (const metadata of Object.values(this.store.data.conversations)) {
+      if (!this.store.conversations(metadata.accountId).find(row => row.key === metadata.key)?.authorized) continue;
+      try { this.load(metadata); } catch (error) { if (error.code !== 'OBJECT_NOT_AUTHORIZED') throw error; }
+    }
   }
   append(input, entry) {
     const doc = this.load(input, { incomingKey: entry.key });
@@ -193,19 +197,16 @@ export class ConversationMemory {
       doc.seen.push(entry.key);
       doc.seen = doc.seen.slice(-4000);
       this.save(doc);
-      this.onAppend?.(input, entry);
     }
+    // A new conversation may have just seeded this exact message from its
+    // archive during load(). It still needs to reach background memory queues.
+    if (doc.entries.some(row => row.key === entry.key)) this.onAppend?.(input, entry);
     if (memoryText(doc).length >= this.windowChars(input)) this.onPressure?.(input);
-  }
-  updateMessageReferences(input, key, references) {
-    const doc = this.load(input), entry = doc.entries.find(value => value.key === key);
-    if (!entry || JSON.stringify(entry.references) === JSON.stringify(references)) return;
-    Object.assign(entry, withMessageReferences(entry, clone(references))); this.save(doc);
   }
   describeImageReferences(input, image) {
     const doc = this.load(input); let changed = false;
     doc.entries = doc.entries.map(entry => {
-      const next = describeReferencedImage(entry, input, image); changed ||= next !== entry; return next;
+      const next = describeMessageImage(entry, input, image); changed ||= next !== entry; return next;
     });
     if (changed) this.save(doc);
   }

@@ -6,8 +6,10 @@ import { endpoints as settingsEndpoints, settingsMutation } from "../../modules/
 import { endpoints as connectionEndpoints, connectionMutation } from "../wechat/actions.mjs";
 import { endpoints as adminEndpoints, administratorMutation } from '../../modules/remote/authorization/actions.mjs';
 import { endpoints as workEndpoints, workMutation } from '../../modules/work/actions.mjs';
+import { endpoints as timeEndpoints, timeMutation } from '../../modules/settings/time.mjs';
 
 export const mutationHandlers = new Map([
+  ...timeEndpoints.map(endpoint => [endpoint, timeMutation]),
   ...agentEndpoints.map((endpoint) => [endpoint, agentMutation]),
   ...memoryEndpoints.map((endpoint) => [endpoint, memoryMutation]),
   ...mediaEndpoints.map((endpoint) => [endpoint, mediaMutation]),

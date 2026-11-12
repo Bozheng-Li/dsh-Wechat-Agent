@@ -3,6 +3,9 @@ import { configurationFor } from '../../../backend/config/repository.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import { assertConversationAuthorized, authorizationEpoch, assertAuthorizationEpoch } from '../../../shared/authorization.mjs';
+import { ownedPath } from '../../authorization/files.mjs';
+import { conversationKey } from '../../../backend/storage/keys.mjs';
 import { ChannelError } from "../../../shared/contracts.mjs";
 import { DEFAULT_MEMORY_RETENTION_DAYS, defaultMemoryExpiry } from "../../../shared/memory-policy.mjs";
 import { EXTRACTION_SYSTEM, validateExtraction } from '../roles/extraction.mjs';
@@ -138,18 +141,9 @@ export class LongTermMemory {
     return accountId;
   }
   selector(input) {
+    assertConversationAuthorized(this.store, input);
     this.account(input?.accountId);
-    const known = this.store
-      .conversations(input.accountId)
-      .find((peer) => peer.chatType === input.chatType && peer.peerId === input.peerId);
-    if (!known) throw new ChannelError('MEMORY_CONVERSATION_MISSING', '请先选择已授权或有历史记录的会话');
-    return {
-      key: known.key,
-      accountId: input.accountId,
-      chatType: input.chatType,
-      peerId: input.peerId,
-      name: known.name,
-    };
+    return this.store.conversationSelector(input.accountId, input.chatType, input.peerId);
   }
   paths(accountId) {
     this.account(accountId);
@@ -472,6 +466,59 @@ export class LongTermMemory {
   list(accountId) {
     return this.view(accountId);
   }
+  revoke(scopes) {
+    let removed = 0;
+    for (const accountId of new Set(scopes.map(row => row.accountId))) {
+      const related = scopes.filter(row => row.accountId === accountId), paths = this.paths(accountId);
+      if (!fs.existsSync(paths.file) && !fs.existsSync(paths.state)) continue;
+      const doc = this.document(accountId), state = this.state(accountId), replacements = [], deletedKeys = new Set();
+      const person = id => related.some(row => row.chatType === 'private' && row.peerId === id);
+      const conversation = value => related.some(row => row.chatType === value.chatType && row.peerId === value.peerId);
+      for (const section of doc.sections) {
+        if (conversation(section)) {
+          replacements.push({ start: section.start, end: section.end });
+          for (const fact of section.facts) for (const source of fact.sources || []) deletedKeys.add(source.key);
+          removed += section.facts.length;
+        } else for (const fact of section.facts) if (person(fact.subjectId) || person(fact.subjectReference?.ownerId) || fact.sources?.some(source => person(source.senderId))) {
+          replacements.push({ start: fact.start, end: fact.end });
+          for (const source of fact.sources || []) deletedKeys.add(source.key);
+          removed++;
+        }
+      }
+      let markdown = doc.markdown;
+      for (const replacement of replacements.sort((a, b) => b.start - a.start)) markdown = markdown.slice(0, replacement.start) + markdown.slice(replacement.end);
+      for (const [key, pending] of Object.entries(state.pending)) {
+        if (conversation(pending.selector)) { for (const entry of pending.entries) deletedKeys.add(entry.key); delete state.pending[key]; delete state.seen[key]; }
+        else {
+          for (const entry of pending.entries.filter(row => person(row.senderId))) deletedKeys.add(entry.key);
+          pending.entries = pending.entries.filter(row => !person(row.senderId));
+          if (!pending.entries.length) delete state.pending[key];
+        }
+      }
+      for (const row of related) delete state.seen[conversationKey(accountId, row.chatType, row.peerId)];
+      for (const cursor of Object.values(state.seen)) for (const key of deletedKeys) delete cursor[key];
+      state.ignoredKeys = state.ignoredKeys.filter(key => !deletedKeys.has(key)); state.generation = randomUUID();
+      if (markdown !== doc.markdown) { this.parse(accountId, markdown); writeText(paths.file, markdown); }
+      const archive = path.join(paths.directory, 'global-memory-archive');
+      if (fs.existsSync(archive)) for (const entry of fs.readdirSync(archive, { withFileTypes: true })) {
+        if (!entry.name.endsWith('.md')) continue;
+        const file = ownedPath(this.store.root, path.join(archive, entry.name));
+        const saved = this.parse(accountId, fs.readFileSync(file, 'utf8')), remove = [];
+        for (const section of saved.sections) {
+          if (conversation(section)) remove.push({ start: section.start, end: section.end });
+          else for (const fact of section.facts) if (person(fact.subjectId) || person(fact.subjectReference?.ownerId) ||
+              fact.sources?.some(source => person(source.senderId))) remove.push({ start: fact.start, end: fact.end });
+        }
+        let text = saved.markdown;
+        for (const range of remove.sort((a, b) => b.start - a.start)) text = text.slice(0, range.start) + text.slice(range.end);
+        if (text !== saved.markdown) { this.parse(accountId, text); writeText(file, text); }
+      }
+      this.saveState(state);
+      this.errors.delete(accountId); this.readErrors.delete(accountId);
+      for (const key of this.extractionErrors.keys()) if (key.startsWith(accountId + ':')) this.extractionErrors.delete(key);
+    }
+    return removed;
+  }
   roleContext(input, options = {}) {
     try {
       const result = projectConversationRole(this, input, options);
@@ -703,7 +750,13 @@ export class LongTermMemory {
   }
   async extract(input, runner, signal) {
     const selector = this.selector(input),
-      lock = selector.accountId + ':' + selector.key;
+      lock = selector.accountId + ':' + selector.key,
+      epoch = authorizationEpoch(this.store, selector.accountId);
+    const check = () => {
+      signal.throwIfAborted();
+      assertAuthorizationEpoch(this.store, selector.accountId, epoch);
+      assertConversationAuthorized(this.store, selector);
+    };
     if (this.extracting.has(lock)) return { busy: true, processed: 0, added: 0 };
     this.extracting.add(lock);
     try {
@@ -747,6 +800,7 @@ export class LongTermMemory {
       if (sources.some(hasMemoryCandidate)) {
         const request = {
           signal,
+          assertAllowed: check,
           mode: 'long-memory',
           tools: [],
           systemOverride: EXTRACTION_SYSTEM.replace('30天', this.store.config.data.memory.retentionDays + '天'),
@@ -758,6 +812,7 @@ export class LongTermMemory {
         const result = await (typeof runner.extractLongTermMemory === 'function'
           ? runner.extractLongTermMemory(request)
           : runner.run(request));
+        check();
         let parsed;
         try {
           parsed = JSON.parse(result.text.replace(/^```(?:json)?\s*|\s*```$/g, ''));
@@ -834,7 +889,7 @@ export class LongTermMemory {
         }
       }
       proposed = [...merged.values()];
-      signal.throwIfAborted();
+      check();
       const currentState = this.state(selector.accountId),
         current = this.document(selector.accountId);
       if (currentState.generation !== state.generation || current.revision !== before.revision)
@@ -868,7 +923,8 @@ export class LongTermMemory {
           expiresAt: fact.expiresAt,
           expirySource: fact.expirySource,
           createdAt: this.now(),
-          roleId: this.store.roleCards?.identity(selector),
+          roleId: fact.subjectId && !['group', 'conversation'].includes(fact.subjectId) && !people.find(person => person.id === fact.subjectId)?.reference
+            ? this.store.roleCards?.identity({ accountId: selector.accountId, personId: fact.subjectId }) : undefined,
           ...(fact.subjectId ? { subjectId: fact.subjectId, subjectName: people.find(person => person.id === fact.subjectId)?.name ||
             (fact.subjectId === 'group' ? '本群共同事项' : fact.subjectId),
             ...(people.find(person => person.id === fact.subjectId)?.reference ? { subjectReference: people.find(person => person.id === fact.subjectId).reference } : {}),
@@ -930,8 +986,8 @@ export class LongTermMemory {
       if (remaining.length) this.onPending?.(selector);
       return { processed: batch.length, added, pendingCount: remaining.length };
     } catch (error) {
-      if (signal.aborted) throw signal.reason || error;
-      if (error?.code === 'LONG_MEMORY_CHANGED') throw error;
+      check();
+      if (['LONG_MEMORY_CHANGED', 'AUTHORIZATION_CHANGED', 'OBJECT_NOT_AUTHORIZED'].includes(error?.code)) throw error;
       this.extractionErrors.set(
         lock,
         error instanceof ChannelError ? error.message : '长期记忆提取暂未完成，原始来源已保留，可以稍后重试'

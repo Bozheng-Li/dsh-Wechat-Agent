@@ -26,6 +26,10 @@ import { planProgressiveTools } from '../tools/progressive.mjs';
 import { observeModelRequests } from './request-metrics.mjs';
 import { polishWorkResult } from '../work/polish.mjs';
 import { reviewMemoryDraft } from '../memory/roles/reflection.mjs';
+import { stickerDescriptions } from '../media/description.mjs';
+import { observeExecutionSession } from '../traces/model.mjs';
+import { currentTrace } from '../traces/context.mjs';
+import { TIME_DEFAULTS } from '../../shared/time-settings.mjs';
 
 export class DshAgentRunner {
   constructor(ctx, getModelChoice = () => null, getRuntimeSettings = () => ({})) {
@@ -33,7 +37,7 @@ export class DshAgentRunner {
     this.getModelChoice = getModelChoice;
     this.getRuntimeSettings = getRuntimeSettings;
     this.lastSearch = null;
-    this.search = new SearchService(ctx);
+    this.search = new SearchService(ctx, { getAttemptTimeoutMs: () => (this.getRuntimeSettings()?.timeSettings?.searchTimeoutSeconds ?? TIME_DEFAULTS.searchTimeoutSeconds) * 1000 });
   }
   searchStatus() {
     return this.lastSearch ? { ...this.lastSearch } : null;
@@ -55,6 +59,10 @@ export class DshAgentRunner {
   }
   extractLongTermMemory(request) {
     return this.run(request);
+  }
+  extractRoleCard(request) {
+    // run() creates an independent DSH agent/session when no sessionId is set.
+    return this.run({ ...request, sessionId: undefined, mode: 'role-memory', tools: [] });
   }
   reviewMemoryReply(input, draft, options) {
     return reviewMemoryDraft(this, input, draft, options);
@@ -115,6 +123,15 @@ export class DshAgentRunner {
       );
     return values;
   }
+  async describeStickers(images, signal) {
+    if (!Array.isArray(images) || !images.length || images.length > 4)
+      throw new ChannelError('STICKER_DESCRIPTION_INVALID', '每次最多理解四张已保存表情');
+    const result = await this.run({
+      text: promptText('vision/requests.json', 'sticker-text', [images.length]), images, signal, mode: 'vision',
+      systemOverride: promptText('vision/requests.json', 'sticker-system'),
+    });
+    return stickerDescriptions(result.text, images.length);
+  }
   async summarize(text, maxChars, signal, retry = {}) {
     const result = await this.run({
       ...memoryCompressionPrompt(text, maxChars, retry),
@@ -166,6 +183,7 @@ export class DshAgentRunner {
     const runtime = structuredClone(executionSnapshot?.runtime ?? this.getRuntimeSettings() ?? {});
     const promptStrategy = runtime.modelConfig?.promptStrategy ?? 'legacy';
     const requestMetrics = [];
+    const executionTrace = currentTrace();
     if (persona) runtime.persona = structuredClone(persona);
     const chosen = executionSnapshot ? null : structuredClone(this.getModelChoice());
     let selected = structuredClone(executionSnapshot?.selection ?? chosen ?? this.defaultSelection());
@@ -190,8 +208,10 @@ export class DshAgentRunner {
     const internalOutput = INTERNAL_OUTPUT_MODES.has(mode);
     const materialTools = ['moments-materials', 'moments-publish'].includes(mode);
     const natural = mode === 'natural' && naturalDecision;
+    const personTools = natural || ['moments-reply', 'moments-interaction'].includes(mode);
     const definitions =
-      workDialogue ? [...tools] : materialTools ? tools.filter(tool => ['wechat_moments_material_search', 'wechat_moments_material_download', 'wechat_moments_material_generate'].includes(tool.name)) : internalOutput || systemOverride || natural
+      workDialogue ? [...tools] : materialTools ? tools.filter(tool => ['wechat_moments_material_search', 'wechat_moments_material_download', 'wechat_moments_material_generate'].includes(tool.name)) :
+        personTools ? tools.filter(tool => tool.name === 'wechat_role_card') : internalOutput || systemOverride
         ? []
         : [
             ...tools,
@@ -215,9 +235,11 @@ export class DshAgentRunner {
       // Do not load the desktop/coding preset or grant host tools to WeChat.
       const plan = promptStrategy === 'progressive-v1' ? planProgressiveTools(capabilities, text) : { initial: capabilities, deferredGroups: [] };
       const visibleCapabilities = registerModelTools(ctx, plan.initial, { deferredGroups: plan.deferredGroups, assertAllowed, agent,
+        quiet: !internalOutput || workDialogue,
         onBeforeTool: internalOutput && !workDialogue ? undefined : onBeforeTool,
         native: promptStrategy === 'progressive-v1' || workDialogue || materialTools || ['work-result','work-progress','work-routing'].includes(mode), denied: '微信会话只能使用管理员开放的会话工具' });
       observeModelRequests(ctx, { strategy: promptStrategy, mode, sessionId: id, rows: requestMetrics, onUpdate: onRequestMetrics });
+      observeExecutionSession(ctx, { sessionId: id, agent, selection: selected, mode, context: executionTrace });
       ctx.systemPrompt.suppressRuntimeContext();
       // The host's working-directory fact is otherwise marked required and
       // appended as a second user message even without filesystem tools.

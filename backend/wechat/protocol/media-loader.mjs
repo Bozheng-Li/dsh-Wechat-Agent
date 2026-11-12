@@ -24,7 +24,7 @@ function allowedMediaUrl(value) {
   if (url.hostname !== 'vweixinf.tc.qq.com') url.protocol = 'https:';
   return url;
 }
-async function downloadResource(resource, signal, fetcher) {
+export async function downloadResource(resource, signal, fetcher = fetch) {
   let url = allowedMediaUrl(resource.reference), response;
   for (let hop = 0; hop < 3; hop++) {
     response = await fetcher(url, { signal, redirect: 'manual' });
@@ -46,7 +46,7 @@ async function downloadResource(resource, signal, fetcher) {
   try { imageMime(content); } catch { throw new ChannelError('IMAGE_ENCRYPTED', '下载的媒体仍为加密内容，暂时无法理解'); }
   return content;
 }
-export async function loadObservedMedia({ directory, peerId, messageId, resourceId, signal, fetcher = fetch, downloadOriginal, preferOriginal = false }) {
+export async function loadObservedMedia({ directory, peerId, messageId, resourceId, signal, fetcher = fetch, downloadOriginal, preferOriginal = false, preserveStickerOriginal = false }) {
   signal.throwIfAborted();
   if (!/^[a-f0-9]{64}$/.test(resourceId || '') || typeof peerId !== 'string' || typeof messageId !== 'string')
     throw new ChannelError('IMAGE_ID_INVALID', '图片的消息标识无效');
@@ -66,13 +66,19 @@ export async function loadObservedMedia({ directory, peerId, messageId, resource
   };
   const result = (content, quality) => {
     const sourceBytes = content.length;
-    // Keep the complete downloaded cache intact; remove only validated JPEG
-    // trailer metadata from the pixels sent to storage and vision.
-    if (content[0] === 0xff && content[1] === 0xd8) content = prepareWechatImageStream(content).content;
+    // Native sticker identity hashes the complete original, including WeChat's
+    // JPEG trailer. Only the sticker archive may retain it; normal image reads
+    // and the library's vision thumbnails continue to receive clean pixels.
+    if (content[0] === 0xff && content[1] === 0xd8) {
+      const pixels = prepareWechatImageStream(content).content;
+      if (!preserveStickerOriginal || descriptor.kind !== 'emoji') content = pixels;
+    }
     let mediaType;
     try { mediaType = imageMime(content); } catch { throw new ChannelError('IMAGE_INVALID', '图片内容无法解码为 PNG、JPEG、GIF 或 WebP'); }
     signal.throwIfAborted();
+    const stickerMd5 = descriptor.kind === 'emoji' && (descriptor.stickerMd5 || descriptor.resources?.find(item => /^[a-f0-9]{32}$/.test(item.md5 || ''))?.md5);
     return { data: content.toString('base64'), mediaType, quality, bytes: content.length,
+      ...(stickerMd5 && /^[a-f0-9]{32}$/.test(stickerMd5) ? { stickerMd5 } : {}),
       ...(sourceBytes !== content.length ? { sourceBytes, trailerBytes: sourceBytes - content.length } : {}),
       ...(quality === 'thumbnail' ? { qualityNote: '目前只取得微信随消息提供的缩略图，细小文字和画面细节尚未核实。' } : {}) };
   };

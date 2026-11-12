@@ -7,6 +7,7 @@ import { MOMENTS_PUBLISH_RPC_TIMEOUT_MS } from '../../shared/moments-publishing.
 export class WorkerClient extends EventEmitter {
   constructor(root, resources, options = {}) {
     super();
+    this.getPublishTimeoutMs = options.getPublishTimeoutMs ?? (() => MOMENTS_PUBLISH_RPC_TIMEOUT_MS);
     this.snapshot = { online: false, state: 'starting', account: null, login: { state: 'idle' }, runtimeReady: false };
     this.pending = new Map(); this.sequence = 0; this.closed = false;
     this.child = spawn(options.executable || process.execPath, [path.join(resources, 'lib/worker.cjs'), root], {
@@ -65,11 +66,16 @@ export class WorkerClient extends EventEmitter {
   }
   send(params, signal) { return this.call('send', params, { signal }); }
   media(params, signal) { return this.call('media', params, { signal, timeoutMs: 30000 }); }
+  readStickers(params, signal) { return this.call('stickers.list', params, { signal, timeoutMs: 180000 }); }
+  readStickerContent(params, signal) { return this.call('stickers.content', params, { signal, timeoutMs: 30000 }); }
+  recentStickers(params, signal) { return this.call('stickers.recent', params, { signal, timeoutMs: 30000 }); }
+  favoriteSticker(params, signal) { return this.call('stickers.favorite', params, { signal, timeoutMs: 180000 }); }
+  files(params, signal) { return this.call('files', params, { signal, timeoutMs: 300000 }); }
   readMoments(params, signal) { return this.call('moments.read', params, { signal, timeoutMs: 20000 }); }
   readMomentsPublication(params, signal) { return this.call('moments.publication', params, { signal, timeoutMs: 20000 }); }
-  readMomentsImages(params, signal) { return this.call('moments.images', params, { signal, timeoutMs: 100000 }); }
+  readMomentsImages(params, signal) { return this.call('moments.images', params, { signal, timeoutMs: 190000 }); }
   readMomentsAudience(params, signal) { return this.call('moments.audience', params, { signal, timeoutMs: 300000 }); }
-  writeMoments(params, signal) { return this.call('moments.write', params, { signal, timeoutMs: params?.query?.action === 'publish' ? MOMENTS_PUBLISH_RPC_TIMEOUT_MS : 600000 }); }
+  writeMoments(params, signal) { return this.call('moments.write', params, { signal, timeoutMs: params?.query?.action === 'publish' ? this.getPublishTimeoutMs() : 600000 }); }
   async close() {
     if (this.closing) return this.closing;
     this.closed = true;

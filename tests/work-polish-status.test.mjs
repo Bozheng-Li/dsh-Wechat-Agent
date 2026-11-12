@@ -1,8 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  polishWorkResult
-} from '../lib/testing.js';
+import { polishWorkResult } from '../modules/work/polish.mjs';
 
 async function polish(original, response) {
   const calls = [];

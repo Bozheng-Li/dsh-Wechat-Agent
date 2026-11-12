@@ -19,8 +19,8 @@ const systemTemp = path.join(require('node:os').homedir(), 'AppData/Local/Temp')
 const root = fs.mkdtempSync(path.join(systemTemp, 'wechat-native-handoff-'));
 process.env.TEMP = systemTemp; process.env.TMP = systemTemp;
 process.env.DSH_HOME = path.join(root, 'home'); process.env.DSH_AGENTS_HOME = path.join(root, 'agents');
-const imageRoot = path.join(repo, 'assets/stickers'), imageBytes = fs.readFileSync(path.join(imageRoot,
-  fs.readdirSync(imageRoot, { recursive: true }).find(file => file.endsWith('.png'))));
+const { stickerPng } = require(path.join(repo, 'tests/fixtures/stickers.mjs'));
+const imageBytes = stickerPng();
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const gate = Promise.withResolvers(), waiting = new Set(), nativeRequests = [], polishRequests = [], routingRequests = [], progressRequests = [], nativeCreations = [], nativeFileCalls = [], shellCalls = [];
 let callId = 0, administrator = true, confinedCalls = 0;
@@ -28,12 +28,13 @@ const parentRequest = '并行生成两个独立文件';
 const childRequests = ['生成 alpha.txt，正文为 ALPHA_NATIVE，运行核对后回传', '生成 beta.txt，正文为 BETA_NATIVE，运行核对后回传'];
 const legacyBusyRequest = '验证忙会话保持运行', legacyBusyEntered = Promise.withResolvers(), legacyBusyRelease = Promise.withResolvers();
 const wordPath = path.join(root, 'previous', 'yesterday-summary.docx');
-const requests = new Set(['你好', parentRequest, ...childRequests, '/dsh tasks', '找到已有的新闻摘要 Word 并发给我',
+const retiredFileRequest = '读取刚才的 Word 并生成预算核对结果';
+const requests = new Set(['你好', parentRequest, ...childRequests, retiredFileRequest, '/dsh tasks', '找到已有的新闻摘要 Word 并发给我',
   '生成一张小狗的图片给我', '使用 second 的 image-pro 生成橙猫海报', '验证空图片响应', '验证已有图片链接',
   '回顾刚才的工作对话', '继续这项工作，只检查现有文件', '创建 followup.txt，内容为 CONTEXT_FILE_MARKER', '删除这个文件',
   '测试润色数字保护', '测试润色 API 故障', '解释工具调用', '读取当前微信朋友圈', '点赞当前微信朋友圈', '评论当前微信朋友圈', '发布文字朋友圈',
   '拉取当前微信朋友圈评论区', '回复当前微信朋友圈评论', '删除当前微信朋友圈', '屏蔽同事发布朋友圈', '设置自动发布计划', '预览朋友圈草稿', '设置定时评论回复']);
-const executionNames = ['wechat_generated_image_memory', 'wechat_memory', 'wechat_web_search', 'wechat_moments_interact', 'wechat_work_exec', 'wechat_work_generate_image', 'wechat_work_list', 'wechat_work_output', 'wechat_work_read',
+const executionNames = ['wechat_web_search', 'wechat_generated_image_memory', 'wechat_memory', 'wechat_role_card', 'wechat_moments_interact', 'wechat_work_exec', 'wechat_work_generate_image', 'wechat_work_list', 'wechat_work_output', 'wechat_work_read',
   'wechat_work_ssh_connect', 'wechat_work_ssh_exec', 'wechat_work_status', 'wechat_work_vscode_connect', 'wechat_work_write', 'wechat_moments_read',
   'wechat_moments_comments', 'wechat_moments_audience', 'wechat_moments_like', 'wechat_moments_comment', 'wechat_moments_reply', 'wechat_moments_publish', 'wechat_moments_delete',
   'wechat_moments_plan', 'wechat_moments_draft', 'wechat_moments_reply_schedule', 'wechat_moments_material_search', 'wechat_moments_material_download'];
@@ -65,6 +66,9 @@ class Fixture extends LlmAdapter {
     const userTexts = options.messages.filter(message => message.role === 'user').flatMap(message => message.content).filter(block => block.type === 'text').map(block => block.text);
     const system = options.messages.filter(message => message.role === 'system').flatMap(message => message.content).filter(block => block.type === 'text').map(block => block.text).join('\n');
     const names = (options.tools ?? []).map(tool => tool.name).sort();
+    if (system.includes('你是后台人物记忆 Agent')) {
+      assert.deepEqual(names, []); yield* textReply('{"updates":[],"conflicts":[]}'); return;
+    }
     if (this.surface === 'polish') {
       if (system.includes('检查一份即将公开的朋友圈草稿')) {
         assert.deepEqual(names, []); const data = JSON.parse(userTexts.at(-1).split('本次消息：\n').at(-1));
@@ -84,7 +88,7 @@ class Fixture extends LlmAdapter {
         const data = routeInput; routingRequests.push(data);
         assert(!userTexts.some(text => /CHAT_SENTINEL|角色背景|当前会话记忆/.test(text)));
         // Deliberately classify delete as new: session continuity must not depend on this judgment.
-        const followup = ['继续这项工作，只检查现有文件'].includes(data.message);
+        const followup = data.message === '继续这项工作，只检查现有文件';
         yield* textReply(JSON.stringify({ action: data.message === '你好' ? 'chat' : followup ? 'continue' : 'new',
           taskId: followup ? data.currentTaskId : null,
           review: { intent: data.message === '你好' ? 'chat' : followup ? 'continue' : 'execute',
@@ -119,6 +123,10 @@ class Fixture extends LlmAdapter {
     assert(!userTexts.some(text => /recentDialogue|"currentTime"|OLD_TASK_|OLD_DIALOGUE_/.test(text)));
     nativeRequests.push({ request, names });
     const results = toolResults(options);
+    if (request === retiredFileRequest) {
+      assert(!names.includes('wechat_file')); assert.equal(results.length, 0);
+      yield* textReply('微信附件读取功能已停用。'); return;
+    }
     if (request === parentRequest) {
       if (!results.length) { yield* callTool('wechat_work_parallel', { requests: childRequests }); return; }
       assert.equal(results.at(-1).ok, true); assert.equal(results.at(-1).tasks.length, 2);
@@ -183,7 +191,7 @@ class Fixture extends LlmAdapter {
       if (!results.length) { yield* callTool(tool, tool === 'wechat_moments_publish' ? { text: 'NATIVE_POST_FACT' } :
         { postId: '9007199254740997', ...(tool === 'wechat_moments_like' ? { subject: 'account' } : {}), ...(['wechat_moments_comment', 'wechat_moments_reply'].includes(tool) ? { text: 'NATIVE_COMMENT_FACT' } : {}),
           ...(tool === 'wechat_moments_reply' ? { commentId: '3' } : {}) }); return; }
-      assert.equal(results.at(-1).ok, true); assert.equal(results.at(-1).delivery, 'server-ack');
+      assert.equal(results.at(-1).ok, true, request + ': ' + JSON.stringify(results.at(-1))); assert.equal(results.at(-1).delivery, 'server-ack');
       if (tool === 'wechat_moments_reply') assert.equal(results.at(-1).replyToCommentId, '3');
       if (tool === 'wechat_moments_delete') assert.equal(results.at(-1).deleted, true);
       yield* textReply('朋友圈操作已确认'); return;
@@ -256,7 +264,7 @@ const until = async predicate => {
       parameters: { type: 'object', properties: { path: { type: 'string' }, text: { type: 'string' } }, required: ['path', 'text'], additionalProperties: false },
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] }, execute: ({ path: name, text }, exec) => {
         const cwd = ctx.workingDirectory.get(exec.agent.session); assert.notEqual(cwd, exec.agent.session.header.cwd);
-        assert(['alpha.txt', 'beta.txt', 'followup.txt'].includes(name)); assert.equal(ctx.sandboxPolicy.resolve({ session: exec.agent.session }).mode, 'danger-full-access');
+        assert(['alpha.txt', 'beta.txt', 'followup.txt', 'budget-review.txt'].includes(name)); assert.equal(ctx.sandboxPolicy.resolve({ session: exec.agent.session }).mode, 'danger-full-access');
         fs.writeFileSync(path.join(cwd, name), text); nativeFileCalls.push({ sessionId: exec.agent.session.id, cwd, name });
         return JSON.stringify({ ok: true, path: name });
       } });
@@ -277,7 +285,8 @@ const until = async predicate => {
     const store = new StateStore(path.join(root, 'channel')), accountId = 'native-owner', peerId = 'native-peer', scope = { accountId, chatType: 'private', peerId, senderId: peerId };
     store.setPersona({name:'进度测试角色',aliases:[],prompt:'PERSONA_WORK_STYLE: 熟悉直接，语气轻松，不说客服套话。'});
     fs.mkdirSync(path.join(store.ensureWorkspace(), '微信agent'), { recursive: true });
-    store.configure(accountId, { enabled: true, privatePeers: [peerId], groups: [], prompt: 'CHAT_SENTINEL' });
+    store.configure(accountId, { enabled: true, privatePeers: [peerId, 'wxid_alice', 'visible-author'], groups: [], prompt: 'CHAT_SENTINEL' });
+    store.setRoleCardSettings({ ...store.roleCardSettings(), enabled: false }, store.roleCardSettingsView().revision);
     store.setConversationSettings(accountId, 'private', peerId, { ...store.conversationSettings(accountId, 'private', peerId), executionMode: 'work', remoteEnabled: true });
     store.setModelChoice({ provider: 'chat-only', model: 'polish-fixture' }); store.setModelConfig({ ...store.modelConfig(), maxTokens: 321, temperature: 0.01, webSearch: true });
     const next = store.config.snapshot(store.data); next.remote = { globalAdminIds: [peerId] };
@@ -291,11 +300,15 @@ const until = async predicate => {
         return { accountId, source: 'wechat-contacts-live', fetchedAt: new Date().toISOString(), membershipComplete: true, unavailableCount: 0,
           contacts: [{ id: 'wxid_alice', name: 'Alice', nickname: 'Alice', remark: '', labelIds: ['1'] }], labels: [{ id: '1', name: '同事', memberCount: 1, userIds: ['wxid_alice'] }] }; },
       readMoments: async (args, signal) => { signal.throwIfAborted(); assert.equal(args.accountId, accountId); momentsCalls.push(args);
+        if (args.query.action === 'comments') return { accountId, action: 'comments', postId: args.query.postId, source: 'wechat-sns-live',
+          items: [{ id: '3', userId: 'visible-author', text: 'NATIVE_COMMENT_SOURCE' }], nextCursor: null };
         return { accountId, action: args.query.action, source: 'wechat-sns-live', items: [{ id: '9007199254740997', author: { userId: accountId, nickname: '合成账号' }, text: 'NATIVE_MOMENTS_FACT', imageCount: 1 }], nextCursor: null, mediaContentIncluded: false }; },
       writeMoments: async (args, signal) => { signal.throwIfAborted(); assert.equal(args.accountId, accountId); assert.match(args.clientId, /^sns_[a-f0-9]{64}$/); momentsWrites.push(args);
         return { accountId, action: args.query.action, postId: args.query.postId ?? '9007199254740999', text: args.query.text,
           liked: true, commentId: '9007199254741000', imageCount: args.query.images?.length ?? 0, delivery: 'server-ack',
-          ...(args.query.blockedLabelIds?.length ? { audienceConfirmed: true, blockedLabelIds: args.query.blockedLabelIds, blockedUserIds: ['wxid_alice'],
+          ...(args.query.action === 'publish' ? { audienceConfirmed: true, blockedLabelIds: args.query.blockedLabelIds ?? [], blockedUserIds: args.query.blockedUserIds ?? [],
+            authorizationConfirmed: true, authorizationExcludedCount: 0,
+            authorizedAudienceUserIds: args.query.blockedUserIds?.includes('wxid_alice') ? [] : ['wxid_alice'],
             audienceSelection: { blockedLabelIds: args.query.blockedLabelIds, blockedUserIds: args.query.blockedUserIds }, audienceSource: 'wechat-contacts-live', audienceFetchedAt: new Date().toISOString() } : {}),
           ...(args.query.replyToCommentId ? { replyToCommentId: args.query.replyToCommentId, replyToUserId: 'visible-author' } : {}),
           ...(args.query.action === 'delete' ? { deleted: true } : {}) }; }, send: async payload => {
@@ -327,12 +340,15 @@ const until = async predicate => {
     for (const key of ['id', 'cwd', 'sessionId']) assert.equal(new Set([parent, ...parallel].map(job => job[key])).size, 3, key);
     const modelCount = nativeRequests.length, jobCount = channel.work.list(scope).jobs.length;
     const progressSentBefore = sent.length;
+    assert([...channel.work.active.values()].every(value => value.progress && !value.progress.closed));
+    assert.equal(progressRequests.length, 0); assert.equal(sent.length, progressSentBefore);
     await Promise.all([...channel.work.active.values()].map(value => value.progress.tick()));
-    assert.equal(progressRequests.length, 2, JSON.stringify(parallel.map(job=>channel.work.get(job.id,scope).progress))); assert.equal(sent.length, progressSentBefore+2);
+    assert.equal(progressRequests.length, 2); assert.equal(sent.length, progressSentBefore + 2);
     assert.equal(nativeRequests.length, modelCount); assert.equal(channel.work.list(scope).jobs.length, jobCount);
     assert(sent.slice(progressSentBefore).every(payload => payload.message.length === 1 && payload.message[0].type === 'text'));
     for (const job of parallel) {
-      const current=channel.work.get(job.id, scope); assert.equal(current.progress.state,'sent'); assert(current.progress.acknowledgedMessageIds.length);
+      const current=channel.work.get(job.id, scope); assert.equal(current.progress.state, 'sent');
+      assert.equal(current.progress.acknowledgedMessageIds.length, 1);
       assert.equal(current.delivery.state,'not-ready');
     }
     receive('/work status ' + parallel[0].id); await until(() => !channel.workReplies.size);
@@ -479,6 +495,17 @@ const until = async predicate => {
     for (const name of ['wechat_moments_plan', 'wechat_moments_draft', 'wechat_moments_reply_schedule']) assert(savedMoments.some(job => job.operations.some(op => op.tool === name)));
     const word = await completed('找到已有的新闻摘要 Word 并发给我'); assert.equal(word.delivery.artifacts[0].state, 'sent');
     assert.deepEqual(fs.readFileSync(path.join(word.cwd, word.result.artifacts[0].path)), wordBytes); assert.deepEqual(fs.readFileSync(wordPath), wordBytes);
+    let retiredFileCalls = 0;
+    transport.files = async () => { retiredFileCalls++; throw Error('Retired attachment API must not run'); };
+    const beforeFile = { requests: nativeRequests.length, sent: sent.length };
+    channel.receive({ direction: 'incoming', chatType: 'private', peerId, sender: { id: peerId }, time: Math.floor(Date.now() / 1000),
+      messageType: 49, id: 'retired-attachment', serverMessageId: '18446744073709551001',
+      message: [{ type: 'file', data: { name: 'retired.docx', bytes: wordBytes.length } }] }, accountId);
+    await channel.whenIdle(); assert.equal(nativeRequests.length, beforeFile.requests); assert.equal(sent.length, beforeFile.sent);
+    const retired = await completed(retiredFileRequest, true);
+    assert.equal(retiredFileCalls, 0); assert.equal(retired.result.artifacts.length, 0);
+    assert(!retired.operations.some(operation => operation.tool === 'wechat_file'));
+    delete transport.files;
     const old = channel.work.create(scope, 'OLD_TASK_REQUEST：旧 SSH 与沙箱失败', undefined, { defer: true }); channel.work.cancel(old.id, scope);
     channel.work.store.update(old.id, { result: { text: 'OLD_TASK_RESULT：历史失败', files: [] } });
     const createdAt = Date.now() - 1000;
@@ -544,19 +571,24 @@ const until = async predicate => {
     const timer = setTimeout(() => controller.abort(new ChannelError('WORK_CANCELLED', '合成取消请求')), 300);
     try { await assert.rejects(cancelled, error => error.code === 'WORK_CANCELLED'); assert.equal(operations.at(-1).result.cancelled, true); } finally { clearTimeout(timer); }
     assert.equal(confinedCalls, 0);
-    assert.deepEqual(store.history(accountId, 'private', peerId, 100).map(entry => entry.text), ['你好', '聊天回应', '解释工具调用']);
-    assert.deepEqual(channel.memory.load(scope).entries.map(entry => entry.text), ['你好', '聊天回应', '解释工具调用']);
+    assert.deepEqual(store.history(accountId, 'private', peerId, 100).filter(entry => !entry.files?.length).map(entry => entry.text), ['你好', '聊天回应', '解释工具调用']);
+    assert.deepEqual(channel.memory.load(scope).entries.filter(entry => !entry.files?.length).map(entry => entry.text), ['你好', '聊天回应', '解释工具调用']);
+    assert.equal(store.history(accountId, 'private', peerId, 100).filter(entry => entry.files?.length).length, 1);
     const restored = new WorkStore(store); assert.equal(restored.get(status.id).state, 'succeeded'); assert.equal(restored.get(apiFailure.id).state, 'succeeded');
-    const report = { ok: true, root, modelRequests: nativeRequests.length, routingRequests: routingRequests.length, polishRequests: polishRequests.length, actualImageApiCalls: apiCalls.length,
+    assert.equal(restored.get(retired.id).state, 'succeeded');
+    assert.deepEqual(restored.get(retired.id).operations, JSON.parse(JSON.stringify(retired.operations)));
+    const report = { ok: true, root, modelRequests: nativeRequests.length, routingRequests: routingRequests.length, polishRequests: polishRequests.length, progressRequests: progressRequests.length, actualImageApiCalls: apiCalls.length,
       nativeFileCalls: nativeFileCalls.length, nativeShellCalls: shellCalls.length, assertions: [
         'original user text reaches native DSH unchanged with only scoped conversation style', 'native DSH context and inherited tool remain available', 'native tool declarations reach the model in the isolated SDK host',
-        'native work dialogue and every public work report retain the current persona', 'independent progress Agents read native evidence without tools or another task submission',
+        'native work dialogue and every public work report retain the current persona', 'native periodic progress uses isolated evidence without starting work or sending artifacts; explicit status remains available',
         'DSH default model and preset are retained despite different chat settings', 'work and chat use two fixed projects with exact native header membership', 'DSH working-directory service uses the actual task folder',
         'native parent starts two children with unique task IDs, sessions and folders', 'two real command tasks overlap without blocking explicit status', 'native file tools need no WeChat output registration',
         'collected files preserve bytes and individual simulated WeChat ACKs', 'completed work sessions retain native user source and persisted cwd',
         'legacy project migration preserves every event and file without a model request and retains the archived original',
         'busy legacy sessions defer consolidation without stopping activity', 'forked legacy sessions preserve their exact inherited markers and prefix', 'old shared-project work migrates only with the saved task association and retains its exact prefix', 'unrelated chat history is never moved into work', 'full access avoids sandbox confinement and ACL preparation',
-        'existing external Word is returned as an immutable copy', 'standalone work does not preload prior work or dialogue bodies', 'history is queried only through an explicit native tool',
+        'existing external Word is returned as an immutable copy', 'retired attachment tools stay absent from the real native SDK',
+        'received file metadata stays silent and no attachment transport is invoked',
+        'standalone work does not preload prior work or dialogue bodies', 'history is queried only through an explicit native tool',
         '0809 defaults and selected image provider/model/size reach the actual API request', 'wrapped base64 and existing URL responses preserve image bytes', 'empty image failures name the actual provider without retry or fallback',
         'generated native images have exact independent main-directory archives and retain relative delivery paths',
         'a repeated image invocation with a new filename makes no second API request', 'work classification reads only owned work context without tools or chat persona',

@@ -24,6 +24,12 @@ storageSettings:
   workspacePath: workspace
   recordsPath: storage/conversations
 conversationConfigs: {}
+roleCardSettings:
+  enabled: true
+  trigger: messages
+  messageThreshold: 20
+  intervalMinutes: 60
+  timeoutMinutes: 60
 conversationDefaults:
   mode: default
   executionMode: chat
@@ -63,6 +69,9 @@ mediaDefaults:
   enabled: true
   probability: 20
   minGapMessages: 3
+  captureIncoming: true
+  preferNative: true
+  autoDescribe: true
 media: {}
 work:
   maxConcurrent: 2
@@ -74,5 +83,18 @@ imageGeneration:
   enabled: false
   defaultProviderId: ''
   providers: []
+timeSettings:
+  conversationTimeoutSeconds: 180
+  searchTimeoutSeconds: 45
+  momentsReplyTimeoutMinutes: 5
+  momentsLikeTimeoutMinutes: 5
+  momentsPublishTimeoutMinutes: 60
+  momentsMaterialTimeoutMinutes: 30
+  momentsImageTimeoutMinutes: 5
+  momentsInteractionReadTimeoutSeconds: 90
+  momentsCommentTimeoutMinutes: 5
+  momentsInteractionTimeoutMinutes: 30
+  manualInteractionIntervalSeconds: 3
+  manualInteractionLookbackDays: 7
 prompts:
   identity: prompts/AGENT.md

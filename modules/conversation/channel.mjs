@@ -1,4 +1,5 @@
 import { promptText } from "../../prompts/loader.mjs";
+import { timeLimitMs } from '../../shared/time-settings.mjs';
 import { matches } from "./helpers.mjs";
 import { receiveMessage } from "./incoming.mjs";
 import { observeManualReply } from "./incoming.mjs";
@@ -13,6 +14,7 @@ import { ConversationMemory } from "../memory/conversation/store.mjs";
 
 import { LongTermMemory } from "../memory/long-term/store.mjs";
 import { MediaLibrary } from "../media/library.mjs";
+import { WechatStickerService } from '../media/sticker-service.mjs';
 
 import { AgentWorkbench } from "../workbench/service.mjs";
 
@@ -25,8 +27,13 @@ import { ExecutionModeService } from '../work/modes/service.mjs';
 import { workAdministrator } from '../work/policy.mjs';
 import { MomentsService } from '../moments/service.mjs';
 import { MomentsAutomation } from '../moments/automation.mjs';
+import { PersonMemoryMaintenance } from '../memory/roles/maintenance.mjs';
+import { attachExecutionTraces } from '../traces/instrument.mjs';
+import { ObjectAuthorization } from '../authorization/service.mjs';
 
 export class WechatChannel {
+  get timeoutMs() { return this.timeoutOverride ?? timeLimitMs(this.store, 'conversationTimeoutSeconds'); }
+  set timeoutMs(value) { this.timeoutOverride = value; }
   constructor({
     store,
     runner,
@@ -38,7 +45,7 @@ export class WechatChannel {
     remoteProviders,
     now = Date.now,
     random = Math.random,
-    timeoutMs = 180000,
+    timeoutMs,
   }) {
     Object.assign(this, { store, runner, transport, now, random, timeoutMs });
     this.queue = [];
@@ -54,21 +61,28 @@ export class WechatChannel {
     this.longMemory = longMemory ?? new LongTermMemory(store, { now });
     this.imageMemory = this.memory.images ?? new ImageMemory(store, { now });
     this.library = library ?? new MediaLibrary(store, { now });
+    this.stickers = new WechatStickerService(this);
     this.workbench = new AgentWorkbench(this);
     this.work = new WorkService(this, workRunner);
     this.remote = new RemoteService(this, remoteProviders);
     this.moments = new MomentsService(this);
     this.momentsAutomation = new MomentsAutomation(this);
     this.modes = new ExecutionModeService(this);
+    this.personMemory = new PersonMemoryMaintenance(this);
     this.memory.seed();
     this.longMemory.onPending = (selector) => this.maintainMemory(selector);
-    this.memory.onAppend = (selector, entry) => this.longMemory.capture(selector, [entry]);
+    this.memory.onAppend = (selector, entry) => {
+      this.longMemory.capture(selector, [entry]);
+      this.personMemory.capture(selector, [entry]);
+    };
     this.memory.onPressure = (selector) => this.maintainMemory(selector);
     this.memoryRetries = new Map();
     this.memory.retryState = this.memoryRetries;
     this.memory.pendingState = this.memoryPending;
     this.memory.forcedState = this.memoryForced;
     this.natural = new NaturalChat(this);
+    this.authorization = new ObjectAuthorization(this);
+    attachExecutionTraces(this);
     this.imageMemory.start();
     this.memoryTimer = setInterval(() => this.checkMemoryPressure(), 15000);
     this.memoryTimer.unref?.();
@@ -155,6 +169,7 @@ export class WechatChannel {
     for (const active of this.workActive.values()) active.controller.abort(error);
     for (const lane of this.workReplies.values()) { for (const item of lane.queue) item.complete?.reject(error); lane.queue.length = 0; }
     this.maintenanceActive?.controller.abort();
+    this.personMemory?.cancel();
     for (const item of this.queue) item.complete?.reject(error);
     this.queue.length = 0;
     try { this.work?.cancelAll('消息或工作状态保存失败，已停止执行'); }
@@ -353,6 +368,11 @@ export class WechatChannel {
     }
   }
   cancel(reason = '自动回复已暂停，任务已取消', selector, { resetProgress = true, resetNatural = false } = {}) {
+    if (this.memoryScan) {
+      this.memoryScan.cancelled = true;
+      this.memoryScan.nextAccountId = null;
+    }
+    this.personMemory?.cancel(selector);
     this.work?.cancelAll(reason, selector);
     this.cancelWorkReplies(reason, selector);
     if (this.maintenanceActive && matches(this.maintenanceActive.selector, selector))
@@ -381,12 +401,16 @@ export class WechatChannel {
   }
   async whenIdle(selector) {
     if (selector) {
+      while (this.memoryScan) await this.memoryScan.promise;
       while (this.active && matches(this.active.record, selector)) await this.active.finished;
       while (this.maintenanceActive && matches(this.maintenanceActive.selector, selector))
         await this.maintenanceActive.finished;
     } else {
-      this.drain();
-      while (this.running) await this.running;
+      do {
+        if (this.memoryScan) await this.memoryScan.promise;
+        this.drain();
+        while (this.running) await this.running;
+      } while (this.memoryScan);
     }
     for (;;) {
       const pending = [...this.workReplies.values()].filter(lane => matches(lane.record, selector)).map(lane => lane.pending);
@@ -401,11 +425,19 @@ export class WechatChannel {
     this.natural.stop();
     this.imageMemory.close();
     this.closed = true;
+    this.authorization?.close();
+    const stickersClosing = this.stickers.close();
+    const peopleClosing = this.personMemory?.close();
     const momentsClosing = this.momentsAutomation?.close();
     this.cancel('插件已停止，未自动重放未完成任务', undefined, { resetProgress: false });
     await this.work.close();
     await this.whenIdle();
     await momentsClosing;
+    await peopleClosing;
+    await stickersClosing;
+    await this.authorization?.whenIdle().catch(() => {});
+    await this.traces?.close();
+    this.authorization?.restore();
   }
   summary(selector) {
     return {

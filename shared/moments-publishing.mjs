@@ -1,7 +1,8 @@
 import { ChannelError } from './contracts.mjs';
 import { validateAudienceSelection } from './moments-audience.mjs';
+import { TIME_DEFAULTS } from './time-settings.mjs';
 
-export const MOMENTS_PUBLISH_TIMEOUT_MS = 60 * 60 * 1000;
+export const MOMENTS_PUBLISH_TIMEOUT_MS = TIME_DEFAULTS.momentsPublishTimeoutMinutes * 60000;
 export const MOMENTS_PUBLISH_RPC_TIMEOUT_MS = MOMENTS_PUBLISH_TIMEOUT_MS + 15000;
 export const MOMENTS_TEXT_FALLBACK_RESERVE_MS = 5 * 60 * 1000;
 

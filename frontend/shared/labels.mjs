@@ -31,6 +31,7 @@ export const loginLabels = {
 export const modeLabels = { default: '默认回复', nickname: '昵称唤醒', participate: '主动参与', natural: '自然陪聊' };
 
 export const pageLabels = {
+  traces: '任务执行轨迹',
   diagnostics: '运行检查',
   recovery: '发送恢复',
   'memory-review': '记忆维护',
@@ -39,6 +40,8 @@ export const pageLabels = {
   authorization: '会话授权',
   records: '处理记录',
   settings: '设置',
+  automation: '自动功能',
+  time: '时间设置',
   administrators: '管理员与远程查询',
   model: '模型设置',
   'image-generation': '图片生成',

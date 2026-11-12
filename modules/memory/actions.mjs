@@ -1,6 +1,7 @@
 import { ChannelError } from "../../shared/contracts.mjs";
 import { validateImageMemorySettings } from "./images/store.mjs";
 import { imageMemoryCollection } from '../../shared/image-memory.mjs';
+import { preserveTimeValues } from '../../shared/time-settings.mjs';
 
 export const endpoints = [
   'memory.configure',
@@ -8,6 +9,8 @@ export const endpoints = [
   'memory.global.clear',
   'memory.global.extract',
   'memory.role.save',
+  'memory.role.refresh',
+  'memory.role.configure',
   'memory.edit',
   'memory.images.configure',
   'memory.images.delete',
@@ -24,16 +27,22 @@ export async function memoryMutation(
   signal
 ) {
   switch (endpoint) {
+    case 'memory.role.configure': {
+      assertLive(signal);
+      return channel.personMemory.configure(payload.settings, payload.revision);
+    }
     case 'memory.role.save': {
-      const scope = channel.longMemory.selector(conversation(payload));
+      assertLive(signal); currentAccount(payload);
+      const scope = store.roleCards.select(payload);
       const checked = store.roleCards.checkSave(scope, payload.card, payload.revision);
       if (!checked.changed) break;
-      await paused('正在更新会话角色卡', () => {
-        assertLive(signal); currentAccount(payload);
-        store.roleCards.save(scope, checked.card, payload.revision);
-        store.resetSessions(scope);
-      }, scope, { resetProgress: false });
+      store.roleCards.save(scope, checked.card, payload.revision, channel.now());
       break;
+    }
+    case 'memory.role.refresh': {
+      assertLive(signal); const account = currentAccount(payload);
+      if (payload.personId || payload.peerId) return channel.personMemory.request(store.roleCards.select(payload), { manual: true });
+      return channel.personMemory.requestAll(account.id);
     }
     case 'memory.configure':
       channel.memory.setWindowChars(payload.windowChars);
@@ -80,7 +89,7 @@ export async function memoryMutation(
     case 'memory.images.clear': {
       const scope = { ...conversation(payload), collection: imageMemoryCollection(payload.collection) };
       const state = channel.imageMemory.load(scope);
-      const settings = endpoint === 'memory.images.configure' ? validateImageMemorySettings(payload.settings) : null;
+      const settings = endpoint === 'memory.images.configure' ? validateImageMemorySettings(payload.preserveTimeSettings ? preserveTimeValues('images', payload.settings, state.settings) : payload.settings) : null;
       if (settings && JSON.stringify(state.settings) === JSON.stringify(settings))
         return channel.imageMemory.list(scope);
       if (

@@ -39,3 +39,4 @@ export function extractionPeople(people, sources, scope) {
   return [...all.values()].filter(person => authors.has(person.id) || [person.name, ...person.aliases].some(name => nameMentioned(text, name)) ||
     sources.some(source => referenceMatches(person, source.text, source.senderId)));
 }
+

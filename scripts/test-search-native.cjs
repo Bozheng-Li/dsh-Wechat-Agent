@@ -42,9 +42,10 @@ class Fixture extends LlmAdapter {
     const results = options.messages.filter(row => row.role === 'tool').flatMap(row => row.content).filter(row => row.type === 'text').map(row => { try { return JSON.parse(row.text); } catch { return {}; } });
     if (!current.search || current.isolated || current.imageRequest) {
       assert(!names.includes('wechat_web_search')); assert(!system.includes('先用 wechat_web_search'));
+      if (current.isolated) assert(!system.includes('静默执行'), 'internal data processing must not acquire public reply instructions');
       yield* textReply('本轮不调用搜索。'); return;
     }
-    assert(system.includes('wechat_web_search') && system.includes('公开'));
+    assert(system.includes('wechat_web_search') && system.includes('公开'), JSON.stringify({ id: current.id, names, systemStart: system.slice(0, 240) }));
     if (current.scopedSearch) {
       assert(names.includes('web_search'), 'a preset-local tool survives global restrictions');
       if (!current.hostAttempted) {
@@ -82,7 +83,7 @@ async function main() {
   const adapter = ctx.llm.registerAdapter(['native-search-chat', 'native-search-work'], new Fixture());
   const inherited = ctx.tools.register({ name: 'native_fixture_read', description: 'Inherited read-only native fixture', parameters: { type: 'object', properties: {}, additionalProperties: false },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-    execute: () => { assert.equal(timeline.at(-1).kind, 'notice'); timeline.push({ kind: 'inherited', id: current.id }); return '{"inherited":true}'; } });
+    execute: () => { assert(!timeline.some(row => row.id === current.id && row.kind === 'notice')); timeline.push({ kind: 'inherited', id: current.id }); return '{"inherited":true}'; } });
   const hostSearch = ctx.tools.register({ name: 'web_search', description: 'Unrouted host search fixture', parameters: { type: 'object', properties: {}, additionalProperties: false },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
     execute() { throw Error('The scoped plugin search must own search routing'); } });
@@ -106,6 +107,9 @@ async function main() {
   state.configure(scope.accountId, { enabled: true, privatePeers: [scope.peerId], groups: [], prompt: '' });
   let runtime = { persona: T.emptyPersona(), workspacePath: root, modelConfig: {} };
   const runner = new T.DshAgentRunner(ctx, () => ({ provider: 'native-search-chat', model: 'fixture' }), () => runtime);
+  // Background memory extraction is covered separately and must not consume
+  // this search fixture's current-case model or mutable response settings.
+  runner.extractLongTermMemory = undefined; runner.extractRoleCard = undefined;
   class Provider {
     constructor(resolveOptions) { this.resolveOptions = resolveOptions; }
     async search(query) {
@@ -147,8 +151,7 @@ async function main() {
           limits: { commandTimeoutSeconds: 30 }, assertAllowed() {}, onSession() {}, onOperation() {},
           imageGeneration: { catalog: () => ({ defaultProviderId: 'fixture', providers: [{ providerId: 'fixture', models: ['fixture'] }] }),
             generate() { throw Error('Image generation is outside this search isolation check'); } },
-          ...(item.imageRequest ? { imageRequest: item.imageRequest } : {}),
-          onBeforeTool: T.createToolNotifier(channel, { scope, requestKey: item.id, signal: abort.signal, assertAllowed() {} }) });
+          ...(item.imageRequest ? { imageRequest: item.imageRequest } : {}) });
         assert(result.text); assert(requests.slice(requestStart).every(row => row.provider === 'native-search-work'));
       } else if (item.isolated) {
         await runner.run({ text: item.text, signal: new AbortController().signal, mode: 'memory', systemOverride: '内部专用协议' });
@@ -160,10 +163,9 @@ async function main() {
       }
       const events = timeline.slice(start), providers = events.filter(row => row.kind === 'provider');
       if (item.search && !item.isolated && !item.imageRequest) {
-        assert.equal(events[0].kind, 'notice'); assert.equal(providers.length, item.fail ? 2 : 1);
-        const first = events.findIndex(row => row.kind === 'provider'); assert(first > 0 && events[first - 1].kind === 'notice');
+        assert.equal(events.filter(row => row.kind === 'notice').length, 0); assert.equal(providers.length, item.fail ? 2 : 1);
         assert.equal(runner.searchStatus().provider, providers.at(-1).provider);
-        if (item.lazy) assert.equal(events.filter(row => row.kind === 'notice').length, 2);
+        if (item.lazy) assert.equal(events.filter(row => row.kind === 'notice').length, 0);
         if (item.inherited) assert(events.some(row => row.kind === 'inherited'));
       } else assert.equal(providers.length, 0);
       cases.push({ id: item.id, passed: true, requests: requests.length - requestStart, events });

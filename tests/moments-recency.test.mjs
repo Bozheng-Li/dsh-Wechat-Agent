@@ -5,11 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { rolldown } from 'rolldown';
-import {
-  StateStore, WechatChannel, momentsTool, momentsWriteTools
-} from '../lib/testing.js';
-
-
+import { StateStore } from '../backend/storage/state-store.mjs';
+import { WechatChannel } from '../modules/conversation/channel.mjs';
+import { momentsTool, momentsWriteTools } from '../modules/tools/moments.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-moments-recency-'));
@@ -174,6 +172,35 @@ test('a rejected source is neither an empty page nor a claim about the contact p
   const f = fixture([[old()]], [[latest()]], { request: async page => { if (page.action === 'user') throw error; } });
   await assert.rejects(f.read({ limit: 1 }), value => value === error);
   assert.equal(f.reader.cursors.size, 0);
+});
+
+test('a ret=-2 homepage recovers only fresh visible timeline rows without claiming a verified latest position', async () => {
+  const unavailable = Object.assign(new Error('synthetic refusal'), { code: 'ERR_MOMENTS_REJECTED', details: { ret: -2 } });
+  const f = fixture([[old()]], [[latest(), old()]], { request: async page => { if (page.action === 'user') throw unavailable; } });
+  const result = await f.read({ limit: 1 });
+  assert.deepEqual(result.items.map(post => post.id), [latest().id]);
+  assert.equal(result.selection.basis, 'timeline'); assert.equal(result.selection.recencyVerified, false);
+  assert.equal(result.selection.complete, false); assert.equal(result.selection.unavailableSources[0].ret, -2);
+  assert.match(result.selection.message, /不能据此断言/);
+  const second = await f.read({ limit: 1, cursor: result.nextCursor });
+  assert.deepEqual(second.items.map(post => post.id), [old().id]); assert.equal(second.selection.offset, 1);
+  await assert.rejects(f.read({ limit: 1, cursor: result.nextCursor }, 'another-reader'), { code: 'ERR_MOMENTS_CURSOR' });
+});
+
+test('both refused sources still return the actual error instead of an empty or cached homepage', async () => {
+  const f = fixture([[old()]], [[latest()]], { request: async () => {
+    throw Object.assign(new Error('synthetic refusal'), { code: 'ERR_MOMENTS_REJECTED', details: { ret: -2 } });
+  } });
+  await assert.rejects(f.read(), { code: 'ERR_MOMENTS_REJECTED' }); assert.equal(f.reader.cursors.size, 0);
+});
+
+test('latest-like refuses a recovered partial range and sends no guessed interaction', async t => {
+  const source = fixture([[old()]], [[latest()]], { request: async page => {
+    if (page.action === 'user') throw Object.assign(new Error('synthetic refusal'), { code: 'ERR_MOMENTS_REJECTED', details: { ret: -2 } });
+  } }), f = channelFixture(t, source.reader);
+  await assert.rejects(f.channel.moments.likeRecent({ subject: 'contact', user: '合成好友' }, f.scope,
+    'partial-request', '请给合成好友最新一条朋友圈点赞', signal()), { code: 'MOMENTS_LIKE_READ_INCOMPLETE' });
+  assert.deepEqual(f.writes, []);
 });
 
 test('a nonadvancing timeline cannot promote an old profile row', async () => {

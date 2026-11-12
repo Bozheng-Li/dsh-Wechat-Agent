@@ -26,15 +26,17 @@ function fixture(t) {
   const asset = channel.library.list(accountId).items[0];
   channel.library.edit(accountId, asset.id, { description: '点头表示赞同' });
   runner.run = async input => {
-    const tool = input.tools.find(value => value.name === 'wechat_reply_media'); assert.ok(tool);
-    const selected = JSON.parse(await tool.execute({ action: 'select', assetId: asset.id, caption: null }, { signal: input.signal }));
+    const read = input.tools.find(value => value.name === 'wechat_sticker_read'); assert.ok(read);
+    assert.equal(JSON.parse(await read.execute({ action: 'read', assetId: asset.id }, { signal: input.signal })).ok, true);
+    const tool = input.tools.find(value => value.name === 'wechat_sticker_send'); assert.ok(tool);
+    const selected = JSON.parse(await tool.execute({ assetId: asset.id, caption: null }, { signal: input.signal }));
     assert.equal(selected.ok, true); assert.equal(selected.sent, false);
     return { text: '工具已选中，不应重复发送这句话' };
   };
   const service = createPluginService({ ctx: {}, root, store, worker, runner, channel });
   let serial = 0;
-  const receive = () => { const id = 'media-channel-' + ++serial; channel.receive({ id, serverMessageId: id, direction: 'incoming', time: Math.floor(Date.now() / 1000), chatType: 'group', peerId,
-    sender: { id: 'alice', nickname: '阿禾' }, message: [{ type: 'text', data: { text: '/agent 发个表情包' } }] }, accountId); };
+  const receive = (text = '发个表情包') => { const id = 'media-channel-' + ++serial; channel.receive({ id, serverMessageId: id, direction: 'incoming', time: Math.floor(Date.now() / 1000), chatType: 'group', peerId,
+    sender: { id: 'alice', nickname: '阿禾' }, message: [{ type: 'text', data: { text: '/agent ' + text } }] }, accountId); };
   const outgoing = () => channel.memory.load(scope).entries.filter(value => value.direction === 'outgoing');
   t.after(async () => {
     for (const action of cleanup) action();
@@ -49,6 +51,29 @@ function holdSend(f) {
   f.cleanup.push(() => complete.resolve({ delivery: 'server-ack', serverMessageIds: ['9007199254740999'] }));
   return { started, complete, cancelled };
 }
+
+test('daily conversation lets the model read and choose a sticker without random probability gating, then enforces spacing', async t => {
+  const f = fixture(t); f.channel.random = () => 0.999;
+  f.channel.library.configure(accountId, { ...f.channel.library.account(accountId).settings, probability: 0, minGapMessages: 3 });
+  f.receive('谢谢你陪我聊天'); await f.channel.whenIdle();
+  assert.equal(f.record().state, 'sent'); assert.equal(f.sent[0].message[0].type, 'face');
+  f.runner.run = async input => {
+    const read = input.tools.find(tool => tool.name === 'wechat_sticker_read'); assert(read);
+    const result = JSON.parse(await read.execute({ action: 'read', assetId: f.asset.id }, { signal: input.signal }));
+    assert.equal(result.canSend, false); return { text: '不客气，慢慢聊。' };
+  };
+  f.receive('还想和你说说今天的事'); await f.channel.whenIdle();
+  assert.equal(f.record().state, 'sent'); assert.deepEqual(f.sent.at(-1).message.map(segment => segment.type), ['text']);
+});
+
+test('the model may keep an ordinary reply as text even when sticker tools are available', async t => {
+  const f = fixture(t); f.runner.run = async input => {
+    assert(input.tools.some(tool => tool.name === 'wechat_sticker_read')); assert(input.tools.some(tool => tool.name === 'wechat_sticker_send'));
+    return { text: '你先说，我在听。' };
+  };
+  f.receive('今天有件认真的事想说'); await f.channel.whenIdle();
+  assert.equal(f.record().state, 'sent'); assert.equal(f.record().replyMedia, undefined); assert.deepEqual(f.sent[0].message.map(segment => segment.type), ['text']);
+});
 
 test('selected image enters history and memory only after the whole reply is server-acknowledged', async t => {
   const f = fixture(t), gate = holdSend(f); f.receive(); await gate.started.promise;
@@ -65,7 +90,11 @@ test('selected image enters history and memory only after the whole reply is ser
 
 test('partial text confirmation never promotes its unconfirmed image into memory', async t => {
   const f = fixture(t), original = f.runner.run;
-  f.runner.run = async input => { await original(input); await input.tools.find(tool => tool.name === 'wechat_reply_media').execute({ action: 'select', assetId: f.asset.id, caption: '嗯嗯' }, { signal: input.signal }); return { text: '' }; };
+  f.runner.run = async input => {
+    const read = input.tools.find(tool => tool.name === 'wechat_sticker_read'), send = input.tools.find(tool => tool.name === 'wechat_sticker_send');
+    await read.execute({ action: 'read', assetId: f.asset.id }, { signal: input.signal });
+    await send.execute({ assetId: f.asset.id, caption: '嗯嗯' }, { signal: input.signal }); return { text: '' };
+  };
   f.worker.send = async params => { f.sent.push(params); throw new ChannelError('ERR_SEND_REJECTED', 'fixture reject', { delivery: 'partially-acknowledged', acknowledgedMessageIds: ['9007199254740901'] }); };
   f.receive(); await f.channel.whenIdle();
   assert.equal(f.record().state, 'partial'); assert.deepEqual(f.record().acknowledgedMessageIds, ['9007199254740901']);
@@ -93,7 +122,11 @@ for (const action of ['switch-account', 'revoke-room']) test(`media preparation 
     else f.store.configure(accountId, { ...f.settings, groups: [] });
     return asset;
   };
-  f.receive(); await f.channel.whenIdle(); assert.equal(f.sent.length, 0); assert.equal(f.record().state, 'cancelled'); assert.equal(f.outgoing().length, 0);
+  f.receive(); await f.channel.whenIdle(); assert.equal(f.sent.length, 0); assert.equal(f.record().state, 'cancelled');
+  if (action === 'revoke-room') {
+    assert.throws(() => f.outgoing(), { code: 'OBJECT_NOT_AUTHORIZED' });
+    assert(!f.store.data.records.some(row => row.direction === 'outgoing' && row.peerId === peerId));
+  } else { assert.equal(f.outgoing().length, 0); }
 });
 
 for (const operation of ['disable', 'delete']) test(`a selected asset that is ${operation}d before preparation cannot be sent`, async t => {
@@ -162,12 +195,12 @@ test('group switches leave unrelated text replies running and reject stale accou
   await f.service.call('assets.packs.configure', { accountId, packId: f.asset.packId, enabled: false });
   assert.equal(cancelled, false);
   await assert.rejects(f.service.call('assets.packs.configure', { accountId: 'other-owner', packId: f.asset.packId, enabled: true }), { code: 'ACCOUNT_CHANGED' });
-  const builtin = f.channel.library.builtins.packs[0], rpc = rpcHandler(f.service);
-  for (const endpoint of ['assets.packs.content', 'assets.packs.configure']) {
-    const result = await rpc(endpoint, { accountId, packId: builtin.id, assetId: builtin.items[0].id, enabled: true }, undefined, { principal: { kind: 'guest' } });
+  const rpc = rpcHandler(f.service);
+  for (const endpoint of ['assets.content', 'assets.packs.configure', 'assets.stickers.sync', 'assets.stickers.favorite', 'assets.stickers.send']) {
+    const result = await rpc(endpoint, { accountId, packId: f.asset.packId, assetId: f.asset.id, enabled: true }, undefined, { principal: { kind: 'guest' } });
     assert.equal(result.ok, false); assert.equal(result.error.code, 'OWNER_REQUIRED');
   }
-  assert.throws(() => f.service.call('assets.packs.content', { accountId: 'other-owner', packId: builtin.id, assetId: builtin.items[0].id }), { code: 'ACCOUNT_CHANGED' });
+  assert.throws(() => f.service.call('assets.content', { accountId: 'other-owner', assetId: f.asset.id }), { code: 'ACCOUNT_CHANGED' });
   gate.complete.resolve({ delivery: 'server-ack', serverMessageIds: ['9007199254740999'] }); await f.channel.whenIdle();
   assert.equal(f.record().state, 'sent');
 });

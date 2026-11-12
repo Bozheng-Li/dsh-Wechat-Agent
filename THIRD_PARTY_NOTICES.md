@@ -6,11 +6,9 @@ DSH Wechat Agent is distributed under AGPL-3.0-or-later. Its license does not re
 
 The plugin and the protocol/login subset in `backend/wechat/` and `runtime/` originate from [Wechat Agent](https://github.com/2720480371/wechat-agent). This standalone repository preserves that project's AGPL-3.0-or-later license. Protocol, persistence and login behavior are retained; imports and build paths have been adapted for the standalone layout.
 
-## Built-in sticker artwork
+## Sticker library
 
-The `assets/stickers/` directory contains 30 unmodified 3D PNG images from [Microsoft Fluent Emoji](https://github.com/microsoft/fluentui-emoji), copyright Microsoft Corporation, under the MIT License. They are grouped as 猫咪心情 (9), 软萌动物 (10), and 元气心情 (11). Chinese names, descriptions and grouping were added by this plugin; the original images were not modified.
-
-The original license is included at `assets/stickers/LICENSE-Microsoft.txt`. `assets/stickers/manifest.json` records each original source URL, the pinned upstream revision `1ffb34c752ecf5d402f04cfb4b392c77f57c54bc`, file size, dimensions and SHA-256 hash. The catalog and artwork are shipped in the installation package and require no runtime network download. The MIT artwork retains its own license independently of the plugin's AGPL license.
+The plugin no longer distributes the former bundled internet sticker artwork. Sticker images are obtained from the operator's own WeChat favorites, authorized chats or manual imports and remain local account data. They are not included in the plugin package.
 
 ## JavaScript dependencies
 
@@ -33,3 +31,5 @@ Public protocol field layouts from [wechat7016](https://github.com/ByboyCn/wecha
 UploadAppAttach (CGI 220), its request/response fields and 50,000-byte chunks, and SendAppMsg (CGI 222), AppMsg subtype 6, file XML and acknowledgement identity fields were reviewed against the same pinned wechat7016 revision, particularly `UploadAppAttachRequest.cs`, `UploadAppAttachResponse.cs`, `SendAppMsgRequest.cs`, `SendAppMsgResponse.cs`, `AppMsg.cs`, `WXCGIUrl.cs` and `WXClient.Message.cs`. SendAppMsg/AppMsg fields were also cross-checked with wechat-api-ipad's public protobuf. The file upload and message acknowledgement implementations are independent; uploads use authenticated shortlink CGIs rather than assuming undocumented PC longlink routing values.
 
 This project is not affiliated with DeepSeek or Tencent. Their names identify interoperability targets, not endorsements.
+
+Native sticker field layouts for BatchEmojiDownload (CGI 697), SendEmoji (CGI 175) and BatchEmojiBackup (CGI 696) were researched using the public protobuf definitions in [wechat7016](https://github.com/ByboyCn/wechat7016/tree/b52df396d8e2ecce2e15ca147f17e6c221f331ae/WeChat.Core/Protocol/Protos) and verified against authenticated PC responses. The request encoding, response validation, account isolation and library integration are independently implemented. No upstream implementation or third-party sticker images are redistributed.

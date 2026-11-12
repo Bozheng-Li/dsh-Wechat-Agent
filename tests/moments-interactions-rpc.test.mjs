@@ -9,7 +9,7 @@ import { StateStore, WechatChannel, createPluginService, rpcHandler, MOMENTS_INT
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-interaction-rpc-')), accountId = 'wxid_interaction_rpc', writes = [], reads = [], lifetime = new AbortController();
   const status = { account: { id: accountId }, online: true, momentsReadReady: true, momentsWriteReady: true }, store = new StateStore(root);
-  store.configure(accountId, { enabled: true, privatePeers: ['friend'], groups: [], prompt: '' });
+  store.configure(accountId, { enabled: true, privatePeers: ['friend', 'friend-0', 'friend-1'], groups: [], prompt: '' });
   const posts = ['701', '702'].map((id, i) => ({ id, author: { userId: 'friend-' + i, nickname: '合成好友 ' + i }, text: '本地验证动态 ' + i, imageCount: 0,
     createdAt: Math.floor(Date.now() / 1000) - i, deleted: false, contentAvailable: true, likedByCurrentAccount: false, comments: [], visibleCommentEntries: 0 }));
   const worker = { status: () => status, async readMoments(args, signal) {

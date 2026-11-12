@@ -14,7 +14,7 @@ export function modelToolList(definitions = []) {
 }
 
 /** DSH serializes these registered definitions into every model request.tools. */
-export function registerModelTools(ctx, definitions, { assertAllowed = () => {}, denied = '此会话只能使用本轮提供的工具', native = false, inherit = false, agent, onDispose, onBeforeTool, deferredGroups = [] } = {}) {
+export function registerModelTools(ctx, definitions, { assertAllowed = () => {}, denied = '此会话只能使用本轮提供的工具', native = false, inherit = false, quiet = false, workProgressManaged = false, agent, onDispose, onBeforeTool, deferredGroups = [] } = {}) {
   const tools = modelToolList(definitions), allowed = new Set(tools.map(tool => tool.name));
   // Validate the complete authorized inventory before making any registrations.
   modelToolList([...tools, ...deferredGroups.flatMap(group => group.tools)]);
@@ -61,8 +61,12 @@ export function registerModelTools(ctx, definitions, { assertAllowed = () => {},
       execution.signal?.throwIfAborted(); assertAllowed();
       return next();
     }));
-    retain(ctx.systemPrompt?.section?.({ name: 'wechat-tool-notices', order: 90, interpolate: false,
-      text: '通道会在每次实际调用工具前自动发出简短的开始提示。提示只说明接下来的动作，不表示已经完成；你不必重复开场或另发进度工具。最终正文直接给出真实结果，失败与未知如实说明。' }));
   }
+  if (quiet) retain(ctx.systemPrompt?.section?.({ name: 'wechat-quiet-tools', order: 90, interpolate: false,
+    text: '工具查询、读写、重试和其他中间步骤静默执行，不逐步播报。' +
+      (workProgressManaged ? '后台会先发一句简短开工确认，长任务约每 3 分钟单独汇报实际阶段；这些微信消息由通道统一发送，不重复接单或为每次工具操作发消息。'
+        : '不重复接单或承诺稍后处理。') +
+      '需要用户选择或补充信息时简短提问；结束时一次给出结果，默认一至三句，只说结果和必要的下一步。用户要求详细说明、长文或作品正文时按要求完整给出。失败只说明实际障碍。' +
+      (workProgressManaged ? '用户主动询问进度时，按实际状态回应。' : '用户主动询问进度时再回答当前状态。') }));
   return tools;
 }

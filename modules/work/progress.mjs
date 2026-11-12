@@ -3,7 +3,7 @@ import { publicError, ChannelError } from '../../shared/contracts.mjs';
 import { publicText } from '../../backend/wechat/ai/public-output.ts';
 import { workPresentation, workPresentationPrompt, finishWorkPresentation } from './presentation.mjs';
 
-export const WORK_PROGRESS_INTERVAL_MS = 5 * 60 * 1000;
+export const WORK_PROGRESS_INTERVAL_MS = 3 * 60 * 1000;
 
 /** Observe this exact native session without submitting work or retaining reasoning/images. */
 export function observeWorkProgress(ctx, agent, onProgress = () => {}) {
@@ -38,28 +38,37 @@ export function observeWorkProgress(ctx, agent, onProgress = () => {}) {
   return () => { for (const dispose of disposers.reverse()) dispose?.(); };
 }
 
-/** A separate, tool-free Agent reviews bounded evidence; it never follows up the working Agent. */
+/** Review only bounded observations in a separate, tool-free model request. */
 export async function summarizeWorkProgress(runner, evidence, signal, presentation) {
+  let abort;
   try {
-    const result = await runner.run({ mode: 'work-progress', tools: [],
-      systemOverride: [readPrompt('work/progress.md'),workPresentationPrompt(presentation)].filter(Boolean).join('\n\n'), text: JSON.stringify(evidence), signal });
     signal.throwIfAborted();
-    const text = publicText(result?.text ?? '').trim();
-    if (!text || text.length > 200 || /```|<thinking>|\b\d+(?:\.\d+)?\s*%/.test(text))
+    const cancelled = new Promise((_, reject) => {
+      abort = () => reject(signal.reason);
+      signal.addEventListener('abort', abort, { once: true });
+    });
+    const result = await Promise.race([runner.run({ mode: 'work-progress', tools: [],
+      systemOverride: [readPrompt('work/progress.md'), workPresentationPrompt(presentation)].filter(Boolean).join('\n\n'),
+      text: JSON.stringify(evidence), signal }), cancelled]);
+    signal.throwIfAborted();
+    const text = finishWorkPresentation(publicText(result?.text ?? '').trim(), presentation);
+    if (!text || text.length > 160 || /```|\b\d+(?:\.\d+)?\s*[%％]/u.test(text))
       throw new ChannelError('WORK_PROGRESS_INVALID', '进度摘要不符合简短事实回报要求');
-    return { text: finishWorkPresentation(text,presentation), review: { state: 'summarized' } };
+    return { text, review: { state: 'summarized' } };
   } catch (error) {
     signal.throwIfAborted();
-    return { text: '任务尚未结束，暂时无法整理最新进度；完成后会把结果发给你。',
+    return { text: '这项工作还在处理中，暂时无法整理新的可确认进展。',
       review: { state: 'fallback', error: publicError(error, '进度整理暂不可用') } };
+  } finally {
+    if (abort) signal.removeEventListener('abort', abort);
   }
 }
 
-/** One bounded review/delivery at a time, cancelled before the final result is sent. */
+/** At most one periodic review/send per task; stop it before delivering results. */
 export class WorkProgressReporter {
   constructor(service, id, signal) {
-    this.service = service; this.id = id; this.signal = signal; this.events = []; this.sequence = 0;
-    this.closed = false;
+    this.service = service; this.id = id; this.signal = signal;
+    this.events = []; this.sequence = 0; this.closed = false;
     this.timer = setInterval(() => { void this.tick(); }, WORK_PROGRESS_INTERVAL_MS);
     this.timer.unref?.();
   }
@@ -67,10 +76,11 @@ export class WorkProgressReporter {
     if (this.closed) return;
     this.lastActivityAt = event.at;
     if (event.kind === 'model-active') return;
-    this.events.push(event); if (this.events.length > 12) this.events.shift();
+    this.events.push(structuredClone(event));
+    if (this.events.length > 12) this.events.shift();
   }
   tick() {
-    if (this.closed || this.pending || this.signal.aborted) return this.pending;
+    if (this.closed || this.pending || this.signal.aborted || this.deliveryBlocked) return this.pending;
     const { service, id } = this;
     this.controller = new AbortController();
     const signal = AbortSignal.any([this.signal, this.controller.signal, AbortSignal.timeout(30000)]);
@@ -79,26 +89,28 @@ export class WorkProgressReporter {
       if (job.state !== 'running') return;
       service.assertAllowed(job, signal);
       const sequence = ++this.sequence;
-      const evidence = { request: job.request, state: job.state, elapsedSeconds: Math.floor((service.channel.now()-job.startedAt)/1000),
+      const evidence = { request: job.request, state: job.state,
+        elapsedSeconds: Math.max(0, Math.floor((service.channel.now() - job.startedAt) / 1000)),
         lastActivityAt: this.lastActivityAt ?? null, observations: structuredClone(this.events),
         operations: job.operations.slice(-8).map(value => ({ tool: value.tool, at: value.at, ok: value.result.ok })) };
-      const summary = await summarizeWorkProgress(service.channel.runner, evidence, signal,workPresentation(service.channel,job));
+      const summary = await summarizeWorkProgress(service.channel.runner, evidence, signal, workPresentation(service.channel, job));
       signal.throwIfAborted();
       const current = service.store.get(id);
       if (this.closed || current.state !== 'running') return;
       service.assertAllowed(current, signal);
       const recordKey = `work-progress-${id}-${sequence}`;
       const record = await service.channel.submitScheduled({ ...current, recordKey, workJobId: id, workProgress: true,
-        source: 'work', kind: 'message', content: summary.text }, signal);
-      // Sending intent and server ACKs belong to the normal durable message record.
-      // Preserve its actual outcome even if execution ended during the network write.
+        source: 'work', kind: 'message', workStyled: true, content: summary.text }, signal);
+      this.deliveryBlocked = ['unknown', 'partial'].includes(record.state);
       service.store.update(id, { progress: { sequence, at: service.channel.now(), text: summary.text, review: summary.review,
         state: record.state, recordKey, acknowledgedMessageIds: record.acknowledgedMessageIds ?? [] } });
     })().catch(error => {
       if (error?.code === 'STATE_WRITE_FAILED') { service.channel.fail(error); return; }
       if (this.closed || this.signal.aborted) return;
-      service.store.update(id, { progress: { sequence: this.sequence, at: service.channel.now(), state: 'failed',
-        error: publicError(error, '本次进度检查未完成，下个周期重新查看') } });
+      try {
+        service.store.update(id, { progress: { sequence: this.sequence, at: service.channel.now(), state: 'failed',
+          error: publicError(error, '本次进度检查未完成') } });
+      } catch (failure) { service.channel.fail(failure); }
     }).finally(() => { this.pending = undefined; this.controller = undefined; });
     return this.pending;
   }

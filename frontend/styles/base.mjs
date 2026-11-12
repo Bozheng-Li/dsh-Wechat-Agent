@@ -5,6 +5,7 @@ import { automationCss } from './automation.mjs';
 import { contentCss } from './content.mjs';
 import { settingsCss } from './settings.mjs';
 import { interactionCss } from './interactions.mjs';
+import { traceCss } from './traces.mjs';
 
 // Each family owns its selectors. Do not append another global theme override.
-export const css = tokenCss + foundationCss + layoutCss + automationCss + contentCss + settingsCss + interactionCss;
+export const css = tokenCss + foundationCss + layoutCss + automationCss + contentCss + settingsCss + interactionCss + traceCss;

@@ -3,7 +3,6 @@ import { identity } from "../../backend/storage/keys.mjs";
 import { memoryText } from "../memory/conversation/store.mjs";
 import { matches } from "./helpers.mjs";
 import { randomUUID } from 'node:crypto';
-import { resolvePendingMessageReferences } from '../memory/images/references.mjs';
 
 export function scheduleMemoryMaintenance(channel, selector, { force = false } = {}) {
   if (channel.closed || channel.fault) {
@@ -32,26 +31,73 @@ export function checkMemoryPressure(channel) {
   const status = channel.transport.status(),
     accountId = status.account?.id;
   if (!status.online || !accountId) return;
-  for (const peer of channel.store.conversations(accountId)) {
-    if (
-      !eligible(channel.store.settings(accountId), peer) ||
-      [...channel.pauses.values()].some((pause) => matches(peer, pause.selector))
-    )
-      continue;
-    if (channel.memoryRetries.get(peer.key)?.nextAt > channel.now()) continue;
-    try {
-      const doc = channel.memory.load(peer);
-      const pendingFacts = typeof channel.runner.extractLongTermMemory === 'function' &&
-        !!channel.longMemory.state(accountId).pending[peer.key]?.entries.length;
-      if (channel.memoryForced.has(peer.key) || memoryText(doc).length >= channel.memory.windowChars(peer) || pendingFacts)
-        channel.memory.onPressure?.(peer);
-      else {
-        channel.memoryRetries.delete(peer.key);
-        channel.memory.errors.delete(peer.key);
-      }
-    } catch (error) {
-      channel.memory.errors.set(peer.key, publicError(error, '记忆暂时无法读取，原文已保留').message);
+  if (channel.memoryScan) {
+    const scan = channel.memoryScan;
+    if (scan.accountId !== accountId || scan.cancelled) {
+      scan.cancelled = true;
+      scan.nextAccountId = accountId;
     }
+    return scan.promise;
+  }
+  const scan = { accountId, cancelled: false, nextAccountId: null };
+  channel.memoryScan = scan;
+  scan.promise = (async () => {
+    for (;;) {
+      // Status IPC stays cheap, and incoming replies get a turn before disk work.
+      await new Promise(resolve => setImmediate(resolve));
+      if (memoryScanAllowed(channel, scan)) await scanConversationMemory(channel, scan);
+      const nextAccountId = scan.nextAccountId;
+      scan.nextAccountId = null;
+      const current = channel.transport.status();
+      if (!nextAccountId || channel.closed || channel.fault || !current.online || current.account?.id !== nextAccountId) break;
+      scan.accountId = nextAccountId;
+      scan.cancelled = false;
+    }
+  })().catch(error => channel.fail(error)).finally(() => {
+    if (channel.memoryScan === scan) channel.memoryScan = undefined;
+  });
+  return scan.promise;
+}
+
+function memoryScanAllowed(channel, scan) {
+  const status = channel.transport.status();
+  return !scan.cancelled && !channel.closed && !channel.fault && status.online && status.account?.id === scan.accountId;
+}
+
+async function scanConversationMemory(channel, scan) {
+  const accountId = scan.accountId, peers = channel.store.conversationSelectors(accountId).filter(peer => peer.authorized);
+  if (!peers.length || !channel.store.settings(accountId).enabled) return;
+  let pending, pendingError;
+  if (typeof channel.runner.extractLongTermMemory === 'function') {
+    try { pending = channel.longMemory.state(accountId).pending; }
+    catch (error) { pendingError = error; }
+  }
+  let index = 0;
+  while (index < peers.length && memoryScanAllowed(channel, scan)) {
+    // Recheck authorization and pauses after every yield, without rebuilding UI rows.
+    const settings = channel.store.settings(accountId), pauses = [...channel.pauses.values()], started = performance.now();
+    let batch = 0;
+    while (index < peers.length && batch++ < 8) {
+      const peer = peers[index++];
+      if (eligible(settings, peer) && !pauses.some(pause => matches(peer, pause.selector)) &&
+          !(channel.memoryRetries.get(peer.key)?.nextAt > channel.now())) {
+        try {
+          const doc = channel.memory.load(peer);
+          if (pendingError) throw pendingError;
+          const pendingFacts = !!pending?.[peer.key]?.entries.length;
+          if (channel.memoryForced.has(peer.key) || memoryText(doc).length >= channel.memory.windowChars(peer) || pendingFacts)
+            channel.memory.onPressure?.(peer);
+          else {
+            channel.memoryRetries.delete(peer.key);
+            channel.memory.errors.delete(peer.key);
+          }
+        } catch (error) {
+          channel.memory.errors.set(peer.key, publicError(error, '记忆暂时无法读取，原文已保留').message);
+        }
+      }
+      if (performance.now() - started >= 8) break;
+    }
+    if (index < peers.length) await new Promise(resolve => setImmediate(resolve));
   }
 }
 
@@ -81,13 +127,6 @@ export async function maintainConversationMemory(channel, selector) {
     let extractionFailure;
     try {
       await channel.memory.enrich(selector, channel.runner, channel.transport, controller.signal);
-      await resolvePendingMessageReferences(channel, selector, controller.signal, () => {
-        const current = channel.transport.status();
-        if (current.account?.id !== selector.accountId) throw new ChannelError('ACCOUNT_CHANGED', '微信账号已变化，未保存旧图片引用');
-        if (!current.online || !eligible(channel.store.settings(selector.accountId), selector) ||
-          [...channel.pauses.values()].some(pause => matches(selector, pause.selector)))
-          throw new ChannelError('AUTH_CHANGED', '会话授权或连接已变化，未保存旧图片引用');
-      });
     } catch (error) {
       if (error.code === 'STATE_WRITE_FAILED' || controller.signal.aborted) throw error;
     }

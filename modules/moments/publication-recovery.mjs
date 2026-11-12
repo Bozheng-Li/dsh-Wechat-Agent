@@ -1,10 +1,12 @@
 import fs from 'node:fs';
+import { readMomentsWithMemory } from './read.mjs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { ChannelError } from '../../shared/contracts.mjs';
 import { validateAudienceSelection } from '../../shared/moments-audience.mjs';
 import { matchingMomentPublication } from '../../shared/moments-publication.mjs';
 import { momentsId } from '../../shared/moments.mjs';
+import { personAuthorized } from '../../shared/authorization.mjs';
 import { identity } from '../../backend/storage/keys.mjs';
 import { atomicBytes } from '../../backend/storage/atomic-text.mjs';
 import { workPath } from '../work/policy.mjs';
@@ -70,8 +72,8 @@ export async function recoverOwnerPublication(channel, query, accountId, request
     let cursor;
     for (let page = 0; page < 5 && !candidates.size && typeof channel.transport.readMoments === 'function'; page++) {
       check();
-      const response = await channel.transport.readMoments({ accountId, scopeKey: 'moments-reconcile:' + record.clientId,
-        query: { action: 'timeline', limit: 20, ...(cursor ? { cursor } : {}) } }, signal);
+      const response = await readMomentsWithMemory(channel, { accountId, scopeKey: 'moments-reconcile:' + record.clientId,
+        query: { action: 'timeline', limit: 20, ...(cursor ? { cursor } : {}) } }, signal, check);
       check();
       if (response?.accountId !== accountId) fail('微信核对结果来自其他账号');
       for (const post of response.items ?? []) if (matches(post)) candidates.set(post.id, post);
@@ -124,10 +126,18 @@ export async function recoverOwnerPublication(channel, query, accountId, request
       message: expected ? '已找到发布的动态，但微信尚未确认全部指定屏蔽对象。' : '已找到发布的动态；旧记录未保存当时的标签成员，屏蔽范围仍无法核实。' };
     save({ reconciliation: { ...result, checkedAt: channel.now() } }); return result;
   }
+  if (!publication?.authorizedAudienceUserIds || !current.audienceComplete ||
+      publication.authorizedAudienceUserIds.some(id => !personAuthorized(channel.store, accountId, id))) {
+    const result = { kind: 'published-unverified', postId: post.id, createdAt: current.createdAt,
+      message: '已找到发布的动态，但原记录缺少当时的授权范围或授权已变化，尚不能确认仅授权好友可见。' };
+    save({ reconciliation: { ...result, checkedAt: channel.now() } }); return result;
+  }
   const receipt = { accountId, action: 'publish', postId: post.id, createdAt: current.createdAt, text: current.text, imageCount: current.imageCount,
     delivery: 'verified-existing', readbackConfirmed: true, audienceConfirmed: true, audienceSource: 'wechat-sns-live',
     audienceFetchedAt: new Date(channel.now()).toISOString(), audienceSelection: selection, blockedLabelIds: selection.blockedLabelIds,
-    submittedBlockedUserIds: expected, blockedUserIds: current.blockedUserIds ?? [] };
+    submittedBlockedUserIds: expected, blockedUserIds: current.blockedUserIds ?? [], authorizationConfirmed: true,
+    authorizedAudienceUserIds: publication.authorizedAudienceUserIds.filter(id => !current.blockedUserIds.includes(id)),
+    authorizationExcludedCount: publication.authorizationExcludedCount };
   validateReceipt(receipt, query, accountId);
   save({ state: 'succeeded', result: receipt, reconciledAt: channel.now(), reconciliation: { kind: 'published', checkedAt: channel.now() } });
   return { kind: 'published', receipt, message: '已从微信核对这条动态及指定屏蔽对象。' };

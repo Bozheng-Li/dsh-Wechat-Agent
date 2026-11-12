@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { imageGenerationSettings, imageGenerationEndpoint, imageGenerationProvider, IMAGE_GENERATION_MAX_TIMEOUT_SECONDS } from '../../../shared/image-generation.mjs';
+import { imageGenerationSettings, imageGenerationEndpoint, imageGenerationProvider } from '../../../shared/image-generation.mjs';
+import { preserveTimeValues } from '../../../shared/time-settings.mjs';
 import { Button } from '../../components/button.jsx';
 import { PageHead, Back } from '../../components/page-ui.jsx';
 import { Field, FormActions } from '../../components/form-ui.jsx';
@@ -43,8 +44,8 @@ export function ImageGenerationSettings({ status, blocked, onAction, onBack, bac
   };
   const reset = () => { setDraft(saved); setModelInputs({}); setSelectedId(saved.defaultProviderId); };
   const submit = async () => {
-    setNotice(''); const settings = imageGenerationSettings(draft);
-    if (await onAction('imageGeneration.configure', { settings })) { setDraft(settings); setModelInputs({}); setNotice('接口与模型设置已保存；生成结果通过工作任务回传。'); }
+    setNotice(''); const settings = imageGenerationSettings({ ...draft, providers: draft.providers.map(provider => preserveTimeValues('provider', provider, saved.providers.find(row => row.id === provider.id))) });
+    if (await onAction('imageGeneration.configure', { settings, preserveTimeSettings: true })) { setDraft(settings); setModelInputs({}); setNotice('接口与模型设置已保存；生成结果通过工作任务回传。'); }
   };
   const keyDisabled = blocked || dirty || !savedProvider?.endpoint || !status.imageGeneration?.credentialStore;
   const saveKey = async () => {
@@ -88,7 +89,7 @@ export function ImageGenerationSettings({ status, blocked, onAction, onBack, bac
         <Field label="默认尺寸" id="wa-image-size" help="例如 1024x1024；留空由服务决定。"><input className="wa-input" id="wa-image-size" value={provider.size} disabled={blocked} onChange={event => updateProvider({ size: event.target.value })} /></Field>
         <Field label="返回格式" id="wa-image-format"><select className="wa-select" id="wa-image-format" value={provider.responseFormat} disabled={blocked} onChange={event => updateProvider({ responseFormat: event.target.value })}><option value="auto">服务默认（自动识别）</option><option value="b64_json">Base64 图片</option><option value="url">图片下载地址</option></select></Field>
       </div>
-      <details className="wa-subsection"><summary>高级设置</summary><div className="wa-form-grid"><Field label="质量参数" id="wa-image-quality" help="按服务文档填写，留空不发送此参数。"><input className="wa-input" id="wa-image-quality" value={provider.quality} disabled={blocked} maxLength={80} onChange={event => updateProvider({ quality: event.target.value })} /></Field><Field label="调用超时（秒）" id="wa-image-timeout" help="最多 3600 秒；朋友圈总时限为 1 小时。"><input className="wa-input" id="wa-image-timeout" type="number" min={10} max={IMAGE_GENERATION_MAX_TIMEOUT_SECONDS} value={provider.timeoutSeconds} disabled={blocked} onChange={event => updateProvider({ timeoutSeconds: Number(event.target.value) })} /></Field></div><p className="wa-help">支持兼容接口的 Base64 图片或下载地址，图片格式为 PNG/JPEG。调用失败不自动重试生图，朋友圈会回退为纯文字。</p></details>
+      <details className="wa-subsection"><summary>高级设置</summary><div className="wa-form-grid"><Field label="质量参数" id="wa-image-quality" help="按服务文档填写，留空不发送此参数。"><input className="wa-input" id="wa-image-quality" value={provider.quality} disabled={blocked} maxLength={80} onChange={event => updateProvider({ quality: event.target.value })} /></Field></div><p className="wa-help">调用超时统一在“设置 → 时间设置”中修改。支持兼容接口的 Base64 图片或下载地址，图片格式为 PNG/JPEG。调用失败不自动重试生图，朋友圈会回退为纯文字。</p></details>
       </section>
       </> : <div className="wa-image-provider-empty"><Glyph name="image" /><h3>还没有生图接口</h3><p>添加接口后，在这里管理地址、模型与生成参数。</p></div>}
       </div>

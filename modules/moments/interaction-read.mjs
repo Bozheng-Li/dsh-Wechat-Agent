@@ -1,12 +1,9 @@
 import { ChannelError } from '../../shared/contracts.mjs';
 import { momentsId } from '../../shared/moments.mjs';
 import { resolveMomentsQuery } from './service.mjs';
+import { readMomentsWithMemory } from './read.mjs';
 
-export { interactionContentHash } from './post-content.mjs';
-// Older WeChat emoji are returned as bracketed names or slash codes. Those
-// labels do not tell us what is depicted in the attached photos.
-export const readableInteractionText = text => typeof text === 'string' && /[\p{L}\p{N}]/u.test(text
-  .replace(/https?:\/\/\S+/gi, '').replace(/\[[^\]\r\n]{1,24}\]/g, '').replace(/\/[a-zA-Z:;()~*<>@#&!^\\-]{1,12}/g, ''));
+export { interactionContentHash, readableInteractionText } from './post-content.mjs';
 export const newestInteractionFirst = (a, b) => b.createdAt - a.createdAt || (a.id === b.id ? 0 : BigInt(a.id) > BigInt(b.id) ? -1 : 1);
 function validatePage(result, accountId, action, userId) {
   if (result?.accountId !== accountId || result.source !== 'wechat-sns-live' || result.action !== action || !Array.isArray(result.items) ||
@@ -18,8 +15,10 @@ function validatePage(result, accountId, action, userId) {
 }
 export async function readInteractionDetail(channel, context, postId, signal, check) {
   check();
-  const page = await channel.transport.readMoments({ accountId: context.accountId, scopeKey: context.scopeKey, query: { action: 'detail', postId } }, signal);
+  const page = await readMomentsWithMemory(channel, { accountId: context.accountId, scopeKey: context.scopeKey, query: { action: 'detail', postId } }, signal, check);
   check(); validatePage(page, context.accountId, 'detail');
+  if (!page.items.length && page.authorizationFilteredCount > 0)
+    throw new ChannelError('OBJECT_NOT_AUTHORIZED', '这条动态的作者未授权，已跳过本次互动。');
   if (page.items.length !== 1 || page.items[0].id !== postId) throw new ChannelError('MOMENTS_INTERACTION_READ', '返回的动态与本次选择不一致');
   return page.items[0];
 }
@@ -44,9 +43,13 @@ export async function readInteractionPool(channel, options, context, signal, che
     const targetCount = options.mode === 'latest' ? options.count : options.poolSize;
     for (let index = 0; index < 10; index++) {
       check();
-      const page = await channel.transport.readMoments({ accountId, scopeKey,
-        query: { ...query, limit: Math.min(20, targetCount - posts.length), ...(cursor ? { cursor } : {}) } }, signal);
+      const page = await readMomentsWithMemory(channel, { accountId, scopeKey,
+        query: { ...query, limit: Math.min(20, targetCount - posts.length), ...(cursor ? { cursor } : {}) } }, signal, check);
       check(); pageCount++; validatePage(page, accountId, query.action, targetUserId); scanned += page.items.length;
+      if (page.selection?.recencyVerified === false) {
+        complete = false;
+        if (options.mode === 'latest') throw new ChannelError('MOMENTS_INTERACTION_READ', '微信仅返回部分可见范围，暂不能核实最新动态，请改为明确选择可见动态或稍后重试');
+      }
       for (const post of page.items) if (!seen.has(post.id)) { seen.add(post.id); if (eligible(post)) posts.push(post); }
       cursor = page.nextCursor;
       if (posts.length >= targetCount || !cursor || page.items.length > 0 && page.items.every(post => post.createdAt * 1000 < threshold)) break;
@@ -66,8 +69,8 @@ export async function interactionOwnComment(channel, context, post, signal, chec
   if (!post.interactionsTruncated && post.commentCount === 0) return false;
   let cursor; const cursors = new Set();
   for (let page = 0; page < 10; page++) {
-    check(); const result = await channel.transport.readMoments({ accountId: context.accountId, scopeKey: context.scopeKey,
-      query: { action: 'comments', postId: post.id, limit: 50, ...(cursor ? { cursor } : {}) } }, signal); check();
+    check(); const result = await readMomentsWithMemory(channel, { accountId: context.accountId, scopeKey: context.scopeKey,
+      query: { action: 'comments', postId: post.id, limit: 50, ...(cursor ? { cursor } : {}) } }, signal, check); check();
     if (result?.accountId !== context.accountId || result.source !== 'wechat-sns-live' || result.action !== 'comments' || result.postId !== post.id || !Array.isArray(result.items) ||
         result.items.some(row => typeof row.userId !== 'string' || !row.userId))
       throw new ChannelError('MOMENTS_INTERACTION_READ', '评论区未完整返回，未判断为尚未评论');

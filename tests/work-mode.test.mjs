@@ -40,19 +40,22 @@ test('work command parsing admits explicit commands and leaves ordinary text to 
     assert.equal(workCommand(text, 'work'), null, text);
   assert.equal(workCommand(undefined, 'work'), null);
 });
-test('administrator group work bypasses chat gates and eager memory injection; result and request stay isolated after restart', async t => {
+test('administrator group work keeps chat context out of the request and exposes memory only through scoped tools', async t => {
   const f = fixture(t), group = { chatType: 'group', peerId: 'work@chatroom', sender: { id: 'admin' } };
   f.store.setConversationSettings(scope.accountId, group.chatType, group.peerId, { ...f.store.conversationSettings(scope.accountId, group.chatType, group.peerId), mode: 'natural', fixedMessages: 100, remoteEnabled: true, adminIds: ['admin'] });
   const fail = () => { throw Error('work entered chat context'); };
   f.channel.runner.run = input => input.mode === 'work-routing' ? fixtureWorkRoute(input) : fail();
   f.channel.context = fail; f.channel.longMemory.capture = fail;
   const snapshot = f.channel.memory.snapshot.bind(f.channel.memory); let snapshots = 0;
-  f.channel.memory.snapshot = (...args) => { snapshots++; return snapshot(...args); };
+  f.channel.memory.snapshot = (owner, requestKey) => {
+    assert.equal(owner.accountId, scope.accountId); assert.equal(owner.chatType, group.chatType);
+    assert.equal(owner.peerId, group.peerId); assert.equal(owner.senderId, group.sender.id); snapshots++;
+    return snapshot(owner, requestKey);
+  };
   f.receive('帮我写一个 Python 脚本', group); await f.channel.whenIdle();
   assert.equal(f.calls.length, 1); assert.equal(f.calls[0].request, '帮我写一个 Python 脚本');
+  assert.equal(snapshots, 1); assert.deepEqual(f.calls[0].memoryTools.map(tool => tool.name), ['wechat_role_card', 'wechat_memory']);
   for (const key of ['persona', 'prompt', 'history', 'memory', 'speaker', 'account']) assert.equal(f.calls[0][key], undefined);
-  assert(snapshots > 0, 'the on-demand memory tool captures the request-time boundary');
-  assert.deepEqual(f.calls[0].memoryTools.map(tool => tool.name), ['wechat_memory']);
   assert.equal(f.store.history(scope.accountId, group.chatType, group.peerId, 100).length, 0);
   assert.equal(f.channel.memory.load({ accountId: scope.accountId, ...group }).entries.length, 0);
   const restored = new StateStore(f.root); assert.equal(restored.history(scope.accountId, group.chatType, group.peerId, 100).length, 0);
@@ -117,7 +120,7 @@ test('the complete SSH experiment request enters work instead of the remote inte
   assert.equal(f.store.history(scope.accountId, target.chatType, target.peerId).length, 0);
 });
 
-test('the reported SSH metric task sends two natural messages, retains evidence and corrects its legacy classification without replay', async t => {
+test('the reported SSH metric task sends one final message, retains evidence and corrects its legacy classification without replay', async t => {
   const request = '使用ssh的链接方式，找到vscode scut2的ssh配置，在dsh中ssh到scut2这台服务器，并查看一下loongrl的八卡实验结果指标';
   const answer = '查到了：八卡训练完成 229 步，最终内部验证正确率 88.37%。LongBench 正确率平均提高 2.20 个百分点，但 F1 下降 11.53 个百分点，奖励正确率与答案质量需要分开看。';
   const f = fixture(t, async input => {
@@ -134,7 +137,7 @@ test('the reported SSH metric task sends two natural messages, retains evidence 
   const job = f.channel.work.list(scope).jobs[0];
   assert.equal(job.state, 'succeeded'); assert.equal(job.delivery.state, 'sent'); assert.equal(job.warnings.length, 2);
   const texts = f.sent.map(payload => payload.message.filter(part => part.type === 'text').map(part => part.data.text).join(''));
-  assert.equal(texts.length, 2); assert.match(texts[0], /拿到结果后发你/); assert.equal(texts[1], answer);
+  assert.equal(texts.length, 2); assert.match(texts[0], /查一下/); assert.equal(texts[1], answer);
   for (const hidden of [job.id, job.cwd, job.sessionId, 'RAW_REMOTE_METRICS', 'RAW_PROBE_ERROR', 'LOCAL_AUXILIARY_CHECK', '实际命令结果', '执行失败'])
     assert(!JSON.stringify(f.sent).includes(hidden), hidden);
   const archive = fs.readFileSync(path.join(job.cwd, '.wechat-work', job.id + '.md'), 'utf8');
@@ -246,14 +249,15 @@ test('revocation stops active and queued tasks, and disconnected work requests f
 });
 test('unknown and partial WeChat results preserve ACKs without automatic resend', async t => {
   let sends = 0;
-  const f = fixture(t, undefined, () => { if (++sends === 1) return { delivery: 'server-ack', serverMessageIds: ['receipt'] };
+  const f = fixture(t, undefined, () => { sends++;
+    if (sends === 1) return { delivery: 'server-ack', serverMessageIds: ['opening-ack'] };
     throw new ChannelError('SEND_PARTIAL', '部分已发送', { delivery: 'partially-acknowledged', acknowledgedMessageIds: ['part-1'] }); });
   f.receive('/work 写代码'); await f.channel.whenIdle(); const job = f.channel.work.list(scope).jobs[0];
   assert.equal(job.state, 'succeeded'); assert.equal(job.delivery.state, 'partial'); assert.deepEqual(job.delivery.acknowledgedMessageIds, ['part-1']);
   const reloaded = new WorkStore(f.store); assert.equal(reloaded.get(job.id).delivery.state, 'partial'); assert.equal(sends, 2);
 });
 test('unconfirmed ACK keeps generation complete and delivery unknown', async t => {
-  let n = 0; const f = fixture(t, undefined, () => ++n === 1 ? { delivery: 'server-ack', serverMessageIds: ['accepted'] } : {});
+  let n = 0; const f = fixture(t, undefined, () => { n++; return n === 1 ? { delivery: 'server-ack', serverMessageIds: ['opening-ack'] } : {}; });
   f.receive('/work 写代码'); await f.channel.whenIdle(); const job = f.channel.work.list(scope).jobs[0];
   assert.equal(job.state, 'succeeded'); assert.equal(job.delivery.state, 'unknown'); assert.equal(n, 2);
 });
@@ -318,10 +322,12 @@ test('work Agent keeps native DSH context, preset and model while adding shared 
     const agent = { session, followup: () => { pending = definitions.find(tool => tool.name === 'wechat_work_exec').execute({ command: 'echo result' }, { agent, signal: options.signal }); }, whenIdle: async () => { await pending; }, cancel() {} };
     await options.setup({ tools: { restrict: () => assert.fail('native work cannot restrict DSH tools'), register: tool => definitions.push(tool), guard() {} }, systemPrompt: {
       suppressRuntimeContext() { assert.fail('native context must stay enabled'); }, section(section) {
-        assert.equal(section.name, 'wechat-work-presentation');
-        assert(section.text.includes('全局语言与言辞边界'));
-        assert(section.text.includes('不改变工具权限和执行判断'));
-        assert(!section.text.includes('这是内部资料处理任务'));
+        assert(['wechat-work-presentation', 'wechat-quiet-tools'].includes(section.name));
+        if (section.name === 'wechat-work-presentation') {
+          assert(section.text.includes('全局语言与言辞边界'));
+          assert(section.text.includes('不改变工具权限和执行判断'));
+          assert(!section.text.includes('这是内部资料处理任务'));
+        } else assert(section.text.includes('静默执行'));
         sections.add(section); return () => sections.delete(section);
       } } }, agent);
     return { agent, dispose: async () => {} };

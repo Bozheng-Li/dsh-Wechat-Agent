@@ -4,8 +4,6 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { rolldown } from 'rolldown';
-import { BuiltinStickerCatalog } from "../modules/media/builtin-stickers.mjs";
-import { inspectAssetImage } from "../modules/media/image-format.mjs";
 import { packageResources } from './package-resources.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -15,12 +13,6 @@ const resources = packageResources(root, manifest);
 const alias = { '@napcat-wechat/protocol': path.join(root, 'backend/wechat/types.ts') };
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const bundledPackages = new Set();
-const builtinStickers = new BuiltinStickerCatalog();
-for (const pack of builtinStickers.packs) for (const item of pack.items) {
-  const image = inspectAssetImage(builtinStickers.read(pack.id, item.id).content);
-  if (image.mediaType !== item.mediaType || image.width !== item.width || image.height !== item.height) throw new Error(`Invalid built-in sticker: ${item.file}`);
-}
-if (!fs.readFileSync(builtinStickers.localFile(builtinStickers.source.licenseFile), 'utf8').includes('Copyright (c) Microsoft Corporation.')) throw new Error('Missing built-in sticker attribution');
 function recordModules(output) {
   for (const chunk of output) {
     if (chunk.type !== 'chunk') continue;
@@ -107,9 +99,6 @@ if (process.argv.includes('--pack')) {
   for (const file of ['lib/index.js', 'lib/client.js', 'lib/worker.cjs', 'cordis.patch.yml', 'README.md']) copy(path.join(pkg, file), path.join(stage, file));
   for (const file of ['LICENSE', 'THIRD_PARTY_NOTICES.md', 'CHANGELOG.md']) copy(path.join(root, file), path.join(stage, file));
   for (const file of resources) copy(path.join(root, file), path.join(stage, file));
-  // Ship only catalogued artwork and its original license, never cached downloads.
-  for (const file of ['manifest.json', builtinStickers.source.licenseFile, ...builtinStickers.packs.flatMap(pack => pack.items.map(item => item.file))])
-    copy(builtinStickers.localFile(file), path.join(stage, 'assets/stickers', file));
   for (const directory of bundledPackages) {
     const dependency = JSON.parse(fs.readFileSync(path.join(directory, 'package.json'), 'utf8'));
     // This npm version omits its upstream license; retain the matching gitHead copy.

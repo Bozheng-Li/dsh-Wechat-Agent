@@ -1,10 +1,11 @@
 import { ChannelError } from './contracts.mjs';
 import { visibleMomentsText } from './moments-publishing.mjs';
+import { TIME_DEFAULTS } from './time-settings.mjs';
 
 export const MATERIAL_ENDPOINTS = ['moments.materials.list', 'moments.materials.save', 'moments.materials.delete',
   'moments.materials.image', 'moments.materials.describe', 'moments.materials.configure', 'moments.materials.organize', 'moments.materials.cancel', 'moments.materials.search', 'moments.materials.download', 'moments.materials.generate'];
 export const MATERIAL_DEFAULTS = Object.freeze({ enabled: false, intervalMinutes: 180, sources: [], webImagesEnabled: false, generatedImagesEnabled: false });
-export const MATERIAL_ORGANIZE_TIMEOUT_MS = 30 * 60 * 1000;
+export const MATERIAL_ORGANIZE_TIMEOUT_MS = TIME_DEFAULTS.momentsMaterialTimeoutMinutes * 60000;
 export const materialId = value => typeof value === 'string' && /^[a-f0-9]{32}$/.test(value);
 export const materialSourceKey = source => source.chatType + ':' + source.peerId;
 const invalid = message => { throw new ChannelError('MOMENTS_MATERIAL_INVALID', message); };

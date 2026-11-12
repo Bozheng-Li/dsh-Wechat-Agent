@@ -1,4 +1,5 @@
 import { date } from "../../shared/peers.mjs";
+import { ScheduleCountdown } from '../../components/schedule-countdown.jsx';
 
 export const taskStates = {
   pending: '等待执行',
@@ -32,7 +33,7 @@ export function TaskBadge({ state }) {
   return <span className={'wa-task-badge is-' + state}><span className="wa-state-mark" aria-hidden="true" />{taskStates[state] || state}</span>;
 }
 
-export function TaskDetails({ task, runs = [] }) {
+export function TaskDetails({ task, runs = [], paused, status }) {
   return (
     <div className="wa-task-detail-content">
       <p className="wa-task-content">{task.content}</p>
@@ -45,8 +46,11 @@ export function TaskDetails({ task, runs = [] }) {
           <span>提醒对象：{task.targets.map((target) => '@' + target.name).join('、')}</span>
         )}
         <span>创建时间：{date(task.createdAt)}</span>
-        <span>
-          {task.state === 'pending' ? '下次计划' : '计划时间'}：{date(task.nextRunAt)}
+        <span className="wa-schedule-time">
+          <span>{task.state === 'pending' ? '下次计划' : '计划时间'}：{date(task.nextRunAt)}</span>
+          {['pending', 'running', 'paused'].includes(task.state) && <ScheduleCountdown
+            at={Math.max(task.nextRunAt, task.retryAt || 0)} running={task.state === 'running'} paused={paused || task.state === 'paused'}
+            status={status} action={task.retryAt > task.nextRunAt ? '重试' : '执行'} />}
         </span>
         {task.state === 'cancelled' && <span>状态更新：{date(task.updatedAt)}</span>}
       </div>

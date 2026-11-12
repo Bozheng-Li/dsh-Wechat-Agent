@@ -9,6 +9,8 @@ import { naturalRemoteRequest } from '../remote/intent/index.mjs';
 import { workCommand } from '../work/commands.mjs';
 import { executionModeCommand } from '../work/modes/commands.mjs';
 import { workAdministrator } from '../work/policy.mjs';
+import { unavailableMessage } from '../../shared/message-content.mjs';
+import { conversationAuthorized } from '../../shared/authorization.mjs';
 
 export function receiveMessage(channel, message, accountId) {
   if (
@@ -24,6 +26,9 @@ export function receiveMessage(channel, message, accountId) {
   const status = channel.transport.status();
   const account = status.account;
   if (!account || account.id !== accountId) return;
+  if (!conversationAuthorized(channel.store, { ...message, accountId }) || channel.authorization?.isCleaning(accountId)) return;
+  // Collecting a sticker must never prevent an ordinary message from arriving.
+  try { void channel.stickers?.capture(accountId, message)?.catch(() => {}); } catch {}
   if (message.direction === 'outgoing' || message.sender.id === account.id) {
     channel.receiveManual(message, accountId);
     return;
@@ -79,6 +84,16 @@ export function receiveMessage(channel, message, accountId) {
       return;
     }
     const observation = { accountId: account.id, message };
+    if (unavailableMessage(message)) {
+      channel.store.remember(key, channel.now(), { ...record, state: 'skipped', contentUnavailable: true,
+        reason: '已记录无法解析的消息占位，等待可读的文字要求' }, observation);
+      return;
+    }
+    if (message.message?.some(segment => segment.type === 'file') &&
+        !message.message.some(segment => segment.type === 'text' && segment.data?.text?.trim() || segment.type === 'reply')) {
+      channel.store.remember(key, channel.now(), { ...record, state: 'skipped', reason: '已记录文件消息；微信附件读取功能已停用' }, observation);
+      return;
+    }
     const parsed = messageText(message, account, { mode, persona });
     const requestedText = parsed.text ?? message.message?.filter(segment => segment.type === 'text').map(segment => segment.data?.text ?? '').join('').trim();
     if (!chatInWorkMode && config.executionMode === 'work' && message.chatType === 'group' &&
@@ -166,7 +181,7 @@ export function receiveMessage(channel, message, accountId) {
       );
       return;
     }
-    if (message.message?.some((segment) => segment.data?.resourceId || segment.type === 'reply' && segment.data?.messageType === 3)) channel.maintainMemory(record);
+    if (message.message?.some(segment => ['image', 'face'].includes(segment.type) && segment.data?.resourceId)) channel.maintainMemory(record);
     if (mode === 'natural') observation.natural = channel.natural.onHuman(record, config, parsed);
     if (mode === 'natural' && !parsed.trigger) {
       const current = channel.store.progress(account.id, message.chatType, message.peerId);

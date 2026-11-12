@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { timeLimitMs, assertOnlyTimeChanges } from '../../shared/time-settings.mjs';
 import { randomUUID } from 'node:crypto';
 import { ChannelError, publicError } from '../../shared/contracts.mjs';
 import { identity } from '../../backend/storage/keys.mjs';
@@ -7,6 +8,7 @@ import { workPath } from '../work/policy.mjs';
 import { assertRemoteAuthorized, remoteAccessReason } from '../remote/authorization/policy.mjs';
 import { interactionAutomationSettings } from '../../shared/moments-interaction-settings.mjs';
 import { resolveMomentsQuery } from './service.mjs';
+import { assertPersonAuthorized } from '../../shared/authorization.mjs';
 
 const key = accountId => identity([accountId]);
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -75,20 +77,22 @@ export class MomentsInteractionSchedule {
       nextRunAt: rule.nextRunAt, lastRun: rule.lastRun ?? null, running, activeId: running ? this.manager.active?.id ?? null : null,
       schedulerStarted: !this.stopped, pausedReason: this.pauseReason(accountId, rule), error: this.error ?? null });
   }
-  async configure(accountId, input, revision, signal, assertAllowed = () => {}, scope) {
+  async configure(accountId, input, revision, signal, assertAllowed = () => {}, scope, { timeOnly = false } = {}) {
     this.access(accountId, scope, signal, assertAllowed);
     const previous = this.rule(accountId);
     if (typeof revision !== 'string' || revision !== previous.revision) fail('MOMENTS_INTERACTION_SETTINGS_CHANGED', '自动互动设置已变化，请刷新最新设置后保存');
     // Validate a patch separately so unknown fields cannot disappear in a merge.
     if (!object(input)) fail('MOMENTS_INTERACTION_SETTINGS_INVALID', '请提供有效的自动互动设置');
     const settings = interactionAutomationSettings({ ...previous.settings, ...input });
-    const actor = this.manager.context(accountId, scope).scope;
-    if (settings.source === 'user' && settings.enabled) {
+    if (timeOnly) assertOnlyTimeChanges('interactions', settings, previous.settings);
+    const actor = timeOnly && previous.scope ? previous.scope : this.manager.context(accountId, scope).scope;
+    if (!timeOnly && settings.source === 'user' && settings.enabled) {
       if (!this.channel.transport.status().online) fail('MOMENTS_UNAVAILABLE', '请在微信连接后核实指定好友，再开启自动互动');
       const resolved = await resolveMomentsQuery(this.channel.transport, { action: 'user', subject: 'contact', user: settings.user }, actor, signal,
         () => this.access(accountId, scope, signal, assertAllowed));
       if (resolved.userId === accountId) fail('MOMENTS_INTERACTION_TARGET', '自动互动仅针对好友，请选择其他联系人');
       settings.user = resolved.userId;
+      assertPersonAuthorized(this.channel.store, accountId, settings.user);
     }
     this.access(accountId, scope, signal, assertAllowed);
     if (this.rule(accountId).revision !== revision) fail('MOMENTS_INTERACTION_SETTINGS_CHANGED', '读取好友期间设置已改变，请刷新后保存');
@@ -130,7 +134,7 @@ export class MomentsInteractionSchedule {
     const captured = structuredClone(rule); this.active = { accountId, rule: captured, cycle, controller };
     rule.activeCycle = cycle; rule.nextRunAt = this.channel.now() + rule.settings.intervalMinutes * 60000;
     try { this.save(); } catch (error) { this.active = undefined; throw error; }
-    this.pending = this.run(accountId, captured, cycle, AbortSignal.any([controller.signal, this.manager.lifetime.signal, AbortSignal.timeout(30 * 60000)]))
+    this.pending = this.run(accountId, captured, cycle, AbortSignal.any([controller.signal, this.manager.lifetime.signal, AbortSignal.timeout(timeLimitMs(this.channel.store, 'momentsInteractionTimeoutMinutes'))]))
       .finally(() => { this.pending = undefined; this.active = undefined; });
     return this.pending;
   }

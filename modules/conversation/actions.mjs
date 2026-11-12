@@ -1,5 +1,6 @@
 import { ChannelError, validateSettings, validateConversationSettings } from "../../shared/contracts.mjs";
 import { absoluteDirectory, sameDirectory } from "../../backend/storage/paths.mjs";
+import { preserveTimeValues } from '../../shared/time-settings.mjs';
 
 export const endpoints = ['storage.save', 'natural.resume', 'conversation.configure', 'settings'];
 
@@ -54,6 +55,7 @@ export async function settingsMutation(
       if (selector.chatType === 'private' && config.mode !== 'default')
         throw new ChannelError('INVALID_CONVERSATION', '昵称唤醒、主动参与和自然陪聊仅适用于群聊');
       const before = store.conversationSettings(selector.accountId, selector.chatType, selector.peerId);
+      if (payload.preserveTimeSettings) config.natural = preserveTimeValues('natural', config.natural, before.natural);
       if (JSON.stringify(before) === JSON.stringify(config)) break;
       const withoutRemote = value => Object.fromEntries(Object.entries(value).filter(([key]) => !['remoteEnabled', 'adminIds'].includes(key)));
       if (JSON.stringify(withoutRemote(before)) === JSON.stringify(withoutRemote(config))) {
@@ -91,8 +93,8 @@ export async function settingsMutation(
         next = validateSettings(payload.settings),
         before = store.settings(account.id);
       if (JSON.stringify(next) !== JSON.stringify(before)) {
-        // Adding a peer changes no existing reply. Revocation affects only
-        // removed peers; account-wide settings affect only this account.
+        // A revocation also cancels account background operations which may
+        // contain this object's sources. Their unrelated data is retained.
         const selectors =
           next.enabled !== before.enabled || next.prompt !== before.prompt
             ? [{ accountId: account.id }]
@@ -111,12 +113,15 @@ export async function settingsMutation(
             currentAccount(payload);
             if (next.prompt !== before.prompt) store.resetSessions({ accountId: account.id });
             store.configure(account.id, next);
+            channel.personMemory.nextScanAt = 0;
+            channel.personMemory.wake(0);
             if (state.discovered?.accountId === account.id)
               store.rememberConversationNames(account.id, state.discovered.contacts);
           },
           selectors
         );
       }
+      await channel.authorization?.whenIdle();
       break;
     }
   }

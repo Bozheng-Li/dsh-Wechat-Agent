@@ -57,9 +57,12 @@ for (const ownership of ['desktop Agent', 'racing desktop Agent', 'writer lock',
     guard: guard => { guards.add(guard); return () => guards.delete(guard); }, restrict: () => assert.fail('native tools must remain') },
     systemPrompt: { section: section => {
       if (desktop) assert.equal(existing.status, 'maintenance');
-      assert.equal(section.name, 'wechat-work-presentation');
-      assert(section.text.includes('全局语言与言辞边界'));
-      assert(section.text.includes('不改变工具权限和执行判断'));
+      if (section.name === 'wechat-quiet-tools') assert(section.text.includes('静默执行'));
+      else {
+        assert.equal(section.name, 'wechat-work-presentation');
+        assert(section.text.includes('全局语言与言辞边界'));
+        assert(section.text.includes('不改变工具权限和执行判断'));
+      }
       presentationSections.add(section); return () => presentationSections.delete(section);
     } } };
   const existing = { status: 'idle', ctx: local,

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import fs from 'node:fs';
+import { stickerPng } from './fixtures/stickers.mjs';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -40,6 +41,18 @@ function setChecksum(encoded, replacement) {
 const encrypted = (body, cmd = 211, uin = account.uin, checksum = 0) => setChecksum(encodeCgiBody(cmd, body, uin, account.token, capture.key, capture.s08), checksum);
 
 const snsAck = (object, ret = 0) => Buffer.concat([ld(1, fv(1, ret)), ...(object ? [ld(2, object)] : [])]);
+test('PC default empty objects are unavailable targets; zero-length wrapped buffers are valid and malformed identities still fail', () => {
+  const empty = Buffer.concat([fv(1, 0), fv(4, 0), ld(5, fv(1, 0)), fv(8, 0), fv(11, 0)]);
+  const query = { action: 'detail', postId: '9007199254740997' };
+  assert.throws(() => momentsResponse(snsAck(empty), query), error => error.code === 'ERR_MOMENTS_TARGET_UNAVAILABLE' &&
+    error.details.postId === query.postId && error.details.reason === 'empty-sns-object');
+  assert.throws(() => momentsResponse(snsAck(empty, -2), query), error => error.code === 'ERR_MOMENTS_REJECTED' && error.details.ret === -2);
+  for (const bad of [Buffer.concat([fv(1, BigInt(query.postId)), fv(4, 0), ld(5, fv(1, 0))]),
+    Buffer.concat([empty, ld(2, 'another-author')]), Buffer.concat([empty, fv(1, 0)])])
+    assert.throws(() => momentsResponse(snsAck(bad), query), { code: 'ERR_MOMENTS_PROTOCOL' });
+  const withoutContent = post({ content: false });
+  assert.equal(parseSnsObject(Buffer.concat([withoutContent, ld(5, fv(1, 0))])).contentAvailable, false);
+});
 const uploadAck = (clientId, total, end, ret = 0) => Buffer.concat([ld(1, fv(1, ret)), fv(2, end), fv(3, total), ld(4, clientId),
   ld(5, ld(1, 'https://mmsns.qpic.cn/private/0?token=UPLOAD_SECRET')), fv(6, 1), ld(7, ld(1, 'https://mmsns.qpic.cn/private/150?token=THUMB_SECRET')), fv(9, 2)]);
 const snsComment = (id, text = '真好看') => Buffer.concat([ld(1, account.wxid), ld(5, text), fv(6, 1700000001), fv(12, BigInt(id))]);
@@ -451,14 +464,33 @@ test('SNS photo URLs remain private and a read fetches only images from the fres
   await assert.rejects(reader.readImages({ postId: value.postId, url: calls[0].url }, 'actor-a', new AbortController().signal), { code: 'ERR_INVALID_MOMENTS_QUERY' });
 });
 
-test('SNS picture reading stops on account changes and never returns partial success', async () => {
+test('SNS picture reading discards old-account content but records ordinary image failures', async () => {
   let current = account, calls = 0;
   const reader = new MomentsReader(() => current, () => {}, async () => ({ items: [parseSnsObject(post())] }));
   await assert.rejects(reader.readImages({ postId: '18446744073709551610' }, 'actor', new AbortController().signal, async source => {
     calls++; current = { ...account, token: 'changed' }; return { index: source.index, mediaId: source.mediaId, bytes: 1, data: 'x' };
   }), { code: 'ERR_MOMENTS_ACCOUNT_CHANGED' });
   assert.equal(calls, 1); current = account;
-  await assert.rejects(reader.readImages({ postId: '18446744073709551610' }, 'actor', new AbortController().signal, async () => { throw Error('download failed'); }));
+  const failed=await reader.readImages({ postId: '18446744073709551610' }, 'actor', new AbortController().signal, async () => { throw Error('download failed SECRET_CDN_TOKEN'); });
+  assert.equal(failed.complete,false);assert.equal(failed.items[0].error.code,'ERR_MOMENTS_IMAGE_READ');assert(!JSON.stringify(failed).includes('SECRET_CDN_TOKEN'));
+});
+
+test('nine SNS downloads keep their order and preserve usable photos after a single failure or the total byte limit',async()=>{
+  const id='18446744073709551610',media=Array.from({length:9},(_,index)=>`<media><id>photo-${index+1}</id><type>2</type><url>https://mmsns.qpic.cn/private-${index+1}?token=SECRET_CDN_TOKEN</url></media>`).join('');
+  const xml=`<TimelineObject><id>${id}</id><username>${account.wxid}</username><contentDesc>旅行</contentDesc><ContentObject><mediaList>${media}</mediaList></ContentObject></TimelineObject>`;
+  const reader=new MomentsReader(()=>account,()=>{},async()=>({items:[parseSnsObject(post({id,xml}))]})),calls=[];
+  const value=await reader.readImages({postId:id},'actor',new AbortController().signal,async(source,signal)=>{
+    calls.push(source.index);assert(!signal.aborted);if(source.index===5)throw Error(source.url);
+    return {index:source.index,mediaId:source.mediaId,bytes:5,data:'pixels'};
+  });
+  assert.equal(value.complete,false);assert.deepEqual(calls,[1,2,3,4,5,6,7,8,9]);assert.equal(value.items.length,9);
+  assert.deepEqual(value.items.filter(item=>!item.error).map(item=>item.index),[1,2,3,4,6,7,8,9]);
+  assert.equal(value.items[4].error.code,'ERR_MOMENTS_IMAGE_READ');assert(!JSON.stringify(value).includes('SECRET_CDN_TOKEN'));
+  const limited=await reader.readImages({postId:id},'actor',new AbortController().signal,async source=>({index:source.index,mediaId:source.mediaId,bytes:10*1024*1024,data:'pixels'}));
+  assert.equal(limited.items.filter(item=>!item.error).length,3);assert.equal(limited.items.filter(item=>item.error).length,6);assert.equal(limited.complete,false);
+  const controller=new AbortController();let downloads=0;
+  await assert.rejects(reader.readImages({postId:id},'actor',controller.signal,async source=>{downloads++;controller.abort();return {index:source.index,mediaId:source.mediaId,bytes:5,data:'pixels'};}));
+  assert.equal(downloads,1);
 });
 
 test('SNS image download validates the host, refuses redirects and never exposes credential URLs in errors', async () => {
@@ -470,7 +502,7 @@ test('SNS image download validates the host, refuses redirects and never exposes
     assert.equal(options.redirect, 'error'); throw Error(source.url);
   }), error => error.code === 'ERR_MOMENTS_IMAGE_READ' && !error.message.includes('PRIVATE_TOKEN'));
   await assert.rejects(api.downloadSnsImage(source, signal, async () => new Response('encrypted bytes')), { code: 'ERR_MOMENTS_IMAGE_READ' });
-  const png = fs.readFileSync(path.join(root, 'assets/stickers', fs.readdirSync(path.join(root, 'assets/stickers'), { recursive: true }).find(file => file.endsWith('.png'))));
+  const png = stickerPng();
   const value = await api.downloadSnsImage(source, signal, async () => new Response(png));
   assert.equal(value.mediaType, 'image/png'); assert.equal(value.sha256, createHash('sha256').update(png).digest('hex'));
   assert(!JSON.stringify(value).includes('PRIVATE_TOKEN'));

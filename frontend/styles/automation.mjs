@@ -133,7 +133,7 @@ export const automationCss = `
 .wa-panel .wa-task-tools{display:flex;gap:8px;padding-bottom:8px;min-width:0;max-width:470px}
 .wa-panel .wa-task-tools>input{flex:1;min-width:130px;width:240px;max-width:100%}
 .wa-panel .wa-task-tools>select{flex:0 1 180px;min-width:110px;width:160px}
-.wa-panel .wa-task-list-heading,.wa-panel .wa-task-main{display:grid;grid-template-columns:minmax(0,1fr) 128px 94px 162px;gap:20px;align-items:center}
+.wa-panel .wa-task-list-heading,.wa-panel .wa-task-main{display:grid;grid-template-columns:minmax(0,1fr) 156px 94px 162px;gap:20px;align-items:center}
 .wa-panel .wa-task-list-heading{padding:0 0 11px;font-size:11px;color:var(--wa-muted)}
 .wa-panel .wa-task-list-heading>span:last-child{text-align:right}
 .wa-panel .wa-task{border:0;border-top:1px solid var(--wa-border-soft);border-radius:0;background:transparent;padding:20px 0;min-width:0}
@@ -383,7 +383,7 @@ export const automationCss = `
  .wa-panel .wa-task-toolbar{align-items:flex-start;gap:16px;flex-direction:column}
  .wa-panel .wa-task-tools{width:100%;max-width:none;padding-bottom:12px}
  .wa-panel .wa-task-tools>input{width:auto}.wa-panel .wa-task-tools>select{flex-basis:190px}
- .wa-panel .wa-task-list-heading,.wa-panel .wa-task-main{grid-template-columns:minmax(0,1fr) 115px 90px;gap:16px}
+ .wa-panel .wa-task-list-heading,.wa-panel .wa-task-main{grid-template-columns:minmax(0,1fr) 156px 90px;gap:16px}
  .wa-panel .wa-task-list-heading>span:last-child{display:none}
  .wa-panel .wa-task-actions{grid-column:2/4;justify-content:flex-start;align-items:center;margin-top:-4px}
  .wa-panel .wa-task-main>.wa-task-heading{grid-row:span 2}

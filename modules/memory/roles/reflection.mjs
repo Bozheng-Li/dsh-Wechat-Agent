@@ -72,7 +72,7 @@ export async function reviewMemoryDraft(runner, input, draft, { signal, assertAl
       listener = () => reject(combined.reason);
       if (combined.aborted) listener(); else combined.addEventListener('abort', listener, { once: true });
     });
-    const result = await Promise.race([runner.run({ signal: combined, mode: 'long-memory', tools: [],
+    const result = await Promise.race([runner.run({ signal: combined, mode: 'reply-review', tools: [],
       systemOverride: ROLE_MEMORY_REVIEW, assertAllowed,
       text: JSON.stringify({ recipient: input.speaker || null, group: !!input.group,
         question: input.text, draft, reviewFocus: flags, persona: input.persona,

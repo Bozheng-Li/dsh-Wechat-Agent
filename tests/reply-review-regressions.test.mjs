@@ -9,7 +9,7 @@ function fixture(t) {
   const parent = fs.realpathSync(os.tmpdir()), root = fs.mkdtempSync(path.join(parent, 'wechat-reply-review-'));
   const scope = { accountId: 'review-owner', chatType: 'group', peerId: 'review-room@chatroom' };
   const store = new StateStore(root), sent = [], calls = [];
-  store.configure(scope.accountId, { enabled: true, groups: [scope.peerId], privatePeers: [], prompt: '' });
+  store.configure(scope.accountId, { enabled: true, groups: [scope.peerId], privatePeers: ['alice'], prompt: '' });
   store.setPersona({ name: '桃枝', aliases: [], prompt: '自然轻快地回应。' });
   let now = Date.now(), sequence = 0;
   const runner = { run: async request => { calls.push(request); return { text: '好呀。' }; } };

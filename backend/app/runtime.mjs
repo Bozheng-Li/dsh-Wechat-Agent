@@ -8,6 +8,7 @@ import { AgentIdentity } from "../../modules/agent/identity.mjs";
 import { protectStorage } from "../wechat/paths.ts";
 import { sameDirectory } from "../storage/paths.mjs";
 import { prepareAgentWorkspace, registerAgentWorkspace } from '../../modules/agent/workspace.mjs';
+import { timeLimitMs } from '../../shared/time-settings.mjs';
 
 /** A complete set of root-bound services; no object is retargeted in place. */
 export class WechatRuntime {
@@ -25,32 +26,44 @@ export class WechatRuntime {
         () => ({
           persona: this.store.persona(),
           modelConfig: this.store.modelConfig(),
+          timeSettings: this.store.config.section('timeSettings'),
           workspacePath: prepareAgentWorkspace(this.store.ensureWorkspace()),
           identityMarkdown: this.identity.view().markdown,
         })
       );
-      this.worker = new WorkerClient(root, resources);
+      this.worker = new WorkerClient(root, resources, { getPublishTimeoutMs: () => timeLimitMs(this.store, 'momentsPublishTimeoutMinutes') + 15000 });
       ownerLock.worker(this.worker.child.pid);
       this.lock?.worker(this.worker.child.pid);
-      this.channel = new WechatChannel({ store: this.store, runner: this.runner, transport: this.worker });
-      this.scheduler = new TaskScheduler({ store: this.store, channel: this.channel });
-      this.channel.scheduler = this.scheduler;
-      this.scheduler.stopped = true;
-      this.worker.on('message', (message, accountId) => this.channel.receive(message, accountId));
-      let wasOnline = false;
-      this.worker.on('status', () => {
-        const online = this.worker.status().online;
-        if (!signal.aborted && !this.channel.closed && wasOnline && !online) {
-          try {
-            this.channel.natural.disconnected();
-            this.channel.cancel('微信连接已断开，未继续回复', undefined, { resetNatural: false });
-          } catch (error) {
-            this.channel.fail(error);
+      // Receive the worker handshake before synchronous archive loading/cleanup can
+      // occupy the event loop long enough for its startup deadline to fire first.
+      this.servicesReady = this.worker.ready.then(() => {
+        signal.throwIfAborted();
+        if (this.closing) throw new Error('微信插件正在停止');
+        this.channel = new WechatChannel({ store: this.store, runner: this.runner, transport: this.worker });
+        this.scheduler = new TaskScheduler({ store: this.store, channel: this.channel });
+        this.channel.scheduler = this.scheduler;
+        this.scheduler.stopped = true;
+        this.worker.on('message', (message, accountId) => this.channel.receive(message, accountId));
+        let wasOnline = false, roleAccountId;
+        this.worker.on('status', () => {
+          const status = this.worker.status(), online = status.online, accountId = status.account?.id;
+          if (!signal.aborted && !this.channel.closed && wasOnline && !online) {
+            try {
+              this.channel.natural.disconnected();
+              this.channel.cancel('微信连接已断开，未继续回复', undefined, { resetNatural: false });
+            } catch (error) {
+              this.channel.fail(error);
+            }
           }
-        }
-        wasOnline = online;
-        if (online && !signal.aborted) this.channel.checkMemoryPressure();
+          if (online && !signal.aborted && (!wasOnline || roleAccountId !== accountId)) {
+            this.channel.personMemory.nextScanAt = 0;
+            this.channel.personMemory.wake(0);
+            this.channel.checkMemoryPressure();
+          }
+          wasOnline = online; roleAccountId = accountId;
+        });
       });
+      void this.servicesReady.catch(() => {});
     } catch (error) {
       this.initializationError = error;
       this.worker?.ready.catch(() => {});
@@ -58,7 +71,8 @@ export class WechatRuntime {
   }
   async ready() {
     if (this.initializationError) throw this.initializationError;
-    await this.worker.ready;
+    await this.servicesReady;
+    await this.channel.authorization.whenIdle().catch(() => {});
     this.signal.throwIfAborted();
     await registerAgentWorkspace(this.ctx, prepareAgentWorkspace(this.store.ensureWorkspace()));
     await registerAgentWorkspace(this.ctx, this.store.ensureWorkspace(), 'work');

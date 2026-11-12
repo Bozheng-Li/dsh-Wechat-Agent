@@ -10,7 +10,7 @@ module.exports = async function verifyBatchAuthorization({ evaluate, waitFor, cl
     selectedCount = main + ' [data-testid="authorization-selection-count"]',
     row = id => '.wa-session-list .wa-session-row[data-peer-id="' + id + '"]',
     checkbox = id => row(id) + ' input[type="checkbox"]';
-  const idle = () => waitFor(() => isUsable(document.querySelector('[aria-label="启用自动回复"]')));
+  const idle = () => waitFor(() => document.querySelector('[data-selection-scope="main"] [data-testid="authorization-grant-selected"]'));
   const requests = async () => (await fixture('stats')).settingsRequests;
   const expectSelection = async count => waitFor(count => document.querySelector('[data-selection-scope="main"] [data-testid="authorization-selection-count"]')?.textContent.trim().startsWith('已选 ' + count + ' 个'), [count]);
   const original = await fixture('state');
@@ -21,6 +21,15 @@ module.exports = async function verifyBatchAuthorization({ evaluate, waitFor, cl
   await click('[data-testid="nav-authorization"]');
   await waitFor(selector => document.querySelector(selector), [selectAll]);
   await idle(); await expectSelection(0);
+  await fixture('authorizationCleanupState', { pendingCount: 2 });
+  await waitFor(() => [...document.querySelectorAll('[role="status"]')].some(node => node.textContent.includes('正在清空 2 个撤销对象的数据，相关操作已停止')));
+  await fixture('authorizationCleanupState', { pendingCount: 2, error: '授权已撤销，部分数据清理未完成：模拟文件占用' });
+  await waitFor(() => [...document.querySelectorAll('[role="alert"]')].some(node => node.textContent.includes('模拟文件占用') && node.textContent.includes('后台会自动重试')));
+  await screenshot('authorization-cleanup-retry-light', 'light');
+  assert(!await evaluate(() => [...document.querySelectorAll('[role="status"]')].some(node => node.textContent.includes('正在清空 2 个撤销对象的数据'))));
+  await fixture('authorizationCleanupState', { pendingCount: 0 });
+  await waitFor(() => ![...document.querySelectorAll('[role="alert"], [role="status"]')].some(node => node.textContent.includes('模拟文件占用') || node.textContent.includes('正在清空 2 个撤销对象的数据')));
+  check('revocation cleanup shows the pending count, preserves a retry error and clears the notice after completion');
   assert.equal(await evaluate(() => !!document.querySelector('[data-testid="authorization-grant-all"], [data-testid="authorization-revoke-all"]')), false);
   for (const selector of [grantSelected, revokeSelected]) assert.equal(await evaluate(selector => document.querySelector(selector).disabled, selector), true);
   assert.equal(await evaluate(() => document.querySelectorAll('.wa-session-list .wa-session-row').length), 5);
@@ -136,7 +145,8 @@ module.exports = async function verifyBatchAuthorization({ evaluate, waitFor, cl
   await idle(); await expectSelection(0);
   const restored = await fixture('state');
   assert.deepEqual(restored.settings.privatePeers, discoveredPrivate); assert.deepEqual(restored.settings.groups, discoveredGroups);
-  assert.deepEqual(restored.conversations.filter(item => item.recordCount).map(item => ({ peerId:item.peerId,config:item.config,recordCount:item.recordCount })), retained);
+  assert(retained.length > 0, 'the fixture begins with local conversation history');
+  assert.equal(restored.conversations.filter(item => item.recordCount).length, 0, 'revocation must permanently clear the prior local conversations before regranting');
   check('each tab supports explicit select-all before its batch action; undiscovered unselected peers, reply settings, records and conversation settings are preserved');
 
   await input('[data-testid="add-conversation-name"]', '李');
@@ -186,7 +196,7 @@ module.exports = async function verifyBatchAuthorization({ evaluate, waitFor, cl
   await fixture('holdNext',{endpoint:'settings'}); await click(revokeSelected);
   await waitFor(async () => (await window.__uiFixture('heldRequest',{endpoint:'settings'})).started);
   await fixture('switchAccount'); await fixture('releaseRequest',{endpoint:'settings'});
-  await waitFor(() => document.querySelector('[aria-label="启用自动回复"]')?.checked === false && document.querySelector('#wa-authorization-tab-authorized .wa-tab-count')?.textContent === '2');
+  await waitFor(() => document.querySelector('.wa-auth-toggle')?.dataset.enabled === 'false' && document.querySelector('#wa-authorization-tab-authorized .wa-tab-count')?.textContent === '2');
   await idle(); await expectSelection(0);
   assert.equal(await evaluate(() => document.querySelectorAll('.wa-session-select input:checked').length),0);
   assert.deepEqual((await fixture('stats')).firstAccountSettings,firstAccountSettings);

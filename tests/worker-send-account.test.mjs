@@ -39,6 +39,19 @@ const mocks = {
     }
     async readMoments() { throw Object.assign(new Error('这条动态暂不可读取（ret=-2）'), { code: 'ERR_MOMENTS_REJECTED', details: { ret: -2, rawPacket: 'PRIVATE_PACKET' } }); }
     async readMomentsPublication(query) { return { accountId: this.session.value.wxid, postId: query.postId, readOnly: true }; }
+    receivedFileContext(query) {
+      if (query.accountId !== this.session.value.wxid) throw new Error('Backend must not run for a stale account');
+      return { files: [{ messageId: '9007199254740999', name: 'fixture.docx', bytes: 3 }],
+        ...(query.peerId === 'uncertain@chatroom' ? { latestUnavailable: true } : {}) };
+    }
+    async downloadFile(query, signal) {
+      signal.throwIfAborted();
+      if (query.accountId !== this.session.value.wxid) throw new Error('Backend must not run for a stale account');
+      if (query.peerId === 'expired@chatroom') throw Object.assign(new Error('微信未提供该附件（ret=-2），文件可能已过期'),
+        { code: 'ERR_FILE_DOWNLOAD_REJECTED', details: { rawPacket: 'PRIVATE_PACKET', attachId: 'PRIVATE_LOCATOR' } });
+      if (query.peerId === 'changed@chatroom') this.session.value = { ...this.session.value, token: 'new-session' };
+      return { messageId: query.messageId, name: 'fixture.docx', bytes: 3, data: 'YWJj', sha256: 'a'.repeat(64) };
+    }
     async close() {}
   }`,
   './protocol/login.ts': `export class QrLoginManager { status() { return { state: 'idle' }; } async close() {} }`,
@@ -105,6 +118,23 @@ test('worker refuses sending when no account is logged in', async t => {
   assert.equal((await f.call('status')).value.sent, 0);
 });
 
+test('retired attachment IPC rejects current and stale callers without exposing files', async t => {
+  const f = await workerFixture(t), query = { peerId: 'files@chatroom', before: Date.now(), messageId: '9007199254740999' };
+  for (const accountId of [undefined, 'stale-account', 'worker-current-account']) for (const action of ['list', 'download']) {
+    const result = await f.call('files', { ...query, accountId, action });
+    assert.equal(result.ok, false); assert.equal(result.error.code, 'FILE_FEATURE_DISABLED'); assert.equal(result.value, undefined);
+  }
+});
+
+test('retired attachment IPC returns a short error before invoking the download backend', async t => {
+  const f = await workerFixture(t), query = { accountId: 'worker-current-account', action: 'download', before: Date.now(), messageId: '9007199254740999' };
+  const expired = await f.call('files', { ...query, peerId: 'expired@chatroom' });
+  assert.equal(expired.ok, false); assert.equal(expired.error.code, 'FILE_FEATURE_DISABLED'); assert.equal(expired.error.message, '微信附件读取功能已停用');
+  assert(!JSON.stringify(expired).includes('PRIVATE_'));
+  const changed = await f.call('files', { ...query, peerId: 'changed@chatroom' });
+  assert.equal(changed.ok, false); assert.equal(changed.error.code, 'FILE_FEATURE_DISABLED'); assert.equal(changed.value, undefined);
+});
+
 test('worker preserves per-part ACK and uncertainty across IPC without serializing transport internals', async t => {
   const f = await workerFixture(t);
   const response = await f.call('send', { accountId: 'worker-current-account', ...message, peerId: 'partial@chatroom' });
@@ -131,7 +161,7 @@ test('unexpected protocol text and nonnumeric status remain private at the worke
 
 test('SNS read IPC retains a numeric rejection and verifies own-publication read scope without any send', async t => {
   const f = await workerFixture(t), accountId = 'worker-current-account', scopeKey = 'owner:worker-current-account';
-  const result = await f.call('moments.read', { accountId, scopeKey, query: { action: 'comments', postId: '9007199254740999' } });
+  const result = await f.call('moments.read', { accountId, scopeKey, authorizedUserIds: ['friend'], query: { action: 'comments', postId: '9007199254740999' } });
   assert.equal(result.ok, false); assert.equal(result.error.details.ret, -2); assert(!JSON.stringify(result).includes('PRIVATE_PACKET'));
   const read = await f.call('moments.publication', { accountId, scopeKey, query: { postId: '9007199254740999' } });
   assert.equal(read.ok, true); assert.equal(read.value.readOnly, true);
@@ -141,7 +171,7 @@ test('SNS read IPC retains a numeric rejection and verifies own-publication read
 });
 
 test('SNS publication uncertainty crosses IPC only as validated metadata and never includes raw response credentials', async t => {
-  const f = await workerFixture(t), args = { accountId: 'worker-current-account', clientId: 'sns_' + 'b'.repeat(64), query: { action: 'publish', text: 'valid' } };
+  const f = await workerFixture(t), args = { accountId: 'worker-current-account', clientId: 'sns_' + 'b'.repeat(64), authorizedUserIds: ['friend'], query: { action: 'publish', text: 'valid' } };
   const result = await f.call('moments.write', args);
   assert.equal(result.ok, false); assert.equal(result.error.details.snsDelivery, 'unknown');
   assert.equal(result.error.details.publication.postId, '9007199254740999');
@@ -155,9 +185,10 @@ test('SNS write IPC refuses stale accounts and invalid request IDs, and preserve
   const f = await workerFixture(t), clientId = 'sns_' + 'a'.repeat(64), query = { action: 'like', postId: '9007199254740999' };
   assert.equal((await f.call('moments.write', { accountId: 'other', clientId, query })).error.code, 'ACCOUNT_CHANGED');
   assert.equal((await f.call('moments.write', { accountId: 'worker-current-account', clientId: 'invalid', query })).error.code, 'ERR_INVALID_MOMENTS_WRITE');
-  const success = await f.call('moments.write', { accountId: 'worker-current-account', clientId, query });
+  assert.equal((await f.call('moments.write', { accountId: 'worker-current-account', clientId, query })).error.code, 'OBJECT_NOT_AUTHORIZED');
+  const success = await f.call('moments.write', { accountId: 'worker-current-account', clientId, authorizedUserIds: ['friend'], query });
   assert.equal(success.ok, true); assert.equal(success.value.postId, query.postId); assert.equal(success.value.clientId, clientId);
-  const rejected = await f.call('moments.write', { accountId: 'worker-current-account', clientId, query: { action: 'rejected' } });
+  const rejected = await f.call('moments.write', { accountId: 'worker-current-account', clientId, authorizedUserIds: ['friend'], query: { action: 'rejected' } });
   assert.equal(rejected.error.code, 'ERR_MOMENTS_WRITE_REJECTED'); assert.equal(rejected.error.details.snsDelivery, 'rejected');
   assert(!JSON.stringify(rejected).includes('PRIVATE_PACKET')); assert.equal((await f.call('status')).value.sent, 0);
 });

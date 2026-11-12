@@ -184,10 +184,10 @@ test('feature defaults come from YAML and feature indices contain only runtime m
   assert(!Object.hasOwn(JSON.parse(fs.readFileSync(path.join(imageView.path, 'index.json'), 'utf8')), 'settings'));
   const media = new MediaLibrary(store);
   t.after(() => media.close());
-  assert.deepEqual(media.list(account).settings, { enabled: false, probability: 5, minGapMessages: 8 });
+  assert.deepEqual(media.list(account).settings, { enabled: false, probability: 5, minGapMessages: 8, captureIncoming: true, preferNative: true, autoDescribe: true });
   media.configure(account, { enabled: true, probability: 9, minGapMessages: 2 });
   assert(!Object.hasOwn(JSON.parse(fs.readFileSync(media.indexFile, 'utf8')).accounts[account], 'settings'));
-  assert.deepEqual(readConfig(root).media[account].settings, { enabled: true, probability: 9, minGapMessages: 2 });
+  assert.deepEqual(readConfig(root).media[account].settings, { enabled: true, probability: 9, minGapMessages: 2, captureIncoming: true, preferNative: true, autoDescribe: true });
   editConfig(root, config => { config.memory.retentionDays = 8; });
   assert.throws(() => images.configure(scope, { enabled: true, retentionDays: 20 }), { code: 'CONFIG_CHANGED' });
 });

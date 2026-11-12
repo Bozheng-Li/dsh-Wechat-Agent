@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-wechat-agent",
-  "version": "0.2.0-preview.10",
+  "version": "0.2.0-preview.11",
   "description": "DeepSeek Harness 微信 Agent：统一拟人助手、自然聊天、持久记忆、按需看图、定时提醒与联网搜索",
   "keywords": [
     "dsh-plugin",
@@ -24,7 +24,6 @@
     "lib/index.js",
     "lib/client.js",
     "lib/worker.cjs",
-    "assets/stickers",
     "runtime",
     "cordis.patch.yml",
     "README.md",
@@ -54,6 +53,7 @@
     "prompts/work/dialogue.md",
     "prompts/work/dialogue-tools.json",
     "prompts/work/tools.json",
+    "prompts/files/tools.json",
     "prompts/work/result-polish.md",
     "prompts/work/progress.md",
     "prompts/work/routing.md",

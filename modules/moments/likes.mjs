@@ -1,10 +1,13 @@
 import fs from 'node:fs';
+import { timeLimitMs, assertOnlyTimeChanges } from '../../shared/time-settings.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { atomicJson } from '../../backend/storage/atomic-json.ts';
 import { ChannelError, publicError } from '../../shared/contracts.mjs';
 import { momentsId } from '../../shared/moments.mjs';
 import { momentsLikeSettings, momentsLikeUserId } from '../../shared/moments-likes.mjs';
 import { workPath } from '../work/policy.mjs';
+import { readMomentsWithMemory } from './read.mjs';
+import { assertPersonAuthorized } from '../../shared/authorization.mjs';
 
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -49,11 +52,11 @@ export class MomentsLikes {
     try { atomicJson(this.file(), this.data); }
     catch { this.error = '自动点赞记录保存失败，已停止点赞，请检查磁盘和目录权限'; this.controller?.abort(); throw new ChannelError('STATE_WRITE_FAILED', this.error); }
   }
-  check(accountId, signal) {
+  check(accountId, signal, allowOffline = false) {
     signal?.throwIfAborted();
     if (this.error) throw new ChannelError('MOMENTS_LIKE_STATE_INVALID', this.error);
     const status = this.channel.transport.status();
-    if (!momentsLikeUserId(accountId) || this.closed || this.channel.closed || this.channel.fault || !status.online || status.account?.id !== accountId)
+    if (!momentsLikeUserId(accountId) || this.closed || this.channel.closed || this.channel.fault || !allowOffline && !status.online || status.account?.id !== accountId)
       throw new ChannelError('ACCOUNT_CHANGED', '微信账号、连接或运行状态已变化，未继续自动点赞');
   }
   rule(accountId) { return (typeof accountId === 'string' ? this.data.accounts[hash(accountId)] : undefined) ?? { accountId, settings: momentsLikeSettings(), enabledAt: 0, nextRunAt: 0, revision: '' }; }
@@ -68,11 +71,13 @@ export class MomentsLikes {
       today: this.today(accountId), lastRun: runs[0] ?? null, runs: runs.slice(0, 100),
       records: Object.values(this.data.records).reverse().filter(record => record.accountId === accountId && !record.historyDeleted).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 100) });
   }
-  configure(accountId, input) {
-    this.check(accountId);
+  configure(accountId, input, { timeOnly = false } = {}) {
+    this.check(accountId, undefined, timeOnly);
     if (!object(input)) throw new ChannelError('MOMENTS_LIKE_SETTINGS_INVALID', '请填写自动点赞设置');
     const previous = this.rule(accountId), settings = momentsLikeSettings({ ...previous.settings, ...input });
+    if (timeOnly) assertOnlyTimeChanges('likes', settings, previous.settings);
     if (settings.userIds.includes(accountId)) throw new ChannelError('MOMENTS_LIKE_SETTINGS_INVALID', '自动点赞请选择好友，不能选择当前登录账号');
+    for (const userId of settings.userIds) assertPersonAuthorized(this.channel.store, accountId, userId);
     const changedFriends = hash([...settings.userIds].sort()) !== hash([...previous.settings.userIds].sort());
     if (this.activeAccount === accountId) this.controller?.abort(new ChannelError('MOMENTS_LIKE_SETTINGS_CHANGED', '点赞设置已变更，旧轮次已停止'));
     this.data.accounts[hash(accountId)] = { accountId, settings, revision: randomUUID(),
@@ -130,7 +135,7 @@ export class MomentsLikes {
     if (rule.settings.enabled) this.data.accounts[hash(accountId)].nextRunAt = this.now() + rule.settings.intervalMinutes * 60000;
     this.save();
     this.activeAccount = accountId; this.activeRunId = id; this.activeRule = rule; this.activeSource = source; this.controller = new AbortController();
-    const combined = AbortSignal.any([this.controller.signal, AbortSignal.timeout(300000), ...(signal ? [signal] : [])]);
+    const combined = AbortSignal.any([this.controller.signal, AbortSignal.timeout(timeLimitMs(this.channel.store, 'momentsLikeTimeoutMinutes')), ...(signal ? [signal] : [])]);
     this.pending = this.run(accountId, rule, run, combined).finally(() => {
       this.pending = undefined; this.controller = undefined; this.activeAccount = undefined; this.activeRunId = undefined; this.activeRule = undefined; this.activeSource = undefined;
     }).then(() => this.list(accountId));
@@ -145,8 +150,8 @@ export class MomentsLikes {
         let cursor; const cursors = new Set();
         for (let page = 0; page < 5; page++) {
           check(); if (exhausted()) break outer;
-          const result = await this.channel.transport.readMoments({ accountId, scopeKey: 'moments-likes:' + accountId,
-            query: { action: 'user', userId, limit: 20, ...(cursor ? { cursor } : {}) } }, signal); check();
+          const result = await readMomentsWithMemory(this.channel, { accountId, scopeKey: 'moments-likes:' + accountId,
+            query: { action: 'user', userId, limit: 20, ...(cursor ? { cursor } : {}) } }, signal, check); check();
           if (result?.accountId !== accountId || result.action !== 'user' || result.userId !== userId || result.source !== 'wechat-sns-live' || !Array.isArray(result.items) ||
               result.items.length > 20 || result.items.some(post => !momentsId(post.id) || post.author?.userId !== userId || !timestamp(post.createdAt) || post.createdAt === 0 ||
                 typeof post.deleted !== 'boolean' || typeof post.likedByCurrentAccount !== 'boolean' || typeof post.contentAvailable !== 'boolean') ||

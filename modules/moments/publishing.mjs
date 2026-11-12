@@ -1,11 +1,12 @@
 import fs from 'node:fs';
+import { timeLimitMs, timeDurationLabel, assertOnlyTimeChanges } from '../../shared/time-settings.mjs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { atomicJson } from '../../backend/storage/atomic-json.ts';
 import { atomicBytes } from '../../backend/storage/atomic-text.mjs';
 import { ChannelError, publicError } from '../../shared/contracts.mjs';
 import { momentsPublishingSettings, momentsPlanSettings, momentsPlanId, momentsRunId, nextMomentsOccurrence, visibleMomentsText,
-  MOMENTS_PUBLISH_TIMEOUT_MS, MOMENTS_TEXT_FALLBACK_RESERVE_MS } from '../../shared/moments-publishing.mjs';
+  MOMENTS_TEXT_FALLBACK_RESERVE_MS } from '../../shared/moments-publishing.mjs';
 import { workPath } from '../work/policy.mjs';
 import { momentsImage } from './media.mjs';
 import { generateMomentsContent, similarMomentsText } from './publishing-content.mjs';
@@ -60,11 +61,11 @@ export class MomentsPublishing {
     try { atomicJson(this.file(), this.data); }
     catch { this.error = '自动发布记录保存失败，已停止发布，请检查磁盘与目录权限'; this.controller?.abort(); throw new ChannelError('STATE_WRITE_FAILED', this.error); }
   }
-  check(accountId, signal) {
+  check(accountId, signal, allowOffline = false) {
     signal?.throwIfAborted();
     if (this.error) throw new ChannelError('MOMENTS_PUBLISH_STATE', this.error);
     const status = this.channel.transport.status();
-    if (this.channel.closed || this.channel.fault || !status.online || status.account?.id !== accountId) throw new ChannelError('ACCOUNT_CHANGED', '微信账号、连接或运行状态已变化，未继续自动发布');
+    if (this.channel.closed || this.channel.fault || !allowOffline && !status.online || status.account?.id !== accountId) throw new ChannelError('ACCOUNT_CHANGED', '微信账号、连接或运行状态已变化，未继续自动发布');
   }
   account(accountId) { return this.data.accounts[hash(accountId)] ?? { accountId, settings: momentsPublishingSettings(), revision: '' }; }
   list(accountId) {
@@ -78,12 +79,13 @@ export class MomentsPublishing {
       operationStartedAt: this.activeAccount === accountId ? this.operationStartedAt : null, schedulerStarted: !this.stopped, error: this.error ?? null };
   }
   publicRun(run) { const { query, ...value } = run; return copy({ ...value, hasImage: !!run.image && !run.textOnly, image: run.image && !run.textOnly ? { providerName: run.image.providerName, model: run.image.model } : null }); }
-  configure(accountId, input, signal, assertAllowed = () => {}) {
-    const check = () => { assertAllowed(); this.check(accountId, signal); }; check(); momentsPublishingSettings(input);
+  configure(accountId, input, signal, assertAllowed = () => {}, { timeOnly = false } = {}) {
+    const check = () => { assertAllowed(); this.check(accountId, signal, timeOnly); }; check(); momentsPublishingSettings(input);
     const previous = this.account(accountId), automatic = previous.settings.automatic;
     const settings = momentsPublishingSettings({ ...previous.settings, ...input,
       automatic: { ...automatic, ...input.automatic, content: { ...automatic.content, ...input.automatic?.content,
         image: { ...automatic.content.image, ...input.automatic?.content?.image } } } });
+    if (timeOnly) assertOnlyTimeChanges('publishing', settings, previous.settings);
     const apply = () => {
       check(); if (this.account(accountId).revision !== previous.revision) throw new ChannelError('MOMENTS_PLAN_CHANGED', '总设置已被修改，请刷新后重新保存');
       if (this.activeAccount === accountId) this.controller?.abort(new ChannelError('MOMENTS_PLAN_CHANGED', '自动发布总设置已变更，旧操作已停止'));
@@ -91,7 +93,7 @@ export class MomentsPublishing {
       const reflow = hash({ ...automatic, enabled: false }) !== hash({ ...settings.automatic, enabled: false }) || settings.minGapMinutes !== previous.settings.minGapMinutes || settings.maxPostsPer24Hours !== previous.settings.maxPostsPer24Hours;
       this.arrange(accountId, reflow); this.save(); return this.list(accountId);
     };
-    return settings.automatic.content.blockedLabelIds.length || settings.automatic.content.blockedUserIds.length
+    return !timeOnly && (settings.automatic.content.blockedLabelIds.length || settings.automatic.content.blockedUserIds.length)
       ? this.validateAudience(accountId, settings.automatic.content, signal, check).then(apply) : apply();
   }
   async validateAudience(accountId, settings, signal, check) {
@@ -116,13 +118,17 @@ export class MomentsPublishing {
     if (!momentsPlanId(id) || !plan || plan.deleted || plan.accountId !== accountId) throw new ChannelError('MOMENTS_PLAN_MISSING', '发布计划不存在或不属于当前账号');
     return plan;
   }
-  async savePlan(accountId, input, id, requestId, signal, assertAllowed = () => {}) {
-    const check = () => { assertAllowed(); this.check(accountId, signal); }; check();
+  async savePlan(accountId, input, id, requestId, signal, assertAllowed = () => {}, { timeOnly = false } = {}) {
+    const check = () => { assertAllowed(); this.check(accountId, signal, timeOnly); }; check();
     const prior = id !== undefined ? this.plan(accountId, id).settings : null;
     if (prior && !object(input)) throw new ChannelError('MOMENTS_PLAN_INVALID', '请填写要修改的发布计划字段');
     const settings = momentsPlanSettings(prior ? { ...prior, ...input,
       ...(input.schedule !== undefined ? { schedule: object(input.schedule) ? { ...prior.schedule, ...input.schedule } : input.schedule } : {}),
       ...(input.image !== undefined ? { image: object(input.image) ? { ...prior.image, ...input.image } : input.image } : {}) } : input);
+    if (timeOnly) {
+      if (!prior) throw new ChannelError('MOMENTS_PLAN_MISSING', '请先在朋友圈中创建发布计划');
+      assertOnlyTimeChanges('plan', settings, prior);
+    }
     if (typeof requestId !== 'string' || !requestId || requestId.length > 2000) throw new ChannelError('MOMENTS_PLAN_INVALID', '发布计划缺少操作编号');
     const selected = id ?? hash([accountId, 'plan', requestId]).slice(0, 32), previous = this.data.plans[selected], previousRevision = previous?.revision;
     if (previous && previous.accountId !== accountId) throw new ChannelError('MOMENTS_PLAN_MISSING', '计划不属于当前账号');
@@ -130,9 +136,9 @@ export class MomentsPublishing {
     if (!id && previous) return this.list(accountId);
     if (!previous && Object.values(this.data.plans).filter(plan => plan.accountId === accountId && !plan.deleted && !plan.automatic).length >= 20) throw new ChannelError('MOMENTS_PLAN_LIMIT', '每个账号最多保存 20 个手动发布计划，自动安排不占此上限');
     if (previous?.automatic && settings.schedule.type !== 'once') throw new ChannelError('MOMENTS_PLAN_INVALID', '自动生成的计划为单次计划；需要每天或每周重复时，请另加手动计划');
-    const nextRunAt = nextMomentsOccurrence(settings, this.now());
-    if (settings.enabled && !nextRunAt) throw new ChannelError('MOMENTS_PLAN_INVALID', '启用单次计划时请选择未来的日期和时间');
-    if (settings.blockedLabelIds.length || settings.blockedUserIds.length) {
+    const nextRunAt = timeOnly ? previous.nextRunAt : nextMomentsOccurrence(settings, this.now());
+    if (!timeOnly && settings.enabled && !nextRunAt) throw new ChannelError('MOMENTS_PLAN_INVALID', '启用单次计划时请选择未来的日期和时间');
+    if (!timeOnly && (settings.blockedLabelIds.length || settings.blockedUserIds.length)) {
       await this.validateAudience(accountId, settings, signal, check);
     }
     check(); if (this.activeAccount === accountId && this.activePlanId === selected) this.controller?.abort(new ChannelError('MOMENTS_PLAN_CHANGED', '计划已修改，旧生成或发布已停止'));
@@ -168,7 +174,7 @@ export class MomentsPublishing {
   }
   async operation(accountId, planId, signal, work) {
     this.check(accountId, signal); if (this.pending) throw new ChannelError('MOMENTS_PUBLISH_BUSY', '已有朋友圈内容正在生成或提交，请等它完成后操作');
-    this.controller = new AbortController(); this.operationTimeout = AbortSignal.timeout(MOMENTS_PUBLISH_TIMEOUT_MS);
+    this.controller = new AbortController(); this.operationTimeoutMs = timeLimitMs(this.channel.store, 'momentsPublishTimeoutMinutes'); this.operationTimeout = AbortSignal.timeout(this.operationTimeoutMs);
     const combined = AbortSignal.any([this.controller.signal, ...(signal ? [signal] : []), this.operationTimeout]);
     this.activeAccount = accountId; this.activePlanId = planId; this.operationStartedAt = this.now();
     this.pending = Promise.resolve().then(() => work(combined)).finally(() => { this.pending = undefined; this.controller = undefined; this.activeAccount = undefined; this.activePlanId = undefined; this.operationStartedAt = undefined; this.operationTimeout = undefined; });
@@ -197,7 +203,8 @@ export class MomentsPublishing {
       if (!service?.generate) throw new ChannelError('MOMENTS_IMAGE_UNAVAILABLE', '生图服务未加载，正文已保留但未发布');
       const catalog = service.catalog(), image = run.settings.image, provider = catalog.providers.find(row => row.providerId === (image.providerId || catalog.defaultProviderId));
       if (!provider || !catalog.enabled) throw new ChannelError('MOMENTS_IMAGE_UNAVAILABLE', '所选生图接口未启用或已不存在，正文已保留但未发布');
-      const remaining = MOMENTS_PUBLISH_TIMEOUT_MS - (this.now() - this.operationStartedAt) - MOMENTS_TEXT_FALLBACK_RESERVE_MS;
+      const budget = this.operationTimeoutMs ?? timeLimitMs(this.channel.store, 'momentsPublishTimeoutMinutes');
+      const remaining = budget - (this.now() - this.operationStartedAt) - Math.min(MOMENTS_TEXT_FALLBACK_RESERVE_MS, budget / 4);
       if (remaining <= 0) throw new DOMException('Image budget exhausted', 'TimeoutError');
       const imageSignal = AbortSignal.any([signal, AbortSignal.timeout(remaining)]);
       const generated = await service.generate({ prompt: run.imagePrompt, providerId: provider.providerId, model: image.model || provider.defaultModel, ...(image.size ? { size: image.size } : {}) }, imageSignal,
@@ -282,11 +289,11 @@ export class MomentsPublishing {
     if (receipt) { this.published(run, receipt); return error; }
     const submitted = run.state === 'sending', rejected = ['not-sent', 'rejected'].includes(error?.details?.snsDelivery);
     if (error?.name === 'TimeoutError' && this.operationTimeout?.aborted) error = new ChannelError('MOMENTS_PUBLISH_TIMEOUT', submitted
-      ? '等待发布确认时达到 1 小时上限，结果不明；请核对微信，未自动重发'
-      : '本次生成达到 1 小时上限，已停止；已有内容保留，未发布，也不会自动重试');
+      ? '等待发布确认时达到 ' + timeDurationLabel(this.operationTimeoutMs) + ' 上限，结果不明；请核对微信，未自动重发'
+      : '本次生成达到 ' + timeDurationLabel(this.operationTimeoutMs) + ' 上限，已停止；已有内容保留，未发布，也不会自动重试');
     else if (error?.name === 'TimeoutError') error = new ChannelError('MOMENTS_REQUEST_TIMEOUT', submitted
       ? '发布确认请求超时，结果不明；请核对微信，未自动重发'
-      : '生成请求超时，已有内容保留，未发布；服务自身的请求时限可能短于 1 小时总时限');
+      : '生成请求超时，已有内容保留，未发布；服务自身的请求时限可能短于设定的总时限');
     else if (error?.name === 'AbortError') error = new ChannelError('MOMENTS_PUBLISH_CANCELLED', submitted
       ? '已取消等待发布确认，结果仍需在微信核对；未自动重发'
       : '本次生成已取消；已有内容保留，未发布');

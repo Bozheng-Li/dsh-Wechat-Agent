@@ -5,9 +5,10 @@ import { localDate } from "../../shared/local-date.mjs";
 import { Button, Tag, Empty, Feedback, Offline } from "../../components/workbench-ui.jsx";
 import { PageHead } from '../../components/page-ui.jsx';
 import { useWorkbench } from "../../hooks/use-workbench.mjs";
+import { ScheduleCountdown } from '../../components/schedule-countdown.jsx';
 
 export function DigestsPage({ rpc, status }) {
-  const state = useWorkbench(rpc, status.account?.id, 'digest.list'),
+  const state = useWorkbench(rpc, status.account?.id, 'digest.list', '', 5000),
     groups = (status.conversations || []).filter((peer) => peer.authorized && peer.chatType === 'group');
   const [peerId, setPeerId] = useState(groups[0]?.peerId || ''),
     [from, setFrom] = useState(localDate(new Date().setHours(0, 0, 0, 0))),
@@ -184,11 +185,16 @@ export function DigestsPage({ rpc, status }) {
                         )}
                       </div>
                       {todo.taskId && (
-                        <p className="wa-wb-note">
+                        <p className="wa-wb-note wa-schedule-time">
+                          <span>
                           {todo.reminder?.state === 'missing'
                             ? '提醒记录不可用，请到定时页核对'
                             : <>{todo.reminder?.state === 'cancelled' ? '提醒已取消' : todo.reminder?.state === 'completed' ? '提醒已完成' : '已创建提醒'}：{todo.reminder?.at ? formatTime(todo.reminder.at) : '请到定时页核对'}
                               {['cancelled', 'completed'].includes(todo.reminder?.state) ? '' : ' · 以定时页执行状态为准'}</>}
+                          </span>
+                          {['pending', 'running', 'paused'].includes(todo.reminder?.state) && <ScheduleCountdown
+                            at={todo.reminder.nextRunAt ?? todo.reminder.at} running={todo.reminder.state === 'running'}
+                            paused={todo.reminder.state === 'paused'} status={status} action="提醒" />}
                         </p>
                       )}
                       {reminder === todo.id && (

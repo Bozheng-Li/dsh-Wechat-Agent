@@ -9,11 +9,10 @@ export function roleMemoryData(memory, input, { document, history = [], persona,
     facts = (section?.facts || []).filter(fact => Number.isFinite(fact.createdAt) && fact.createdAt <= cutoff),
     speaker = { id: input.senderId || (scope.chatType === 'private' ? scope.peerId : ''), name: input.senderName || input.sender || '' },
     people = conversationPeople(memory.store, scope, { entries: history, facts, speaker, beforeTime: cutoff });
-  let saved;
-  try { saved = memory.store.roleCards?.view(scope); } catch { /* The owner sees the card error; global expression remains usable. */ }
+  const personId = speaker.id && speaker.id !== scope.accountId && !speaker.id.endsWith('@chatroom') ? speaker.id : null;
   return { scope, now: at, query: text, history, speaker, people, persona: persona || memory.store.conversationPersona(scope.accountId, scope.chatType, scope.peerId),
-    personaHasCard: true, card: saved ? { ...saved.card, scope, ownerAuthored: true } : null,
-    roleId: saved?.roleId || memory.store.roleCards?.identity(scope),
+    personaHasCard: true, card: null,
+    roleId: personId ? memory.store.roleCards?.identity({ accountId: scope.accountId, personId }) : undefined,
     globalNotes: doc.globalNotesExpired ? '' : doc.globalNotes,
     facts: facts.map(fact => ({ ...fact, scope, subjectId: fact.subjectId || 'conversation',
       ...(fact.reviewedAt > cutoff && fact.decision === 'accept' ? { state: 'pending', confirmation: undefined } : {}) })),

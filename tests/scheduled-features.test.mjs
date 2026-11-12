@@ -90,7 +90,7 @@ test('scheduled Agent reads durable facts and scoped memory, selects an image, a
     assert(context.includes('对花生过敏') && context.includes('今天中午想吃面'));
     assert(input.adminNotes.includes('重要提醒直接说明时间'));
     assert(!context.includes('秘密生日礼物'));
-    assert.deepEqual(input.tools.map(tool => tool.name), ['wechat_reply_media', 'wechat_memory']);
+    assert.deepEqual(input.tools.map(tool => tool.name), ['wechat_reply_media', 'wechat_role_card', 'wechat_memory']);
     const tool = input.tools[0], execution = { signal: input.signal };
     const matches = JSON.parse(await tool.execute({ action: 'search', query: '吃饭' }, execution));
     assert.equal(matches.ok, true); assert.equal(matches.assets[0].id, assetId);
@@ -136,15 +136,19 @@ test('cancelling generation prevents delivery and keeps local and pending durabl
   await f.scheduler.tick(); assert.equal(f.sent.length, 0);
 });
 
-test('revoking authorization during generation blocks delivery, with retry waiting for restored authorization', async t => {
+test('revoking authorization during generation blocks delivery and deletes the task without reviving it after regrant', async t => {
   const f = await fixture(t), reached = Promise.withResolvers(), gate = Promise.withResolvers();
   f.runner.run = async () => { reached.resolve(); await gate.promise; return { text: '已撤权的任务不能发出去。' }; };
   const task = f.create(); f.advance(1000); const running = f.scheduler.tick();
   try { await reached.promise; f.store.configure(owner, { ...f.settings, groups: [other] }); }
   finally { gate.resolve(); await running; }
-  assert.equal(f.sent.length, 0); assert.equal(f.task(task.id).state, 'pending'); assert.equal(f.task(task.id).lastState, 'cancelled');
+  await f.channel.authorization.whenIdle();
+  assert.equal(f.sent.length, 0); assert.equal(f.task(task.id), undefined); assert.equal(f.record(task.id), undefined);
   f.store.configure(owner, f.settings); await f.scheduler.tick(); assert.equal(f.sent.length, 0);
-  f.advance(60000); await f.scheduler.tick(); assert.equal(f.sent.length, 1); assert.equal(f.task(task.id).state, 'completed');
+  f.advance(60000); await f.scheduler.tick(); assert.equal(f.sent.length, 0); assert.equal(f.task(task.id), undefined);
+  const fresh = f.create('message', '重新创建的提醒'); f.advance(1000); await f.scheduler.tick();
+  assert.equal(f.sent.length, 1, JSON.stringify({ task: f.task(fresh.id), run: f.scheduler.list(owner).runs.at(-1), fault: f.channel.fault,
+    pauses: [...f.channel.pauses.values()] })); assert.equal(f.task(fresh.id).state, 'completed');
 });
 
 for (const failure of ['model', 'memory', 'timeout', 'empty']) test(`saved agent reminder uses an acknowledged fallback when ${failure} fails before sending`, async t => {
@@ -231,17 +235,18 @@ test('a reminder waiting over ten minutes in the queue still sends once while an
   await f.scheduler.tick(); assert.equal(f.sent.length, 1);
 });
 
-test('revoked and offline reminders remain pending until online authorization returns, then send once', async t => {
+test('revoked reminders are deleted while offline reminders still wait for the same authorised conversation', async t => {
   const f = await fixture(t), revoked = f.create('message', '撤权任务');
-  f.store.configure(owner, { ...f.settings, groups: [other] }); f.advance(1000); await f.scheduler.tick();
-  assert.equal(f.task(revoked.id).state, 'pending'); assert.equal(f.scheduler.list(owner).runs.length, 0);
-  f.advance(600001); await f.scheduler.tick(); assert.equal(f.task(revoked.id).state, 'pending');
+  f.store.configure(owner, { ...f.settings, groups: [other] }); await f.channel.authorization.whenIdle(); f.advance(1000); await f.scheduler.tick();
+  assert.equal(f.task(revoked.id), undefined); assert.equal(f.scheduler.list(owner).runs.length, 0);
+  f.advance(600001); await f.scheduler.tick(); assert.equal(f.task(revoked.id), undefined);
   f.store.configure(owner, f.settings); const offline = f.create('message', '离线任务'); f.state.online = false;
   f.advance(1000); await f.scheduler.tick(); assert.equal(f.task(offline.id).state, 'pending');
   f.advance(600001); await f.scheduler.tick(); assert.equal(f.task(offline.id).state, 'pending');
   f.state.online = true; await f.scheduler.tick();
-  assert.equal(f.sent.length, 2); assert.equal(f.scheduler.list(owner).runs.length, 2);
-  await f.scheduler.tick(); assert.equal(f.sent.length, 2);
+  assert.equal(f.sent.length, 1, JSON.stringify({ task: f.task(offline.id), run: f.scheduler.list(owner).runs.at(-1), fault: f.channel.fault,
+    pauses: [...f.channel.pauses.values()] })); assert.equal(f.scheduler.list(owner).runs.length, 1); assert.equal(f.task(revoked.id), undefined);
+  await f.scheduler.tick(); assert.equal(f.sent.length, 1);
 });
 
 for (const [label, outcome, expectedState, expectedIds] of [
