@@ -63,7 +63,8 @@ if (process.argv.includes('--pack')) {
     } else { fs.mkdirSync(path.dirname(to), { recursive: true }); fs.copyFileSync(from, to); }
   }
   const cache = path.join(root, 'storage/cache');
-  const requirements = fs.readFileSync(path.join(root, 'runtime/requirements.txt'));
+  // Git's Windows checkout conversion does not change the dependency set.
+  const requirements = Buffer.from(fs.readFileSync(path.join(root, 'runtime/requirements.txt'), 'utf8').replace(/\r\n/g, '\n'));
   const requirementsHash = hash(requirements);
   // A changed dependency set gets a fresh runtime. Installing over an older
   // cache would retain dependencies that were removed from requirements.
