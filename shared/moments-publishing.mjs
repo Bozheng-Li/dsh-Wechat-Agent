@@ -8,9 +8,10 @@ export const MOMENTS_TEXT_FALLBACK_RESERVE_MS = 5 * 60 * 1000;
 
 export const MOMENTS_PLAN_DEFAULTS = Object.freeze({ name: '新的发布计划', enabled: false, themes: ['日常心情与小笑话'], style: '自然、轻松、有一点幽默',
   instructions: '', maxChars: 300, useMaterials: false, reviewRequired: false, research: false, researchQuery: '', graceMinutes: 60, blockedLabelIds: [], blockedUserIds: [],
+  useDefaultAudience: false,
   schedule: { type: 'daily', timezone: 'Asia/Shanghai', times: ['09:00'], weekdays: [1, 2, 3, 4, 5], onceAt: '' },
   image: { mode: 'none', providerId: '', model: '', size: '', instructions: '' } });
-export const MOMENTS_AUTOMATIC_CONTENT_KEYS = ['themes', 'style', 'instructions', 'maxChars', 'useMaterials', 'reviewRequired', 'research', 'researchQuery', 'graceMinutes', 'blockedLabelIds', 'blockedUserIds', 'image'];
+export const MOMENTS_AUTOMATIC_CONTENT_KEYS = ['themes', 'style', 'instructions', 'maxChars', 'useMaterials', 'reviewRequired', 'research', 'researchQuery', 'graceMinutes', 'blockedLabelIds', 'blockedUserIds', 'useDefaultAudience', 'image'];
 export const MOMENTS_AUTOMATIC_DEFAULTS = Object.freeze({ enabled: false, dailyCount: 3, startTime: '09:00', endTime: '22:00', timezone: 'Asia/Shanghai',
   content: { ...Object.fromEntries(MOMENTS_AUTOMATIC_CONTENT_KEYS.map(key => [key, structuredClone(MOMENTS_PLAN_DEFAULTS[key])])), themes: [], useMaterials: true,
     image: { ...MOMENTS_PLAN_DEFAULTS.image, mode: 'library' } } });
@@ -66,6 +67,7 @@ export function momentsPlanSettings(input = {}) {
   if (!exact(input, Object.keys(MOMENTS_PLAN_DEFAULTS))) invalid('发布计划包含不支持的字段');
   const value = { ...structuredClone(MOMENTS_PLAN_DEFAULTS), ...input };
   if (!text(value.name, 80, true) || typeof value.enabled !== 'boolean' || typeof value.reviewRequired !== 'boolean' || typeof value.research !== 'boolean' || !text(value.researchQuery, 240) ||
+      typeof value.useDefaultAudience !== 'boolean' ||
       !Array.isArray(value.themes) || value.themes.length > 30 || value.themes.some(theme => !text(theme, 200, true)) || typeof value.useMaterials !== 'boolean' ||
       !text(value.style, 1000) || !text(value.instructions, 4000) || !integer(value.maxChars, 30, 2000) || !integer(value.graceMinutes, 1, 1440))
     invalid('请填写计划名称；主题可留空或填写最多 30 个，正文上限 30–2000 字，过期等待 1–1440 分钟');

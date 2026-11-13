@@ -45,6 +45,8 @@ export function rpcHandler(service, isDisposed = () => false) {
           'moments.list',
           'moments.discover',
           'moments.configure',
+          'moments.publishScope',
+          'moments.audienceDefault',
           'moments.write',
           'moments.publishing.configure',
           'moments.publishing.cancel',

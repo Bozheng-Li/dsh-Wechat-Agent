@@ -39,7 +39,7 @@ export function saveWechatSticker(library, accountId, input) {
     throw error('STICKER_INVALID', '表情来源或标识无效');
   const record = library.account(accountId);
   const contentHash = content && hash(content), id = md5 ? hash('wechat-sticker:' + md5) : contentHash;
-  if ([md5, id, contentHash].some(key => key && record.deletedStickers?.includes(key))) return { skipped: true, deleted: true };
+  if ([md5, id, contentHash].some(key => key && record.deletedStickers?.includes(key))) return { skipped: true, deleted: true, reason: '这张表情已删除，不再重新保存' };
   const previous = record.assets.find(asset => asset.nativeSticker?.md5 === md5 && md5 || asset.id === id || contentHash &&
     (asset.contentSha256 || asset.id) === contentHash && (!md5 || !asset.nativeSticker || asset.nativeSticker.md5 === md5));
   const info = content ? md5 ? prepareStickerImage(content).info : inspectAssetImage(content) : {};

@@ -12,7 +12,7 @@ import {
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const base = path.join(repo, 'storage/tmp'); fs.mkdirSync(base, { recursive: true });
 const account = { id: 'wxid_owner', nickname: '微信助手' };
-const settings = { enabled: true, privatePeers: ['alice'], groups: ['123@chatroom'], prompt: '' };
+const settings = { enabled: true, privatePeers: ['alice'], groups: ['123@chatroom'], prompt: '', publishScope: 'blocked-list', defaultBlockedUserIds: [], defaultBlockedLabelIds: [] };
 function temporary(t) {
   const root = fs.mkdtempSync(path.join(base, 'dsh-unit-'));
   t.after(() => { const relative = path.relative(base, fs.realpathSync(root)); assert(!relative.startsWith('..') && !path.isAbsolute(relative) && relative.startsWith('dsh-unit-')); fs.rmSync(root, { recursive: true, force: true }); });

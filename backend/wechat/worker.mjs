@@ -95,12 +95,15 @@ async function perform(id, op, args) {
       const account = backend.session.value;
       if (!account || args?.accountId !== account.wxid) throw new ChannelError('ACCOUNT_CHANGED', '微信账号已变化，未操作其他账号的朋友圈');
       if (typeof args.clientId !== 'string' || !/^sns_[a-f0-9]{64}$/.test(args.clientId)) throw new ChannelError('ERR_INVALID_MOMENTS_WRITE', '朋友圈操作缺少稳定请求编号');
-      if (!Array.isArray(args.authorizedUserIds) || args.authorizedUserIds.length > 50000 ||
-          args.authorizedUserIds.some(value => typeof value !== 'string' || !/^[\w.:-]{1,200}$/.test(value)) ||
-          new Set(args.authorizedUserIds).size !== args.authorizedUserIds.length)
+      // 发布可以不带授权名单：账号选择“自定义屏蔽名单”时不自动屏蔽未授权好友。
+      const authorized = args.authorizedUserIds;
+      if ((args.query?.action !== 'publish' || authorized !== undefined) &&
+          (!Array.isArray(authorized) || authorized.length > 50000 ||
+           authorized.some(value => typeof value !== 'string' || !/^[\w.:-]{1,200}$/.test(value)) ||
+           new Set(authorized).size !== authorized.length))
         throw new ChannelError('OBJECT_NOT_AUTHORIZED', '朋友圈操作缺少当前账号的有效授权对象，未执行');
       const controller = new AbortController(); sending.set(id, controller);
-      try { return await backend.writeMoments(args.query, args.clientId, controller.signal, args.authorizedUserIds); }
+      try { return await backend.writeMoments(args.query, args.clientId, controller.signal, authorized); }
       finally { sending.delete(id); }
     }
     case 'moments.audience': {

@@ -16,7 +16,7 @@ const times = plan => plan.schedule.type === 'once' ? plan.schedule.onceAt.repla
 const fresh = () => ({ ...structuredClone(MOMENTS_PLAN_DEFAULTS), themes: [], useMaterials: true,
   image: { ...MOMENTS_PLAN_DEFAULTS.image, mode: 'library' } });
 
-export function MomentsPublishingPage({ rpc, state, status, audience, audienceError, loadAudience, onNavigate }) {
+export function MomentsPublishingPage({ rpc, state, status, audience, audienceError, loadAudience, onNavigate, defaultAudience, onEditAudience }) {
   const data = state.data?.publishing, plans = data?.plans ?? [], runs = data?.runs ?? [];
   const [selectedRuns, setSelectedRuns] = useState([]), [stopping, setStopping] = useState(false), [stopError, setStopError] = useState('');
   const [showHistory, setShowHistory] = useState(false);
@@ -25,6 +25,7 @@ export function MomentsPublishingPage({ rpc, state, status, audience, audienceEr
   const [now, setNow] = useState(Date.now), loadedDraft = useRef({ id: null, text: '' });
   const editorRef = useRef(null);
   const operation = useRef({}), selection = audiencePreview(audience, editor?.settings.blockedLabelIds ?? [], editor?.settings.blockedUserIds ?? []);
+  const defaults = defaultAudience ?? { blockedLabelIds: [], blockedUserIds: [] }, defaultCount = defaults.blockedLabelIds.length + defaults.blockedUserIds.length;
   const run = runs.find(row => row.id === runId), busy = state.busy || !!data?.running, online = status.online;
   const activeRun = runs.find(row => ['generating', 'sending'].includes(row.state));
   const elapsed = Math.max(0, Math.floor((now - (data?.operationStartedAt || now)) / 1000));
@@ -93,7 +94,11 @@ export function MomentsPublishingPage({ rpc, state, status, audience, audienceEr
       {data?.running && <div className="wa-wb-between"><p className="wa-wb-note" role="status">{stages[activeRun?.stage] || labels[activeRun?.state] || '正在处理'} · 已等待 {Math.floor(elapsed / 60)} 分 {elapsed % 60} 秒，达到设定超时后停止。</p><Button quiet disabled={stopping} onClick={stop}>停止本次发布处理</Button></div>}
       <p className="wa-wb-note">生图失败会改发纯文字；联网取材失败会改写不依赖实时资料的内容。</p>
       {stopError && <p className="wa-alert is-error" role="alert">{stopError}</p>}
-      <AutomationLink onNavigate={onNavigate} from="moments" section="moments-publishing">自动发布设置</AutomationLink>
+      <div className="wa-wb-actions">
+        <AutomationLink onNavigate={onNavigate} from="moments" section="moments-publishing">自动发布设置</AutomationLink>
+        <Button quiet disabled={!onEditAudience} onClick={onEditAudience}>屏蔽名单设置</Button>
+      </div>
+      <p className="wa-wb-note">屏蔽谁在这里设置，自动发布勾选『使用默认屏蔽名单』时按它执行。</p>
       <p className="wa-wb-note">发布总开关和自动安排统一在“设置 → 自动功能”中修改。</p>
     </section>
     <section className="wa-moments-plan-list">
@@ -102,7 +107,7 @@ export function MomentsPublishingPage({ rpc, state, status, audience, audienceEr
       {visiblePlans.length ? visiblePlans.map(plan => <article className="wa-moments-plan" key={plan.id} data-plan-id={plan.id}>
         <div className="wa-moments-plan-copy">
         <div className="wa-wb-between"><strong>{plan.settings.name}</strong><Tag state={plan.settings.enabled && !ended(plan) ? 'ready' : 'disabled'}>{ended(plan) ? '本次已结束' : plan.settings.enabled ? '计划已开启' : '计划已暂停'}</Tag><span className="wa-help">{plan.automatic ? '自动生成' + (plan.automatic.edited ? ' · 已手动调整' : '') : '手动添加'}</span></div>
-        <p>{plan.settings.themes.join('、') || '到时间自主选题'}</p><p className="wa-wb-note">{times(plan.settings)} · {plan.settings.schedule.timezone} · {plan.settings.reviewRequired ? '先生成草稿' : '直接发布'}{plan.settings.image.mode === 'ai' ? ' · AI 配图' : plan.settings.image.mode === 'library' ? ' · 素材库选图' : ' · 纯文字'}</p>
+        <p>{plan.settings.themes.join('、') || '到时间自主选题'}</p><p className="wa-wb-note">{times(plan.settings)} · {plan.settings.schedule.timezone} · {plan.settings.reviewRequired ? '先生成草稿' : '直接发布'}{plan.settings.image.mode === 'ai' ? ' · AI 配图' : plan.settings.image.mode === 'library' ? ' · 素材库选图' : ' · 纯文字'}{plan.settings.useDefaultAudience ? ' · 使用默认屏蔽名单' : ''}</p>
         <small className="wa-schedule-time"><span>下一次：{plan.nextRunAt ? formatTime(plan.nextRunAt) : '未安排'}{!data?.settings.enabled && plan.settings.enabled ? '（总开关关闭）' : plan.automatic && !data?.settings.automatic.enabled ? '（自动安排已关闭）' : ''}</span>
           {!ended(plan) && <ScheduleCountdown at={plan.nextRunAt} enabled={plan.settings.enabled} running={data?.running && data.activePlanId === plan.id}
             paused={!data?.settings.enabled || plan.automatic && !data?.settings.automatic.enabled || data?.error || data?.schedulerStarted === false}
@@ -148,11 +153,16 @@ export function MomentsPublishingPage({ rpc, state, status, audience, audienceEr
           <label>配图要求<textarea aria-label="发布配图要求" rows={2} maxLength={2000} value={editor.settings.image.instructions} onChange={e => picture({ instructions: e.target.value })} /></label>
         </>}
         </section>
-        <AudiencePicker data={audience} error={audienceError} labelIds={editor.settings.blockedLabelIds} userIds={editor.settings.blockedUserIds} onChange={update} onRead={loadAudience} busy={busy} online={online} />
+        <label className="wa-wb-check"><input aria-label="使用默认屏蔽名单" type="checkbox" checked={!!editor.settings.useDefaultAudience}
+          onChange={e => update({ useDefaultAudience: e.target.checked })} />使用默认屏蔽名单（在发朋友圈页维护）</label>
+        {editor.settings.useDefaultAudience
+          ? <p className="wa-wb-note">当前默认名单：{defaults.blockedLabelIds.length} 个标签、{defaults.blockedUserIds.length} 位联系人。{defaultCount ? '' : '名单为空，发布时不会额外屏蔽任何人。'}在“朋友圈 → 发朋友圈”里勾选后保存为默认名单。</p>
+          : <AudiencePicker data={audience} error={audienceError} labelIds={editor.settings.blockedLabelIds} userIds={editor.settings.blockedUserIds} onChange={update} onRead={loadAudience} busy={busy} online={online} />}
         <label className="wa-wb-check"><input aria-label="保存并开启发布计划" type="checkbox" checked={editor.settings.enabled} onChange={e => update({ enabled: e.target.checked })} />保存后开启此计划（仍受总开关控制）</label>
       </fieldset>
       {error && <p role="alert" className="wa-alert is-error">{error}</p>}
-      <div className="wa-wb-actions wa-editor-actions"><Button disabled={busy || !online || selection.missing || audienceError && (editor.settings.blockedLabelIds.length + editor.settings.blockedUserIds.length > 0)} onClick={async () => {
+      <div className="wa-wb-actions wa-editor-actions"><Button disabled={busy || !online || !editor.settings.useDefaultAudience &&
+        (selection.missing || audienceError && (editor.settings.blockedLabelIds.length + editor.settings.blockedUserIds.length > 0))} onClick={async () => {
         const settings = validated(); if (!settings) return;
         if (await execute('moments.plans.save', { settings, ...(editor.id ? { id: editor.id } : {}) })) { setEditor(null); state.setNotice('发布计划已保存，按总开关和计划开关执行。'); }
       }}>保存发布计划</Button><Button quiet disabled={busy || !online} onClick={async () => { const settings = validated(); if (!settings) return;

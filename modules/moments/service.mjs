@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { atomicBytes } from '../../backend/storage/atomic-text.mjs';
-import { publicError } from '../../shared/contracts.mjs';
+import { publicError, publishScopeOf } from '../../shared/contracts.mjs';
 import { workPath } from '../work/policy.mjs';
 import { validateAudienceSelection, audienceUserId } from '../../shared/moments-audience.mjs';
 import { MomentsLikeRequests } from './like-requests.mjs';
@@ -225,8 +225,12 @@ export class MomentsService {
       let recordedSuccess = false;
       try {
         verifyAuthorization();
+        const settings = channel.store.settings(scope.accountId),
+          publishScope = publishScopeOf(settings);
         const result = await channel.transport.writeMoments({ accountId: scope.accountId, clientId, query,
-          authorizedUserIds: [...channel.store.settings(scope.accountId).privatePeers] }, signal);
+          // 只有“仅授权好友可见”才自动屏蔽未授权好友；自定义屏蔽名单不替用户屏蔽任何人。
+          ...(query.action === 'publish' && publishScope === 'authorized'
+            ? { authorizedUserIds: [...settings.privatePeers] } : {}) }, signal);
         this.validateReceipt(result, query, scope.accountId);
         // Cancellation stops further work, but an already confirmed write is
         // still needed for deduplication. Revocation must never restore it.
@@ -301,16 +305,24 @@ function validateReceipt(result, query, accountId, store) {
       query.action === 'delete' && result.deleted !== true ||
       query.action === 'publish' && (result.text !== query.text || result.imageCount !== (query.images?.length ?? 0)))
     throw new ChannelError('MOMENTS_RESULT_UNKNOWN', '朋友圈操作回执与当前账号、目标或内容不匹配，未报告成功');
-  if (query.action === 'publish') assertPublicationAuthorization(result, accountId,
-    store.settings(accountId).privatePeers.filter(id => personAuthorized(store, accountId, id)));
-  if (query.action === 'publish' && (query.blockedUserIds?.length || query.blockedLabelIds?.length)) {
-    const selection = validateAudienceSelection(query), same = (a, b) => Array.isArray(a) && JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
-    const verifiedRead = result.audienceSource === 'wechat-sns-live' && result.delivery === 'verified-existing' && result.readbackConfirmed === true;
-    if (result.audienceConfirmed !== true || result.audienceSource !== 'wechat-contacts-live' && !verifiedRead || !Number.isFinite(Date.parse(result.audienceFetchedAt)) ||
-        !same(result.audienceSelection?.blockedUserIds, selection.blockedUserIds) || !same(result.audienceSelection?.blockedLabelIds, selection.blockedLabelIds) ||
-        !same(result.blockedLabelIds, selection.blockedLabelIds) || !Array.isArray(result.blockedUserIds) || result.blockedUserIds.some(id => !audienceUserId(id)) ||
-        result.blockedUserIds.length > 50000 || new Set(result.blockedUserIds).size !== result.blockedUserIds.length || selection.blockedUserIds.some(id => !result.blockedUserIds.includes(id)) ||
-        verifiedRead && (!Array.isArray(result.submittedBlockedUserIds) || result.submittedBlockedUserIds.some(id => !audienceUserId(id) || !result.blockedUserIds.includes(id))))
-      throw new ChannelError('MOMENTS_RESULT_UNKNOWN', '朋友圈屏蔽选择未取得完整确认，发布结果不明，请在微信核对；未自动重发');
+  if (query.action === 'publish') {
+    const settings = store.settings(accountId);
+    // “仅授权好友可见”仍要求完整的授权回执。“自定义屏蔽名单”只要求本次真正
+    // 选择过的屏蔽对象得到确认；回执若自带授权证明，仍按授权模式核对。
+    if (publishScopeOf(settings) === 'authorized' || result.authorizationConfirmed === true)
+      assertPublicationAuthorization(result, accountId,
+        settings.privatePeers.filter(id => personAuthorized(store, accountId, id)));
+    if (query.blockedUserIds?.length || query.blockedLabelIds?.length) {
+      const selection = validateAudienceSelection(query), same = (a, b) => Array.isArray(a) && JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+      const verifiedRead = result.audienceSource === 'wechat-sns-live' && result.delivery === 'verified-existing' && result.readbackConfirmed === true;
+      if (result.audienceConfirmed !== true || result.audienceSource !== 'wechat-contacts-live' && !verifiedRead || !Number.isFinite(Date.parse(result.audienceFetchedAt)) ||
+          !same(result.audienceSelection?.blockedUserIds, selection.blockedUserIds) || !same(result.audienceSelection?.blockedLabelIds, selection.blockedLabelIds) ||
+          !same(result.blockedLabelIds, selection.blockedLabelIds) || !Array.isArray(result.blockedUserIds) || result.blockedUserIds.some(id => !audienceUserId(id)) ||
+          result.blockedUserIds.length > 50000 || new Set(result.blockedUserIds).size !== result.blockedUserIds.length || selection.blockedUserIds.some(id => !result.blockedUserIds.includes(id)) ||
+          verifiedRead && (!Array.isArray(result.submittedBlockedUserIds) || result.submittedBlockedUserIds.some(id => !audienceUserId(id) || !result.blockedUserIds.includes(id))))
+        throw new ChannelError('MOMENTS_RESULT_UNKNOWN', '朋友圈屏蔽选择未取得完整确认，发布结果不明，请在微信核对；未自动重发');
+    } else if (publishScopeOf(settings) === 'blocked-list' && result.blockedUserIds !== undefined &&
+        (!Array.isArray(result.blockedUserIds) || result.blockedUserIds.some(id => !audienceUserId(id))))
+      throw new ChannelError('MOMENTS_RESULT_UNKNOWN', '朋友圈回执的屏蔽名单无效，发布结果不明，请在微信核对；未自动重发');
   }
 }

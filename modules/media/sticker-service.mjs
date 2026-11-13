@@ -92,7 +92,7 @@ export class WechatStickerService {
   }
   enqueue(accountId, key, task) {
     if (this.pending.has(key)) return this.pending.get(key).promise;
-    if (this.pending.size >= MEDIA_LIBRARY_LIMITS.accountAssets) return Promise.resolve({ skipped: true });
+    if (this.pending.size >= MEDIA_LIBRARY_LIMITS.accountAssets) return Promise.resolve({ skipped: true, reason: '待保存的表情过多，本轮排队已满' });
     const item = { accountId };
     const promise = this.tail.then(async () => {
       await new Promise(resolve => setImmediate(resolve));
@@ -158,22 +158,22 @@ export class WechatStickerService {
       this.channel.library.account(accountId).settings.captureIncoming && eligible(this.channel.store.settings(accountId), message);
   }
   capture(accountId, message, { historical = false } = {}) {
-    if (this.controller.signal.aborted || !this.canCollect(accountId, message)) return Promise.resolve({ skipped: true });
+    if (this.controller.signal.aborted || !this.canCollect(accountId, message)) return Promise.resolve({ skipped: true, reason: '该聊天未启用表情收集，或不是可收集的表情消息' });
     const age = this.channel.now() - message.time * 1000;
-    if (!historical && (!Number.isFinite(age) || age < -60000 || age > 600000)) return Promise.resolve({ skipped: true });
+    if (!historical && (!Number.isFinite(age) || age < -60000 || age > 600000)) return Promise.resolve({ skipped: true, reason: '这张表情不在最近可收集的时间范围内' });
     const face = message.message.find(segment => segment.type === 'face' && segment.data?.resourceId);
     const md5 = validStickerMd5(face.data.stickerMd5) ? face.data.stickerMd5 : undefined;
     return this.enqueue(accountId, accountId + ':chat:' + (md5 || face.data.resourceId), async () => {
-      if (!this.canCollect(accountId, message)) return { skipped: true };
+      if (!this.canCollect(accountId, message)) return { skipped: true, reason: '来源会话已撤销授权或关闭收集，未保存这张表情' };
       let saved;
       if (md5) {
         saved = this.channel.library.saveWechatSticker(accountId, { md5, source: 'chat', message });
         if (saved.skipped || saved.asset.bytes) { this.scheduleDescriptions(accountId); return saved; }
       }
-      if (!this.channel.transport.media) return saved || { skipped: true };
+      if (!this.channel.transport.media) return saved || { skipped: true, reason: '微信组件暂不支持读取表情原图' };
       const media = await this.channel.transport.media({ accountId, peerId: message.peerId, messageId: message.serverMessageId || message.id, resourceId: face.data.resourceId, preferOriginal: true, preserveStickerOriginal: true }, this.signalFor(accountId));
       this.check(accountId);
-      if (!this.canCollect(accountId, message)) return { skipped: true };
+      if (!this.canCollect(accountId, message)) return { skipped: true, reason: '来源会话已撤销授权或关闭收集，未保存这张表情' };
       if (md5 && media.stickerMd5 && md5 !== media.stickerMd5) throw new ChannelError('STICKER_CONTENT_MISMATCH', '聊天表情原图与消息标识不匹配');
       const result = this.channel.library.saveWechatSticker(accountId, { md5: md5 || (validStickerMd5(media.stickerMd5) ? media.stickerMd5 : undefined),
         source: 'chat', message, content: decodeBase64(media.data, MEDIA_LIBRARY_LIMITS.imageBytes), quality: media.quality });

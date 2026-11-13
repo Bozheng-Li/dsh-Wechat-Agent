@@ -25,7 +25,7 @@ function editConfig(root, change) {
   fs.writeFileSync(path.join(root, 'config.yaml'), stringify(config));
 }
 const account = 'fixture-yaml-owner';
-const authorized = { enabled: true, groups: ['fixture@chatroom'], privatePeers: ['alice'], prompt: 'Synthetic account instructions' };
+const authorized = { enabled: true, groups: ['fixture@chatroom'], privatePeers: ['alice'], prompt: 'Synthetic account instructions', publishScope: 'blocked-list', defaultBlockedUserIds: [], defaultBlockedLabelIds: [] };
 
 test('legacy JSON preserves authorization in YAML and backs up the old custom body before switching to the global assistant', t => {
   const root = temporary(t), file = path.join(root, 'storage/state/channel.json');

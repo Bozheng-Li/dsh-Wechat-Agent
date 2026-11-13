@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { atomicJson } from '../../backend/storage/atomic-json.ts';
 import { atomicBytes } from '../../backend/storage/atomic-text.mjs';
 import { ChannelError, publicError } from '../../shared/contracts.mjs';
+import { validateAudienceSelection } from '../../shared/moments-audience.mjs';
 import { momentsPublishingSettings, momentsPlanSettings, momentsPlanId, momentsRunId, nextMomentsOccurrence, visibleMomentsText,
   MOMENTS_TEXT_FALLBACK_RESERVE_MS } from '../../shared/moments-publishing.mjs';
 import { workPath } from '../work/policy.mjs';
@@ -43,7 +44,9 @@ export class MomentsPublishing {
         if (!Number.isSafeInteger(run.scheduledAt) || !Number.isSafeInteger(run.updatedAt) || !['preview', 'schedule'].includes(run.origin) || run.planId !== undefined && (!momentsPlanId(run.planId) || data.plans[run.planId]?.accountId !== run.accountId) ||
             run.image && (!object(run.image) || typeof run.image.path !== 'string' || !new RegExp('^storage/moments/publishing-media/' + id + '\\.(png|jpg)$').test(run.image.path) || !/^[a-f0-9]{64}$/.test(run.image.sha256)) ||
             (run.state === 'sending' || unresolved(run.state)) && (!object(run.query) || run.query.action !== 'publish' || run.query.text !== run.text ||
-              JSON.stringify(run.query.blockedLabelIds) !== JSON.stringify(run.settings.blockedLabelIds) || JSON.stringify(run.query.blockedUserIds) !== JSON.stringify(run.settings.blockedUserIds)) ||
+              (run.settings.useDefaultAudience === true
+                ? !Array.isArray(run.query.blockedLabelIds) || !Array.isArray(run.query.blockedUserIds)
+                : JSON.stringify(run.query.blockedLabelIds) !== JSON.stringify(run.settings.blockedLabelIds) || JSON.stringify(run.query.blockedUserIds) !== JSON.stringify(run.settings.blockedUserIds))) ||
             run.state === 'published' && (!Number.isSafeInteger(run.publishedAt) || !/^[1-9][0-9]{0,19}$/.test(run.postId) || !['server-ack','verified-existing'].includes(run.delivery)) ||
             run.state === 'deleted' && (!/^[1-9][0-9]{0,19}$/.test(run.postId) || !object(run.deletion) || run.deletion.postId !== run.postId ||
               !Number.isSafeInteger(run.deletion.confirmedAt) || !['server-ack', 'verified-existing'].includes(run.deletion.delivery))) throw Error();
@@ -93,7 +96,8 @@ export class MomentsPublishing {
       const reflow = hash({ ...automatic, enabled: false }) !== hash({ ...settings.automatic, enabled: false }) || settings.minGapMinutes !== previous.settings.minGapMinutes || settings.maxPostsPer24Hours !== previous.settings.maxPostsPer24Hours;
       this.arrange(accountId, reflow); this.save(); return this.list(accountId);
     };
-    return !timeOnly && (settings.automatic.content.blockedLabelIds.length || settings.automatic.content.blockedUserIds.length)
+    return !timeOnly && settings.automatic.content.useDefaultAudience !== true &&
+      (settings.automatic.content.blockedLabelIds.length || settings.automatic.content.blockedUserIds.length)
       ? this.validateAudience(accountId, settings.automatic.content, signal, check).then(apply) : apply();
   }
   async validateAudience(accountId, settings, signal, check) {
@@ -138,7 +142,7 @@ export class MomentsPublishing {
     if (previous?.automatic && settings.schedule.type !== 'once') throw new ChannelError('MOMENTS_PLAN_INVALID', '自动生成的计划为单次计划；需要每天或每周重复时，请另加手动计划');
     const nextRunAt = timeOnly ? previous.nextRunAt : nextMomentsOccurrence(settings, this.now());
     if (!timeOnly && settings.enabled && !nextRunAt) throw new ChannelError('MOMENTS_PLAN_INVALID', '启用单次计划时请选择未来的日期和时间');
-    if (!timeOnly && (settings.blockedLabelIds.length || settings.blockedUserIds.length)) {
+    if (!timeOnly && settings.useDefaultAudience !== true && (settings.blockedLabelIds.length || settings.blockedUserIds.length)) {
       await this.validateAudience(accountId, settings, signal, check);
     }
     check(); if (this.activeAccount === accountId && this.activePlanId === selected) this.controller?.abort(new ChannelError('MOMENTS_PLAN_CHANGED', '计划已修改，旧生成或发布已停止'));
@@ -251,11 +255,25 @@ export class MomentsPublishing {
     const bytes = fs.readFileSync(file); if (hash(bytes) !== run.image.sha256) throw new ChannelError('MOMENTS_IMAGE_CHANGED', '保存的配图内容已变化，未发布');
     const image = momentsImage(bytes); return { ...image, mediaType: run.image.path.endsWith('.png') ? 'image/png' : 'image/jpeg' };
   }
-  query(run) {
+  /** 账号级默认屏蔽名单按提交时的实时通讯录裁剪：失效编号不再让整条发布失败。 */
+  async defaultAudience(run, signal, check) {
+    const settings = this.channel.store.settings(run.accountId);
+    const stored = validateAudienceSelection({ action: 'publish',
+      blockedUserIds: settings.defaultBlockedUserIds ?? [], blockedLabelIds: settings.defaultBlockedLabelIds ?? [] });
+    if (!stored.blockedUserIds.length && !stored.blockedLabelIds.length) return stored;
+    const snapshot = await this.channel.moments.audienceOwner(run.accountId, signal, check); check();
+    const contacts = new Set(snapshot.contacts.map(row => row.id)), labels = new Map(snapshot.labels.map(row => [row.id, row]));
+    const complete = label => Array.isArray(label?.userIds) && label.memberCount === label.userIds.length &&
+      label.userIds.every(id => contacts.has(id));
+    return { blockedUserIds: stored.blockedUserIds.filter(id => contacts.has(id)),
+      blockedLabelIds: stored.blockedLabelIds.filter(id => complete(labels.get(id))) };
+  }
+  query(run, audience) {
     if (!visibleMomentsText(run.text) || run.text.trim().length > run.settings.maxChars)
       throw new ChannelError('MOMENTS_CONTENT_INVALID', '草稿须有可见正文且在计划字数上限内，未发布');
     if (run.settings.image.mode === 'ai' && !run.image && !run.textOnly) throw new ChannelError('MOMENTS_IMAGE_UNAVAILABLE', '配图尚未准备好');
-    return { action: 'publish', text: run.text, blockedLabelIds: run.settings.blockedLabelIds, blockedUserIds: run.settings.blockedUserIds,
+    const blocked = audience ?? { blockedLabelIds: run.settings.blockedLabelIds, blockedUserIds: run.settings.blockedUserIds };
+    return { action: 'publish', text: run.text, blockedLabelIds: blocked.blockedLabelIds, blockedUserIds: blocked.blockedUserIds,
       ...(run.image && !run.textOnly ? { images: [(({ data, width, height }) => ({ data, width, height }))(this.contentImage(run.accountId, run.id))] } : {}) };
   }
   async submit(run, signal, check) {
@@ -274,7 +292,10 @@ export class MomentsPublishing {
     const current = () => { check(); this.channel.momentsAutomation?.materials.assertSelection(run.accountId, run.materialContextRefs || run.selectedMaterials || []); };
     current();
     check(); if (this.recent(run.accountId).some(text => similarMomentsText(text, run.text))) throw new ChannelError('MOMENTS_CONTENT_DUPLICATE', '这份草稿与近期已发布内容过于相似，未提交');
-    const query = this.query(run); run.query = query; run.state = 'sending'; run.stage = 'sending'; run.updatedAt = this.now(); this.save();
+    const audience = run.settings.useDefaultAudience === true ? await this.defaultAudience(run, signal, check)
+      : { blockedLabelIds: run.settings.blockedLabelIds, blockedUserIds: run.settings.blockedUserIds };
+    check();
+    const query = this.query(run, audience); run.query = query; run.state = 'sending'; run.stage = 'sending'; run.updatedAt = this.now(); this.save();
     const receipt = await this.channel.moments.writeOwner(query, run.accountId, run.requestId, signal, current);
     this.published(run, receipt); return receipt;
   }

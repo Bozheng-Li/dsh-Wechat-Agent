@@ -253,6 +253,10 @@ export const automationCss = `
 .wa-panel .wa-moments-composer textarea{min-height:210px;font-size:14px;line-height:1.95}
 .wa-panel .wa-composer-count{text-align:right;font-size:11px;font-weight:400;color:var(--wa-muted);font-variant-numeric:tabular-nums;margin-top:-4px}
 .wa-panel .wa-moments-composer label:has(input[type=file]){margin-top:22px}
+.wa-panel .wa-moments-publish-scope{display:flex;flex-wrap:wrap;gap:8px;margin:2px 0 10px}
+.wa-panel .wa-moments-publish-scope>.wa-wb-check{display:inline-flex;align-items:center;gap:7px;padding:7px 11px;margin:0;border:1px solid var(--wa-border);border-radius:5px;font-size:12px;background:var(--wa-surface)}
+.wa-panel .wa-moments-publish-scope>.wa-wb-check:has(input:checked){border-color:var(--wa-accent);background:var(--wa-accent-soft)}
+.wa-panel .wa-moments-publish-scope>.wa-wb-check>input{margin:0;width:13px;height:13px;accent-color:var(--wa-accent)}
 .wa-panel .wa-moments-photos{display:grid;grid-template-columns:repeat(auto-fill,minmax(125px,1fr));gap:12px;margin:18px 0;max-width:690px}
 .wa-panel .wa-moments-photos>figure{margin:0;min-width:0;background:var(--wa-subtle);border:1px solid var(--wa-border-soft);border-radius:6px;overflow:hidden}
 .wa-panel .wa-moments-photos img{display:block;width:100%;height:150px;object-fit:cover;border-radius:5px;max-width:100%}

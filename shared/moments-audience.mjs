@@ -1,7 +1,19 @@
-import { ChannelError } from './contracts.mjs';
+import { ChannelError } from './errors.mjs';
 
 export const audienceUserId = id => typeof id === 'string' && /^[\w.:-]{1,256}$/.test(id);
 export const audienceLabelId = id => typeof id === 'string' && /^[1-9]\d{0,9}$/.test(id) && BigInt(id) <= 0xffffffffn;
+/** 账号级默认屏蔽名单：手动发布页预填，自动路径勾选后使用。 */
+export const DEFAULT_AUDIENCE_LIMITS = Object.freeze({ defaultBlockedUserIds: 50000, defaultBlockedLabelIds: 1000 });
+export function validateDefaultAudience(input = {}) {
+  const value = {};
+  for (const [key, valid, label] of [['defaultBlockedUserIds', audienceUserId, '联系人'], ['defaultBlockedLabelIds', audienceLabelId, '标签']]) {
+    const list = input[key] ?? [], max = DEFAULT_AUDIENCE_LIMITS[key];
+    if (!Array.isArray(list) || list.length > max || list.some(id => !valid(id)))
+      throw new ChannelError('INVALID_MOMENTS_AUDIENCE', `默认屏蔽名单只能使用读取到的${label}编号，最多 ${max} 项；未保存`);
+    value[key] = [...new Set(list)];
+  }
+  return value;
+}
 export function validateAudienceSelection(query) {
   for (const [key, valid, max] of [['blockedUserIds', audienceUserId, 50000], ['blockedLabelIds', audienceLabelId, 1000]]) {
     const value = query[key];

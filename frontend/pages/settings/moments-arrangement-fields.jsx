@@ -1,8 +1,10 @@
 import { AudiencePicker } from '../moments/audience-picker.jsx';
 
-export function ArrangementFields({ value, onChange, settings, data, audience, audienceError, loadAudience, busy, online }) {
+export function ArrangementFields({ value, onChange, settings, data, audience, audienceError, loadAudience, busy, online, defaultAudience }) {
   const update = patch => onChange({ ...value, ...patch });
   const content = patch => update({ content: { ...value.content, ...patch } });
+  const defaults = defaultAudience ?? { blockedLabelIds: [], blockedUserIds: [] },
+    defaultCount = defaults.blockedLabelIds.length + defaults.blockedUserIds.length;
   return <section className="wa-moments-arrangement" data-testid="moments-arrangement">
     <h3>自动安排计划</h3>
     <label className="wa-wb-check"><input type="checkbox" role="switch" aria-label="按每天次数自动生成发布计划" checked={value.enabled} disabled={busy} onChange={e => update({ enabled: e.target.checked })} />按每天次数自动生成发布计划</label>
@@ -29,7 +31,11 @@ export function ArrangementFields({ value, onChange, settings, data, audience, a
         {value.content.image.mode === 'ai' && <label>配图要求<textarea aria-label="自动安排配图要求" rows={2} maxLength={2000} value={value.content.image.instructions} onChange={e => content({ image: { ...value.content.image, instructions: e.target.value } })} /></label>}
         <label className="wa-wb-check"><input type="checkbox" aria-label="自动安排联网取材" checked={value.content.research} onChange={e => content({ research: e.target.checked })} />生成前联网取材</label>
         {value.content.research && <label>公开搜索主题（可留空）<input aria-label="自动安排搜索主题" maxLength={240} value={value.content.researchQuery} onChange={e => content({ researchQuery: e.target.value })} /></label>}
-        <AudiencePicker data={audience} error={audienceError} labelIds={value.content.blockedLabelIds} userIds={value.content.blockedUserIds} onChange={content} onRead={loadAudience} busy={busy} online={online} />
+        <label className="wa-wb-check"><input type="checkbox" aria-label="自动安排使用默认屏蔽名单" checked={!!value.content.useDefaultAudience}
+          onChange={e => content({ useDefaultAudience: e.target.checked })} />使用默认屏蔽名单（在发朋友圈页维护）</label>
+        {value.content.useDefaultAudience
+          ? <p className="wa-wb-note">当前默认名单：{defaults.blockedLabelIds.length} 个标签、{defaults.blockedUserIds.length} 位联系人。{defaultCount ? '' : '名单为空，发布时不会额外屏蔽任何人。'}在“朋友圈 → 发朋友圈”里维护。</p>
+          : <AudiencePicker data={audience} error={audienceError} labelIds={value.content.blockedLabelIds} userIds={value.content.blockedUserIds} onChange={content} onRead={loadAudience} busy={busy} online={online} />}
       </details>
     </>}
     {data?.settings.automatic?.enabled && <div className="wa-moments-arrangement-status" role="status">

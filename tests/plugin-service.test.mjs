@@ -8,7 +8,7 @@ import { StateStore, WechatChannel, createPluginService, rpcHandler, identity, a
 const base = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../storage/tmp');
 const account = { id: 'wxid_service_owner', nickname: '测试账号' };
 const roomA = 'service-a@chatroom', roomB = 'service-b@chatroom';
-const settings = { enabled: true, privatePeers: ['alice'], groups: [roomA, roomB], prompt: '' };
+const settings = { enabled: true, privatePeers: ['alice'], groups: [roomA, roomB], prompt: '', publishScope: 'blocked-list', defaultBlockedUserIds: [], defaultBlockedLabelIds: [] };
 const persona = { name: '小胖', aliases: ['胖胖'], background: '日常聊天助手', personality: '友善，直接', style: '简洁' };
 const config = (mode = 'default') => ({ mode, minMessages: 5, maxMessages: 20, recordsPath: '' });
 const selector = (peerId = roomA, chatType = 'group') => ({ accountId: account.id, chatType, peerId });

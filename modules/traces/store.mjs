@@ -14,6 +14,13 @@ const dateOf = id => id.slice(0, 4) + '-' + id.slice(4, 6) + '-' + id.slice(6, 8
 const dayOf = time => new Date(time).toISOString().slice(0, 10);
 const error = (code, message) => new ChannelError(code, message);
 const json = value => JSON.stringify(value, null, 2) + '\n';
+const TRACE_PRESETS = new Set(['all', 'meaningful']);
+const skipReason = value => {
+  if (typeof value !== 'string') return undefined;
+  const text = traceSnippet(value, 40).trim();
+  return text || undefined;
+};
+const durationOf = row => row.finishedAt && row.startedAt ? Math.max(0, row.finishedAt - row.startedAt) : null;
 async function eachConcurrent(items, action) {
   let index = 0, failure;
   await Promise.all(Array.from({ length: Math.min(4, items.length) }, async () => {
@@ -133,6 +140,7 @@ export class ExecutionTraces {
         eventCount: 0, stepCount: 0, modelCalls: 0, toolCalls: 0, coverage: spec.coverage || 'recorded', runtimeId: this.runtimeId,
         parentTraceId: spec.parentTraceId || (parent?.row.accountId === spec.accountId ? parent.row.id : null),
         inputPreview: traceSnippet(typeof spec.input === 'string' ? spec.input : spec.input?.question || spec.input?.request || ''),
+        ...(skipReason(spec.reason) ? { reason: skipReason(spec.reason) } : {}),
       };
       day.rows.push(row);
       const context = { store: this, row, day, parentId: null }; this.contexts.set(id, context);
@@ -167,20 +175,24 @@ export class ExecutionTraces {
     }) || null;
   }
   event(context, title, value, kind = 'stage') { const step = this.startStep(context, { title, kind }); step?.end({ output: value }); }
-  update(context, { state, output, note } = {}) {
+  update(context, { state, output, note, reason } = {}) {
     if (!context || this.closed || this.erased.has(context.row.id)) return;
     this.safe(() => {
-      const row = context.row;
+      const row = context.row, explicit = skipReason(reason);
       if (state && Object.hasOwn(TRACE_STATES, state)) {
         if (row.state !== state) this.event(context, TRACE_STATES[state], note ? { reason: note } : undefined, 'lifecycle');
         row.state = state;
         if (state === 'running') row.startedAt ??= this.now();
         if (!TRACE_ACTIVE.has(state)) row.finishedAt = this.now();
       }
+      if (state === 'skipped' || row.state === 'skipped') {
+        const detail = explicit || skipReason(output?.reason) || skipReason(output?.skipReason) || skipReason(output?.error);
+        if (detail) row.reason = detail;
+      }
       if (output !== undefined) row.output = this.payload(context, output);
       if (note) row.note = traceSnippet(note, 500);
       row.updatedAt = this.now(); this.mark(context.day);
-      this.persist(context, { event: 'task-update', state: row.state, finishedAt: row.finishedAt, note: row.note, output: row.output });
+      this.persist(context, { event: 'task-update', state: row.state, finishedAt: row.finishedAt, note: row.note, reason: row.reason, output: row.output });
     });
   }
   run(spec, action, { output = value => value } = {}) {
@@ -188,7 +200,10 @@ export class ExecutionTraces {
     if (!context) return action();
     this.update(context, { state: 'running' });
     return withTrace(context, () => {
-      try { return observeResult(action(), result => { const value = output(result); this.update(context, { state: traceState(value), output: value }); },
+      try { return observeResult(action(), result => {
+        const value = output(result), state = traceState(value);
+        this.update(context, { state, output: value, reason: spec.reason ?? (state === 'skipped' ? value?.reason ?? value?.skipReason ?? value?.error : undefined) });
+      },
         failure => this.update(context, { state: traceState(undefined, failure), output: failure, note: failure?.message })); }
       catch (failure) { this.update(context, { state: traceState(undefined, failure), output: failure, note: failure?.message }); throw failure; }
     });
@@ -263,9 +278,14 @@ export class ExecutionTraces {
     if (strict && this.writeFailure) throw this.writeFailure;
   }
   pendingSave(row) { return (this.durableSeq.get(row.id) ?? row.eventCount) < row.eventCount; }
-  async list(accountId, { type = 'all', state = 'all', query = '', from, to, startAt, endAt, offset = 0, limit = 30 } = {}) {
-    if (!this.enabled) return { items: [], total: 0, counts: {}, warning: this.warning, startedAt: this.startedAt, enabled: false };
+  async list(accountId, options = {}) {
+    let { type = 'all', state = 'all', query = '', preset = 'all', from, to, startAt, endAt, offset = 0, limit = 30 } = options || {};
+    // The UI and the older callers spell this filter both ways.
+    if (state === 'problem') state = 'problems';
+    if (!this.enabled) return { items: [], total: 0, counts: {}, hidden: { skipped: 0 }, summary: { total: 0, active: 0, problems: 0, skipped: 0, averageMs: null },
+      warning: this.warning, startedAt: this.startedAt, enabled: false };
     if (!TRACE_TYPES.some(row => row[0] === type) || !['all', 'problems', ...Object.keys(TRACE_STATES)].includes(state) ||
+      !TRACE_PRESETS.has(preset) ||
       typeof query !== 'string' || query.length > 200 || !Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 100)
       throw error('TRACE_FILTER_INVALID', '轨迹筛选或分页条件不正确');
     from ??= dayOf(this.now() - 6 * 86400000); to ??= dayOf(this.now());
@@ -286,9 +306,18 @@ export class ExecutionTraces {
     rows = rows.filter(row => (type === 'all' || row.type === type) && (state === 'all' || state === 'problems' && (TRACE_PROBLEMS.has(row.state) || row.failedSteps > 0) || row.state === state) &&
       (!normalized || [row.id, row.title, row.inputPreview, row.peerId, row.actor, row.note, row.lastStepError].filter(Boolean).join('\n').toLocaleLowerCase().includes(normalized)))
       .sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id));
-    const completed = rows.filter(row => row.finishedAt && row.startedAt), durations = completed.map(row => Math.max(0, row.finishedAt - row.startedAt));
-    return { items: rows.slice(offset, offset + limit).map(row => ({ ...row, pendingSave: this.pendingSave(row) })), total: rows.length, offset, limit, from, to, counts,
-      summary: { total: rows.length, active: rows.filter(row => TRACE_ACTIVE.has(row.state)).length, problems: rows.filter(row => TRACE_PROBLEMS.has(row.state) || row.failedSteps > 0).length,
+    const skipped = rows.filter(row => row.state === 'skipped');
+    // 'meaningful' only hides skip rows that did no model and no tool work; a
+    // skipped row that did call something still says what happened.
+    const visible = preset === 'meaningful' ? rows.filter(row => !(row.state === 'skipped' && !row.modelCalls && !row.toolCalls)) : rows;
+    // The average is an honest "actual work" number: rows that called nothing, or
+    // that never finished, would drag it toward zero.
+    const completed = visible.filter(row => row.finishedAt && row.startedAt && (row.modelCalls || row.toolCalls)),
+      durations = completed.map(row => Math.max(0, row.finishedAt - row.startedAt));
+    return { items: visible.slice(offset, offset + limit).map(row => ({ ...row, durationMs: durationOf(row), pendingSave: this.pendingSave(row) })),
+      total: visible.length, offset, limit, from, to, counts, hidden: { skipped: rows.length - visible.length },
+      summary: { total: visible.length, active: visible.filter(row => TRACE_ACTIVE.has(row.state)).length,
+        problems: visible.filter(row => TRACE_PROBLEMS.has(row.state) || row.failedSteps > 0).length, skipped: skipped.length,
         averageMs: durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : null },
       warning: this.warning, startedAt: this.startedAt, enabled: true, revision: this.revision };
   }

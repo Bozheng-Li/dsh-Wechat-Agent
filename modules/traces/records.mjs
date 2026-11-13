@@ -27,7 +27,8 @@ export const recordOutput = record => ({ state: record.state, reply: record.repl
 export const recordSpec = record => ({ key: 'record:' + record.key, type: recordType(record), accountId: record.accountId,
   peerId: record.peerId, chatType: record.chatType, actor: record.sender || record.senderId, source: record.mode === 'scheduled' ? 'schedule' : 'chat',
   title: traceSnippet(record.question || (record.mode === 'scheduled' ? '定时执行' : '会话回复'), 100), createdAt: record.createdAt,
-  input: recordInput(record), state: recordState(record) });
+  input: recordInput(record), state: recordState(record),
+  ...(recordState(record) === 'skipped' && record.reason ? { reason: record.reason } : {}) });
 export const workSpec = job => ({ key: 'work:' + job.id, type: 'work', accountId: job.accountId, peerId: job.peerId,
   chatType: job.chatType, actor: job.senderName || job.senderId, source: 'chat', createdAt: job.createdAt,
   title: traceSnippet(job.request, 100), input: { request: job.request, jobId: job.id, continues: job.continues,
@@ -56,6 +57,8 @@ export function historicalTraces(channel) {
   const summary = entry => ({ id: id(entry.spec), accountId: entry.spec.accountId, type: entry.spec.type, title: entry.spec.title,
     sourceKey: entry.spec.key, peerId: entry.spec.peerId, chatType: entry.spec.chatType, actor: traceSnippet(entry.spec.actor || '', 120),
     state: entry.state, createdAt: entry.spec.createdAt, startedAt: entry.startedAt || null, finishedAt: entry.finishedAt || null,
+    durationMs: entry.finishedAt && entry.startedAt ? Math.max(0, entry.finishedAt - entry.startedAt) : null,
+    reason: entry.state === 'skipped' ? traceSnippet(entry.output?.reason || '', 40) || undefined : undefined,
     updatedAt: entry.finishedAt || entry.spec.createdAt, coverage: 'historical', inputPreview: traceSnippet(entry.spec.input.question || entry.spec.input.request || ''),
     modelCalls: entry.metrics?.length || 0, toolCalls: entry.operations?.length || 0, note: '历史摘要：当时没有记录完整步骤，只展示已保存的输入、结果和调用统计。' });
   return {

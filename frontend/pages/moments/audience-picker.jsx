@@ -10,7 +10,7 @@ export function audiencePreview(data, labelIds, userIds) {
   return { missing, count: merged.size };
 }
 
-export function AudiencePicker({ data, labelIds, userIds, onChange, onRead, busy, online, error }) {
+export function AudiencePicker({ data, labelIds, userIds, onChange, onRead, busy, online, error, heading = '可见范围' }) {
   const [labelSearch, setLabelSearch] = useState(''), [userSearch, setUserSearch] = useState(''), [limit, setLimit] = useState(100);
   const normalize = value => String(value ?? '').normalize('NFKC').toLocaleLowerCase();
   const labels = (data?.labels ?? []).filter(row => normalize(row.name).includes(normalize(labelSearch).trim()));
@@ -18,7 +18,7 @@ export function AudiencePicker({ data, labelIds, userIds, onChange, onRead, busy
   const preview = audiencePreview(data, labelIds, userIds), selected = labelIds.length + userIds.length;
   const toggle = (key, values, id, checked) => onChange({ [key]: checked ? [...values, id] : values.filter(value => value !== id) });
   return <section className="wa-audience-picker wa-form-section" data-testid="moments-audience">
-    <div className="wa-audience-heading"><h3>可见范围</h3><span className="wa-audience-count">{selected ? `已选 ${selected} 项` : '默认可见'}</span></div>
+    <div className="wa-audience-heading"><h3>{heading}</h3><span className="wa-audience-count">{selected ? `已选 ${selected} 项` : '默认可见'}</span></div>
     <p className="wa-wb-note">选择不能看这条朋友圈的标签或联系人；发布时按最新标签成员合并去重。</p>
     <div className="wa-wb-actions"><Button quiet disabled={busy || !online} onClick={onRead}>{data ? '刷新微信标签与联系人' : '读取微信标签与联系人'}</Button>
       {selected > 0 && <Button quiet disabled={busy} onClick={() => onChange({ blockedLabelIds: [], blockedUserIds: [] })}>清空屏蔽选择</Button>}</div>

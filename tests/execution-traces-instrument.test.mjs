@@ -100,6 +100,15 @@ test('an unavailable observer never duplicates or fails an already performed act
   withTrace(context, () => withTrace(null, () => assert.equal(currentTrace(), undefined)));
 });
 
+test('a skipped conversation record keeps the rule that fired instead of a bare label', async t => {
+  const channel = fixture(t), record = { key: 'skip-1', accountId: 'fixture-account', createdAt: Date.now(), state: 'queued', question: '测试输入' };
+  channel.store.add(record);
+  channel.store.update(record, { state: 'skipped', reason: '群消息未 @ 当前账号' });
+  const [row] = (await channel.traces.list('fixture-account')).items;
+  assert.equal(row.state, 'skipped'); assert.equal(row.reason, '群消息未 @ 当前账号');
+  assert.equal((await channel.traces.list('fixture-account', { preset: 'meaningful' })).hidden.skipped, 1);
+});
+
 test('explicit partial, cancelled and unverified receipts are not mislabeled as success or failure', () => {
   assert.equal(traceState({ state: 'partial', error: 'one part failed' }), 'partial');
   assert.equal(traceState({ state: 'cancelled', error: 'stopped' }), 'cancelled');

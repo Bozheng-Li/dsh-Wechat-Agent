@@ -1,4 +1,4 @@
-import { ChannelError, authorizedConversation } from '../../shared/contracts.mjs';
+import { ChannelError, authorizedConversation, publishScopeOf } from '../../shared/contracts.mjs';
 import { assertConversationAuthorized, personAuthorized, authorizationEpoch, assertAuthorizationEpoch } from '../../shared/authorization.mjs';
 import { filterAuthorizedMoments, filterAuthorizedMomentsImages, assertMomentTargetAuthorized, assertMomentReplyAuthorized } from '../moments/read.mjs';
 import { purgeConversationData } from './conversations.mjs';
@@ -40,21 +40,25 @@ export class ObjectAuthorization {
         await assertMomentTargetAuthorized(channel, input.accountId, input.query.postId, signal, check);
       return { ...input, authorizedUserIds: this.people(input.accountId) };
     };
+    const publishScope = accountId => publishScopeOf(channel.store.settings(accountId));
     const write = async (input, signal, check) => {
-      if (input.query?.action === 'publish' && !this.people(input.accountId).length)
+      const publish = input.query?.action === 'publish', authorized = publish && publishScope(input.accountId) === 'authorized';
+      if (authorized && !this.people(input.accountId).length)
         throw new ChannelError('OBJECT_NOT_AUTHORIZED', '当前没有已授权的好友，未上传或发布朋友圈。', { snsDelivery: 'not-sent' });
-      if (input.query?.action !== 'publish') {
+      if (!publish) {
         await assertMomentTargetAuthorized(channel, input.accountId, input.query?.postId, signal, check);
         if (input.query?.replyToCommentId)
           await assertMomentReplyAuthorized(channel, input.accountId, input.query.postId, input.query.replyToCommentId, signal, check);
       }
-      return { ...input, authorizedUserIds: this.people(input.accountId) };
+      // 自定义屏蔽名单不需要授权名单：只有“仅授权好友可见”才让传输层屏蔽未授权好友。
+      return publish && !authorized ? input : { ...input, authorizedUserIds: this.people(input.accountId) };
     };
     const images = async (input, signal, check) => {
       await assertMomentTargetAuthorized(channel, input.accountId, input.query?.postId, signal, check); return input;
     };
     const finishWrite = (value, input) => {
-      if (input.query?.action === 'publish') assertPublicationAuthorization(value, input.accountId, input.authorizedUserIds);
+      if (input.query?.action === 'publish' && (publishScope(input.accountId) === 'authorized' || value?.authorizationConfirmed === true))
+        assertPublicationAuthorization(value, input.accountId, input.authorizedUserIds ?? this.people(input.accountId));
       return value;
     };
     wrap('writeMoments', write, finishWrite, true);

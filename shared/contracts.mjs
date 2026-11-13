@@ -1,5 +1,7 @@
 import { personaText } from '../prompts/personas/text.mjs';
 import { personaFromPreset } from '../prompts/personas/catalog.mjs';
+import { ChannelError } from './errors.mjs';
+import { validateDefaultAudience } from './moments-audience.mjs';
 import manifest from "../package.json" with { type: 'json' };
 
 export const CHANNEL = '/wechat-agent';
@@ -8,14 +10,8 @@ export const AGENT_WORKSPACE_NAME = '微信agent';
 export const MAX_TEXT = 12000;
 export const DEFAULT_TAVILY_URL = 'https://api.tavily.com';
 
-export class ChannelError extends Error {
-  constructor(code, message, details = {}) {
-    super(message);
-    this.name = 'ChannelError';
-    this.code = code;
-    this.details = details;
-  }
-}
+// 错误类型来自叶子模块，避免校验器与合约互相引用。
+export { ChannelError };
 
 export function searchBaseURL(input = DEFAULT_TAVILY_URL) {
   let url;
@@ -40,8 +36,26 @@ export function searchBaseURL(input = DEFAULT_TAVILY_URL) {
   return url.href.replace(/\/+$/, '');
 }
 
+/** 朋友圈发布可见范围：自定义屏蔽名单（默认，不自动屏蔽）或仅授权好友可见。 */
+export const PUBLISH_SCOPES = ['blocked-list', 'authorized'];
+export const DEFAULT_PUBLISH_SCOPE = 'blocked-list';
+
+export function validatePublishScope(value) {
+  if (!PUBLISH_SCOPES.includes(value))
+    throw new ChannelError(
+      'INVALID_PUBLISH_SCOPE',
+      '朋友圈可见范围只能是“自定义屏蔽名单”或“仅授权好友可见”，未保存'
+    );
+  return value;
+}
+
+/** Older accounts never stored a scope; keep their publisher audience unchanged. */
+export const publishScopeOf = settings =>
+  PUBLISH_SCOPES.includes(settings?.publishScope) ? settings.publishScope : DEFAULT_PUBLISH_SCOPE;
+
 export function emptySettings() {
-  return { enabled: false, privatePeers: [], groups: [], prompt: '' };
+  return { enabled: false, privatePeers: [], groups: [], prompt: '', publishScope: DEFAULT_PUBLISH_SCOPE,
+    defaultBlockedUserIds: [], defaultBlockedLabelIds: [] };
 }
 
 export function emptyPersona(identity) {
@@ -380,6 +394,10 @@ export function validateSettings(input) {
     privatePeers: peers(input.privatePeers, false),
     groups: peers(input.groups, true),
     prompt: input.prompt.trim(),
+    // 旧账号没有这个字段，缺省按“自定义屏蔽名单”保存，避免恢复自动屏蔽全部好友。
+    publishScope: input.publishScope === undefined ? DEFAULT_PUBLISH_SCOPE : validatePublishScope(input.publishScope),
+    // 账号级默认屏蔽名单只预填手动发布页；自动发布须显式勾选后才会使用。
+    ...validateDefaultAudience(input),
   };
 }
 

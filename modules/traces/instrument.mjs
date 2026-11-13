@@ -40,7 +40,7 @@ export function attachExecutionTraces(channel) {
     const context = recordContext(record, initial); if (!context) return;
     if (!initial && Object.keys(fields).some(key => !['requestMetrics', 'updatedAt'].includes(key))) traces.event(context, updateTitle(fields), fields);
     if (record.sessionId) context.row.sessionId = record.sessionId;
-    traces.update(context, { state: recordState(record), ...(!TRACE_ACTIVE.has(recordState(record)) ? { output: recordOutput(record), note: record.reason } : {}) });
+    traces.update(context, { state: recordState(record), ...(!TRACE_ACTIVE.has(recordState(record)) ? { output: recordOutput(record), note: record.reason, reason: record.reason } : {}) });
   }
   replace(channel.store, 'remember', (original, args) => {
     const result = original(); if (result && args[2]) traces.safe(() => recorded(args[2], {}, true)); return result;
@@ -144,6 +144,7 @@ export function attachExecutionTraces(channel) {
     output: (value, [accountId], previous) => {
       const runs = Object.values(publishing.data.runs).filter(run => run.accountId === accountId && previous.get(run.id) !== runFingerprint(run));
       return runs.length ? { state: runs.length === 1 ? traceState(runs[0]) : runs.some(run => traceState(run) !== 'completed') ? 'partial' : 'completed',
+        ...(runs.length === 1 && traceState(runs[0]) === 'skipped' ? { reason: runs[0].reason || runs[0].error } : {}),
         runs: runs.map(({ query, ...run }) => run) } : value;
     },
   });

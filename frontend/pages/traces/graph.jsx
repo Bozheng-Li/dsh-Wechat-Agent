@@ -18,13 +18,14 @@ export function ExecutionGraph({ trace, steps, selectedStep, onStep, onTask, onR
   const focused = hovered || selectedStep || focusedNode, active = graph.nodes.some(node => node.id === focused) ? focused : null;
   const related = new Set([active]);
   for (const edge of graph.edges) if (edge.from === active || edge.to === active) { related.add(edge.from); related.add(edge.to); }
-  const homeScale = clamp(Math.min((size.width - 28) / graph.width, (size.height - 50) / graph.height), .23, 1.08);
+  const homeMax = graph.nodes.length <= 8 ? 1.25 : 1.08;
+  const homeScale = clamp(Math.min((size.width - 28) / graph.width, (size.height - 50) / graph.height), .23, homeMax);
   const exploring = Math.abs(camera.scale - homeScale) > .025 || Math.abs(camera.x - (size.width - graph.width * homeScale) / 2) > 25 || Math.abs(camera.y - (size.height - graph.height * homeScale) / 2) > 25;
   const canShowMap = size.width >= 580 && size.height >= 220, showMap = canShowMap && (mapMode === 'open' || mapMode === 'auto' && exploring);
   const bounds = useRef({ graph, size }); bounds.current = { graph, size };
   const fit = () => {
     const { graph: layout, size: viewport } = bounds.current;
-    const scale = clamp(Math.min((viewport.width - 28) / layout.width, (viewport.height - 50) / layout.height), .23, 1.08);
+    const scale = clamp(Math.min((viewport.width - 28) / layout.width, (viewport.height - 50) / layout.height), .23, layout.nodes.length <= 8 ? 1.25 : 1.08);
     setMotion(true);
     setCamera({ scale, x: (viewport.width - layout.width * scale) / 2, y: (viewport.height - layout.height * scale) / 2 });
   };
@@ -54,7 +55,7 @@ export function ExecutionGraph({ trace, steps, selectedStep, onStep, onTask, onR
   }, []);
   const openGroup = group => { setExpanded(value => value === group ? null : group); setPage(0); onStep(null); };
   const returnToGraph = () => { setExpanded(null); setPage(0); onStep(null); };
-  return <div className="wa-trace-graph" data-testid="execution-graph" data-motion={motion} data-focusing={!!active}>
+  return <div className="wa-trace-graph" data-testid="execution-graph" data-motion={motion} data-focusing={!!active} data-density={graph.nodes.length <= 8 ? 'sparse' : 'dense'}>
     <div className="wa-trace-graph-toolbar">
       <div className="wa-trace-graph-breadcrumb"><span className="wa-trace-view-symbol"><Glyph name="grid" size={13} /></span><button type="button" onClick={returnToGraph} disabled={!expanded}>本次执行</button>
         {graph.selected && <><Glyph name="arrow" size={13} /><strong>{graph.selected.title}</strong></>}</div>
