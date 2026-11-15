@@ -36,6 +36,7 @@ export function createPluginService({
   identity,
   relocateWorkspace,
   startupError,
+  starting = false,
   isDisposed = () => false,
   lifetime = new AbortController().signal,
   dshSessionPath = null,
@@ -45,6 +46,7 @@ export function createPluginService({
   let cleanup = new OwnerCleanup(channel, scheduler);
   let discovered;
   let relocating = false;
+  let startupSlow = false;
   const state = {
     get discovered() {
       return discovered;
@@ -87,7 +89,7 @@ export function createPluginService({
   const status = () => {
     const state = worker?.status() ?? {
       online: false,
-      state: 'error',
+      state: starting ? 'starting' : 'error',
       account: null,
       login: { state: 'idle' },
       runtimeReady: false,
@@ -117,6 +119,8 @@ export function createPluginService({
       defaultModel,
       modelChoice: store?.modelChoice() ?? null,
       startupError,
+      starting,
+      startupSlow,
       persona: store?.persona() ?? emptyPersona(),
       modelConfig: store?.modelConfig() ?? { maxTokens: null, temperature: null },
       capabilities: { vision: !!ctx?.attachments?.admitPromptContent, webSearch: !!ctx?.web?.search, momentsRead: state.momentsReadReady === true,
@@ -205,14 +209,25 @@ export function createPluginService({
       ({ root, store, worker, runner, channel, scheduler, identity } = next);
       cleanup = new OwnerCleanup(channel, scheduler);
       startupError = next.startupError;
+      starting = false;
+      startupSlow = false;
       discovered = undefined;
     },
-    setStartupError(error) {
-      startupError = publicError(error, '目录切换后未能重新启动，请保留数据并重新启用插件');
+    setStartupSlow() {
+      if (starting) startupSlow = true;
+    },
+    setStartupError(error, message = '目录切换后未能重新启动，请保留数据并重新启用插件') {
+      starting = false;
+      startupSlow = false;
+      startupError = publicError(error, message);
     },
     call(endpoint, payload = {}, signal) {
       assertLive(signal);
       if (endpoint === 'status') return status();
+      if (starting && endpoint !== 'changelog')
+        throw new ChannelError('PLUGIN_STARTING', '微信插件正在启动，请稍后再试。');
+      if (startupError && !['changelog', 'model.info'].includes(endpoint))
+        throw new ChannelError(startupError.code, startupError.message);
       if (payload.accountId && !['settings', 'contacts'].includes(endpoint) && channel?.authorization?.isCleaning(payload.accountId))
         throw new ChannelError('AUTHORIZATION_CLEANUP_PENDING', '正在清空撤销授权的资料，相关操作保持停止；请在完成后重试。');
       if (TRACE_ENDPOINTS.includes(endpoint)) {

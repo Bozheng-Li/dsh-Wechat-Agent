@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { setTimeout as delay } from 'node:timers/promises';
 import { apply } from '../lib/index.js';
 import { StateStore } from '../lib/testing.js';
 
@@ -21,11 +22,20 @@ test('real plugin workers switch the complete workspace, recover a failed move a
   let dispose, rpc;
   const registered = [];
   const start = async () => {
-    const ctx = { effect: factory => { dispose = factory(); }, connection: { register: (_ctx, _channel, handler) => { rpc = handler; } },
+    const ctx = { appReady: { onReady: listener => { listener(); return () => {}; } },
+      effect: factory => { dispose = factory(); }, connection: { register: (_ctx, _channel, handler) => { rpc = handler; } },
       agentDefaultModel: { currentSelection: () => ({ provider: 'fixture', model: 'fixture' }) }, llm: {} };
     ctx.workspaceRegistry = { create: async (directory, title) => { assert(fs.statSync(directory).isDirectory()); registered.push({ directory, title }); return { title }; } };
     await apply(ctx);
-    const response = await rpc('status', {}, undefined, owner); assert(response.ok); assert(!response.value.startupError, JSON.stringify(response.value.startupError));
+    let response;
+    const deadline = Date.now() + 10_000;
+    do {
+      response = await rpc('status', {}, undefined, owner); assert(response.ok);
+      if (!response.value.starting) break;
+      await delay(20);
+    } while (Date.now() < deadline);
+    assert.equal(response.value.starting, false, 'background startup must settle');
+    assert(!response.value.startupError, JSON.stringify(response.value.startupError));
     const lock = JSON.parse(fs.readFileSync(path.join(bootstrap, 'owner.lock'), 'utf8')); workers.push(lock.workerPid);
     return response.value;
   };

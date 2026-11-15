@@ -72,13 +72,17 @@ export class WechatRuntime {
   async ready() {
     if (this.initializationError) throw this.initializationError;
     await this.servicesReady;
+    this.signal.throwIfAborted();
     await this.channel.authorization.whenIdle().catch(() => {});
     this.signal.throwIfAborted();
     await registerAgentWorkspace(this.ctx, prepareAgentWorkspace(this.store.ensureWorkspace()));
+    this.signal.throwIfAborted();
     await registerAgentWorkspace(this.ctx, this.store.ensureWorkspace(), 'work');
+    this.signal.throwIfAborted();
     await this.channel.work.prepareProjects(this.signal);
     this.signal.throwIfAborted();
     await this.runner.search.refreshCredentials();
+    this.signal.throwIfAborted();
     await this.channel.work.imageGeneration.refreshCredential();
     this.signal.throwIfAborted();
     return this;

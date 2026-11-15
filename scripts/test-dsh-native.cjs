@@ -207,6 +207,31 @@ class FixtureAdapter extends LlmAdapter {
   }
 }
 
+async function verifyNativeReadiness() {
+  const plugin = require(path.join(repo, 'lib/index.js'));
+  const host = new Context(), home = path.join(root, 'readiness-home');
+  const previousHome = process.env.DSH_HOME;
+  process.env.DSH_HOME = home;
+  let listener, rpc;
+  host.provide('appReady', { onReady(callback) { listener = callback; return () => { listener = undefined; }; } });
+  for (const name of plugin.inject) host.provide(name, name === 'connection'
+    ? { register(_owner, _channel, handler) { rpc = handler; } } : {});
+  try {
+    await host.plugin(plugin);
+    assert.equal(typeof listener, 'function', 'the installed Cordis context exposes launcher readiness');
+    const response = await rpc('status', {}, undefined, { principal: { kind: 'owner' } });
+    assert(response.ok); assert.equal(response.value.starting, true); assert.equal(response.value.startupError, undefined);
+    assert(!fs.existsSync(home), 'mounting must not load WeChat data');
+    listener();
+    await host.fiber.dispose();
+    await new Promise(resolve => setImmediate(resolve));
+    assert(!fs.existsSync(home), 'native disposal must cancel the deferred callback');
+  } finally {
+    await host.fiber.dispose();
+    if (previousHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previousHome;
+  }
+}
+
 async function verifyPluginLifecycle(hostContext) {
   const { apply } = require(path.join(repo, 'lib/index.js'));
   const home = path.join(root, 'lifecycle-home'), pluginRoot = path.join(home, 'wechat-agent');
@@ -256,11 +281,18 @@ async function verifyPluginLifecycle(hostContext) {
   syncBuiltinESMExports(); process.env.DSH_HOME = home;
   const start = async () => {
     dispose = undefined; rpc = undefined;
+    let ready;
     await apply({ agentDefaultModel: hostContext.agentDefaultModel, sessionPersistence: hostContext.sessionPersistence,
+      appReady: { onReady: listener => { ready = listener; return () => { ready = undefined; }; } },
       effect: factory => { dispose = factory(); },
       connection: { register: (_owner, channel, handler) => { assert.equal(channel, '/wechat-agent'); rpc = handler; } },
     });
-    assert.equal(typeof dispose, 'function'); assert.equal(typeof rpc, 'function'); await status();
+    assert.equal(typeof dispose, 'function'); assert.equal(typeof rpc, 'function');
+    assert.equal((await status()).starting, true);
+    ready();
+    const deadline = Date.now() + 10_000;
+    while ((await status()).starting && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal((await status()).starting, false, 'background initialization must complete');
   };
   try {
     await start(); publish(false);
@@ -668,6 +700,7 @@ async function verifyPluginLifecycle(hostContext) {
   assert(requests.length - beforeBatches >= 4);
   assert(requests.slice(beforeBatches).every(request => request.messages.filter(message => message.role === 'user')
     .flatMap(message => message.content).reduce((total, block) => total + (block.text?.length ?? 0), 0) < MAX_COMPRESSION_INPUT_CHARS + 4000));
+  await verifyNativeReadiness();
   await verifyPluginLifecycle(ctx);
   const report = { ok: true, dsh: hostRequire('./package.json').version, node: process.versions.node,
     assertions: ['shared native model catalog', 'model choice persistence', 'real provider/model routing on resume', 'chosen model reasoning defaults', 'removed provider refuses fallback', 'return to DSH default', 'real temperature and maxTokens request controls', 'null temperature preserves Host default', 'persona and participation instructions in model prompt', 'workspace stored on create and retained on resume', 'configured Host session root observed through injection', 'Host session root stays independent of workspace', 'real agent create', 'persistent resume', 'complete prompt isolation', 'no inherited tools', 'final reasoning filtering', 'max-token refusal', 'cancellation', 'queued channel-to-agent-to-ACK', 'reload deduplication', 'real plugin apply and WorkerClient shutdown preserve participation progress', 'initial offline snapshots preserve progress but live disconnect resets it'], requests: requests.length, at: new Date().toISOString() };

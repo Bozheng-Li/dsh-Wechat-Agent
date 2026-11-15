@@ -99,7 +99,8 @@ export function WechatPanel({ connection, catalog }) {
           <div className="wa-nav-footer">
             <div className="wa-status-line">
               <span className={'wa-status-dot ' + (status?.online ? 'is-online' : '')} />
-              {status?.online ? '微信已连接' : status ? '微信未连接' : '正在连接'}
+              {status?.starting ? (status.startupSlow ? '微信启动较慢' : '微信正在启动')
+                : status?.online ? '微信已连接' : status ? '微信未连接' : '正在连接'}
             </div>
             <span>v{status?.version || '…'}</span>
           </div>
