@@ -29,7 +29,7 @@ export function AccountCard({ status, busy, blocked, onAction }) {
       <div className="wa-account-detail">
         <div className="wa-status-line wa-login-state">
           <span className={'wa-status-dot ' + (status.online ? 'is-online' : '')} />
-          {status.online ? '已连接，正在同步新消息' : loginLabels[disconnectedState] || '微信未连接'}
+          {status.starting ? '微信插件正在启动' : status.online ? '已连接，正在同步新消息' : loginLabels[disconnectedState] || '微信未连接'}
         </div>
         {status.account && !loading && <details className="wa-account-options">
           <summary>更换登录账号</summary>
@@ -44,7 +44,8 @@ export function AccountCard({ status, busy, blocked, onAction }) {
         <img className="wa-qr" src={status.login.image} alt="微信登录二维码" />
         <p className="wa-help wa-qr-caption">{status.login.state === 'scanned' ? '已扫码，请在手机确认本次登录。' : '请使用手机微信扫码。'}</p>
       </>}
-      {!status.runtimeReady && <p className="wa-alert wa-section-space">缺少登录组件，请安装完整的 Windows x64 插件包。</p>}
+      {status.starting && <p className="wa-help wa-section-space" role="status">正在准备微信服务，完成后会按原设置恢复连接。</p>}
+      {!status.starting && !status.startupError && !status.runtimeReady && <p className="wa-alert wa-section-space">缺少登录组件，请安装完整的 Windows x64 插件包。</p>}
     </section>
   );
 }
