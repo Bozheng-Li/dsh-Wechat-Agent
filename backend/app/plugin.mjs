@@ -167,10 +167,12 @@ export async function apply(ctx) {
   cancelStartup = afterAppReady(ctx, async () => {
     const attempt = new AbortController();
     const signal = AbortSignal.any([lifetime.signal, attempt.signal]);
-    const deadline = setTimeout(() => attempt.abort(new ChannelError(
-      'PLUGIN_STARTUP_TIMEOUT', '微信插件启动超时，请在插件管理中重新启用；Harness 可以继续使用。'
-    )), 60_000);
-    deadline.unref?.();
+    const slowNotice = setTimeout(() => {
+      if (signal.aborted) return;
+      service.setStartupSlow();
+      process.stderr.write('wechat-agent: initialization still pending after 60s; continuing in background\n');
+    }, 60_000);
+    slowNotice.unref?.();
     const startedAt = Date.now();
     try {
       signal.throwIfAborted();
@@ -192,7 +194,7 @@ export async function apply(ctx) {
       lock?.release();
       lock = undefined;
     } finally {
-      clearTimeout(deadline);
+      clearTimeout(slowNotice);
     }
   }, failed, lifetime.signal);
 }

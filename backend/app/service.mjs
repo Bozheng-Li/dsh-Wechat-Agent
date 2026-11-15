@@ -46,6 +46,7 @@ export function createPluginService({
   let cleanup = new OwnerCleanup(channel, scheduler);
   let discovered;
   let relocating = false;
+  let startupSlow = false;
   const state = {
     get discovered() {
       return discovered;
@@ -119,6 +120,7 @@ export function createPluginService({
       modelChoice: store?.modelChoice() ?? null,
       startupError,
       starting,
+      startupSlow,
       persona: store?.persona() ?? emptyPersona(),
       modelConfig: store?.modelConfig() ?? { maxTokens: null, temperature: null },
       capabilities: { vision: !!ctx?.attachments?.admitPromptContent, webSearch: !!ctx?.web?.search, momentsRead: state.momentsReadReady === true,
@@ -208,10 +210,15 @@ export function createPluginService({
       cleanup = new OwnerCleanup(channel, scheduler);
       startupError = next.startupError;
       starting = false;
+      startupSlow = false;
       discovered = undefined;
+    },
+    setStartupSlow() {
+      if (starting) startupSlow = true;
     },
     setStartupError(error, message = '目录切换后未能重新启动，请保留数据并重新启用插件') {
       starting = false;
+      startupSlow = false;
       startupError = publicError(error, message);
     },
     call(endpoint, payload = {}, signal) {

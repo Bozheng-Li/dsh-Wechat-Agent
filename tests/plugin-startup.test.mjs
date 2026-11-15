@@ -94,6 +94,7 @@ test('host boot returns before WeChat starts; status stays responsive during ini
   assert.equal(app.ready.pending, 1);
   const before = await app.status();
   assert.equal(before.starting, true);
+  assert.equal(before.startupSlow, false);
   assert.equal(before.state, 'starting');
   assert.equal(before.runtimeReady, false);
   assert.equal((await app.rpc('connect')).error.code, 'PLUGIN_STARTING');
@@ -108,6 +109,7 @@ test('host boot returns before WeChat starts; status stays responsive during ini
   gate.resolve();
   const ready = await app.settled();
   assert.equal(ready.startupError, undefined);
+  assert.equal(ready.startupSlow, false);
   assert.equal(ready.scheduler.enabled, true);
   await app.dispose();
   assert(!alive(workerPid));
@@ -125,12 +127,20 @@ for (const commitFirst of [false, true]) test(`disabling ${commitFirst ? 'just a
   assert.equal((await app.rpc('status')).error.code, 'PLUGIN_STOPPING');
 });
 
-test('a startup failure is private to the plugin and re-enabling after host readiness recovers', async t => {
-  const f = fixture(t);
-  const broken = await f.mount({ create: async () => { throw new Error('secret=not-for-the-ui'); } });
+test('a real startup failure clears the slow notice and re-enabling after host readiness recovers', async t => {
+  const f = fixture(t), entered = Promise.withResolvers(), gate = Promise.withResolvers();
+  f.release.push(() => gate.resolve());
+  const broken = await f.mount({ create: async () => { entered.resolve(); await gate.promise; } });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   assert.doesNotThrow(() => broken.ready.commit());
+  await entered.promise;
+  t.mock.timers.tick(60_000);
+  assert.equal((await broken.status()).startupSlow, true);
+  t.mock.timers.reset();
+  gate.reject(new Error('secret=not-for-the-ui'));
   const error = await broken.settled();
   assert.equal(error.state, 'error');
+  assert.equal(error.startupSlow, false);
   assert(error.startupError);
   assert(!JSON.stringify(error).includes('not-for-the-ui'));
   assert.equal((await broken.rpc('identity.get')).error.code, error.startupError.code);
@@ -141,13 +151,19 @@ test('a startup failure is private to the plugin and re-enabling after host read
   assert.equal((await restored.settled()).startupError, undefined);
 });
 
-test('disposal during a pending host operation reaps the worker and ignores late readiness', async t => {
+for (const slow of [false, true]) test(`disposal during ${slow ? 'slow' : 'pending'} startup reaps the worker and ignores late readiness`, async t => {
   const f = fixture(t), entered = Promise.withResolvers(), gate = Promise.withResolvers();
   f.release.push(() => gate.resolve());
   let registrations = 0;
   const app = await f.mount({ create: async (_directory, title) => { registrations++; entered.resolve(); await gate.promise; return { title }; } });
+  if (slow) t.mock.timers.enable({ apis: ['setTimeout'] });
   app.ready.commit();
   await entered.promise;
+  if (slow) {
+    t.mock.timers.tick(60_000);
+    assert.equal((await app.status()).startupSlow, true);
+    t.mock.timers.reset();
+  }
   const workerPid = JSON.parse(fs.readFileSync(path.join(f.bootstrap, 'owner.lock'), 'utf8')).workerPid;
   await app.dispose();
   assert(!alive(workerPid));
@@ -158,24 +174,37 @@ test('disposal during a pending host operation reaps the worker and ignores late
   assert.equal((await app.rpc('connect')).error.code, 'PLUGIN_STOPPING');
 });
 
-test('a stuck startup reaches its deadline without taking down the host', async t => {
+test('sixty seconds is a slow notice, not a startup deadline; late completion still succeeds', async t => {
   const f = fixture(t), entered = Promise.withResolvers(), gate = Promise.withResolvers();
   f.release.push(() => gate.resolve());
   const app = await f.mount({ create: async (_directory, title) => { entered.resolve(); await gate.promise; return { title }; } });
   t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.mock.timers.tick(120_000);
+  assert.equal((await app.status()).startupSlow, false, 'waiting for Harness readiness does not count as slow WeChat startup');
   app.ready.commit();
   await entered.promise;
   const workerPid = JSON.parse(fs.readFileSync(path.join(f.bootstrap, 'owner.lock'), 'utf8')).workerPid;
-  t.mock.timers.tick(60_000);
+  t.mock.timers.tick(59_999);
+  assert.equal((await app.status()).startupSlow, false);
+  t.mock.timers.tick(1);
+  const slow = await app.status();
+  assert.equal(slow.startupSlow, true);
+  assert.equal(slow.starting, true);
+  assert.equal(slow.state, 'starting');
+  assert.equal(slow.startupError, undefined);
+  assert.equal((await app.rpc('connect')).error.code, 'PLUGIN_STARTING');
+  assert.equal((await app.rpc('changelog')).ok, true);
+  t.mock.timers.tick(5 * 60_000);
+  assert.equal((await app.status()).starting, true, 'a long initialization is still allowed to finish');
+  assert(alive(workerPid));
+  assert(fs.existsSync(path.join(f.bootstrap, 'owner.lock')));
   t.mock.timers.reset();
-  const failed = await app.settled();
-  assert.equal(failed.startupError.code, 'PLUGIN_STARTUP_TIMEOUT');
-  assert.equal(failed.state, 'error');
-  await until(() => !alive(workerPid), 'timed-out startup left its child running');
-  await until(() => !fs.existsSync(path.join(f.bootstrap, 'owner.lock')), 'timed-out startup retained its lock');
   gate.resolve();
-  await nextTurn();
-  assert.equal((await app.status()).startupError.code, 'PLUGIN_STARTUP_TIMEOUT');
+  const ready = await app.settled();
+  assert.equal(ready.starting, false);
+  assert.equal(ready.startupSlow, false);
+  assert.equal(ready.startupError, undefined);
+  assert.equal(ready.scheduler.enabled, true);
 });
 
 test('readiness is one-shot, deferred even for an already ready host, and owns async rejection', async () => {
