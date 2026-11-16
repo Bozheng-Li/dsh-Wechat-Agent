@@ -186,6 +186,15 @@ test('chat cannot silently omit a named target, borrow a name from history, or c
   assert.equal(f.scheduler.list(owner).tasks.length, 0);
 });
 
+test('a greeting spoken for a future moment is a task request, while recall and translation are not', async t => {
+  const f = schedulerFixture(t), args = { action: 'create', kind: 'message', content: '生日快乐', at: '2026-11-26T00:00:00+08:00' };
+  for (const request of ['明天早上八点祝她生日快乐', '26号0点记得跟她说生日快乐', '26号0点别忘了说句生日快乐'])
+    assert.equal((await execute(conversationTaskTool(f.scheduler, f.scope, () => {}, request), args)).ok, true, request);
+  for (const request of ['我记得26号0点你说过生日快乐', '我听说26号0点他祝你生日快乐', '请翻译“26号0点祝她生日快乐”',
+    '如果我说26号0点祝她生日快乐会怎样', '26号0点我发现一个事', '26号0点跟你打个招呼'])
+    assert.equal((await execute(conversationTaskTool(f.scheduler, f.scope, () => {}, request), args)).code, 'TASK_REQUEST_REQUIRED', request);
+});
+
 test('quick reminders preserve plural audience and route combined recipients to explicit name selection', async t => {
   const f = schedulerFixture(t), args = { action: 'create', content: '喝水', delaySeconds: 60 };
   assert.equal(simpleReminder('一分钟后提醒我们喝水', [], f.now()).audience, 'everyone');

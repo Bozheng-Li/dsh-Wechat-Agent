@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { createHash } from 'node:crypto';
-import { ChannelError, eligible, publicError } from '../../shared/contracts.mjs';
+import { ChannelError, publicError } from '../../shared/contracts.mjs';
+import { conversationEligible } from '../../shared/authorization.mjs';
 import { momentsId } from '../../shared/moments.mjs';
 import { isMomentsLikeRequest, isSelfMomentsLikeRequest, momentsLikeRequestArgs } from '../../shared/moments-like-request.mjs';
 import { remoteAuthorized } from '../remote/authorization/policy.mjs';
@@ -25,7 +26,7 @@ export class MomentsLikeRequests {
     if (!scope || !['private', 'group'].includes(scope.chatType) || typeof scope.peerId !== 'string' || typeof scope.senderId !== 'string' ||
         !scope.senderId || scope.senderId === scope.accountId || scope.senderId.endsWith('@chatroom') ||
         scope.peerId.endsWith('@chatroom') !== (scope.chatType === 'group') || scope.chatType === 'private' && scope.senderId !== scope.peerId ||
-        !eligible(channel.store.settings(scope.accountId), scope))
+        !conversationEligible(channel.store, scope))
       throw new ChannelError('MOMENTS_LIKE_NOT_AUTHORIZED', '只能响应当前已授权会话中真实发起人的点赞请求');
     if (!isMomentsLikeRequest(text)) throw new ChannelError('MOMENTS_LIKE_REQUEST_REQUIRED', '当前消息没有明确请求朋友圈点赞，未读取或提交');
     const manager = channel.momentsAutomation?.likes;

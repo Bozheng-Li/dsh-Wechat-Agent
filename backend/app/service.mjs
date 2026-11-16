@@ -130,7 +130,8 @@ export function createPluginService({
       timeSettings: timeSettings(store?.config?.section('timeSettings')),
       scheduler: { enabled: !!scheduler && !scheduler.stopped, error: scheduler?.error || null },
       authorization: { pendingCount: store?.data.authorizationRevocations?.filter(row => row.accountId === state.account?.id).length || 0,
-        error: channel?.authorization?.error || null },
+        error: channel?.authorization?.error || null,
+        members: state.account && channel?.groupMembers ? channel.groupMembers.status(state.account.id) : null },
       moments: state.account && channel?.momentsAutomation ? channel.momentsAutomation.list(state.account.id) : null,
       storage: {
         ...describeWorkspace(root, store),

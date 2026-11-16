@@ -25,7 +25,7 @@ import { identity, conversationFolder, info, recordInfo } from "./keys.mjs";
 import { CONFIG_FIELDS } from '../config/repository.mjs';
 import { RoleCards } from './role-cards.mjs';
 import { roleCardSettings, roleCardSettingsRevision } from '../../shared/role-card-settings.mjs';
-import { revokedObjects } from '../../shared/authorization.mjs';
+import { revokedObjects, personAuthorized } from '../../shared/authorization.mjs';
 
 /**
  * config.yaml owns settings; channel.json owns the runtime/path index. Each conversation owns one
@@ -141,6 +141,93 @@ export class StateStore {
   settings(accountId) {
     return clone(this.data.accounts[accountId] ?? emptySettings());
   }
+  groupMemberIndex(accountId) {
+    const record = this.data.groupMemberIndex?.[accountId];
+    return record && typeof record === 'object' && !Array.isArray(record) ? record : null;
+  }
+  /** Member ids of every currently authorized group plus everyone ever seen in
+   * one, read synchronously from the refreshed index so authorization checks
+   * never wait on the protocol. The owner can still deny one person: an explicit
+   * revocation is recorded as an exclusion and survives the person remaining in
+   * the group. `seen` exists so that losing membership only revokes access and
+   * never deletes data because of an incomplete protocol read. */
+  groupMemberSets(accountId) {
+    const cached = this.groupMemberCache?.get(accountId);
+    if (cached && cached.revision === this.groupMemberRevision) return cached;
+    const ids = new Set(), seen = new Set(),
+      record = this.groupMemberIndex(accountId),
+      groups = this.data.accounts[accountId]?.groups;
+    if (record && Array.isArray(groups)) {
+      const excluded = new Set(this.data.groupMemberExclusions?.[accountId]?.excludedPersonIds || []),
+        valid = personId => typeof personId === 'string' && !!personId && personId !== accountId &&
+          !personId.endsWith('@chatroom') && !excluded.has(personId);
+      for (const groupId of groups) {
+        const entry = record.groups?.[groupId];
+        if (!entry) continue;
+        for (const personId of entry.ids || []) if (valid(personId)) ids.add(personId);
+        for (const personId of entry.seen || entry.ids || []) if (valid(personId)) seen.add(personId);
+      }
+    }
+    const value = { revision: this.groupMemberRevision, ids, seen };
+    this.groupMemberCache = this.groupMemberCache ?? new Map();
+    this.groupMemberCache.set(accountId, value);
+    return value;
+  }
+  authorizedGroupMemberIds(accountId) {
+    return this.groupMemberSets(accountId).ids;
+  }
+  isGroupMember(accountId, personId) {
+    return this.authorizedGroupMemberIds(accountId).has(personId);
+  }
+  seenGroupMember(accountId, personId) {
+    return this.groupMemberSets(accountId).seen.has(personId);
+  }
+  groupMemberIndexView(accountId) {
+    const record = this.groupMemberIndex(accountId),
+      groups = Array.isArray(this.data.accounts[accountId]?.groups) ? this.data.accounts[accountId].groups : [];
+    return {
+      syncedAt: Number.isFinite(record?.syncedAt) ? record.syncedAt : null,
+      authorizedGroups: groups.length,
+      indexedGroups: groups.filter(groupId => Array.isArray(record?.groups?.[groupId]?.ids)).length,
+      members: this.authorizedGroupMemberIds(accountId).size,
+      excluded: (this.data.groupMemberExclusions?.[accountId]?.excludedPersonIds || []).length,
+    };
+  }
+  /** Replace the index of authorized groups only. A group that is no longer
+   * authorized loses its entry, so its members cannot keep the derived access. */
+  saveGroupMemberIndex(accountId, entries = {}, { syncedAt } = {}) {
+    const before = this.data.groupMemberIndex,
+      previous = this.groupMemberIndex(accountId),
+      authorized = new Set(this.data.accounts[accountId]?.groups || []),
+      next = {};
+    for (const [groupId, value] of Object.entries(entries || {})) {
+      if (!authorized.has(groupId) || !Array.isArray(value?.ids)) continue;
+      const ids = [...new Set(value.ids.filter(personId => typeof personId === 'string' && personId.length > 0 &&
+        personId.length <= 200 && personId !== accountId && !personId.endsWith('@chatroom') && !/[\s\u0000-\u001f]/u.test(personId)))],
+        pointed = previous?.groups?.[groupId],
+        // "Seen" remembers everyone confirmed in this group, so a member leaving
+        // (or a partial read) revokes access without deleting their data.
+        known = Array.isArray(pointed?.seen) ? pointed.seen : Array.isArray(pointed?.ids) ? pointed.ids : [];
+      next[groupId] = { accountId, chatType: 'group', peerId: groupId,
+        at: Number.isFinite(value.at) ? value.at : Date.now(), ids: ids.slice(0, 4000).sort(),
+        seen: [...new Set([...known, ...ids])].sort().slice(0, 4000) };
+    }
+    const record = {
+      ...(previous || {}),
+      groups: next,
+      syncedAt: Number.isFinite(syncedAt) ? syncedAt : Number.isFinite(previous?.syncedAt) ? previous.syncedAt : null,
+    };
+    this.data.groupMemberIndex = { ...this.data.groupMemberIndex, [accountId]: record };
+    try {
+      this.save();
+    } catch (error) {
+      this.data.groupMemberIndex = before;
+      throw new ChannelError('STATE_WRITE_FAILED', '群成员名单未能保存，本次未扩大人物授权；请检查目录和权限');
+    }
+    this.groupMemberRevision++;
+    this.groupMemberCache?.delete(accountId);
+    return this.groupMemberIndexView(accountId);
+  }
   modelChoice() {
     return clone(this.data.modelChoice ?? null);
   }
@@ -212,21 +299,36 @@ export class StateStore {
   configure(accountId, input) {
     const settings = validateSettings(input),
       before = this.data.accounts[accountId], revoked = revokedObjects(accountId, before, settings),
-      previousRevocations = this.data.authorizationRevocations, previousEpochs = this.data.authorizationEpochs;
+      previousRevocations = this.data.authorizationRevocations, previousEpochs = this.data.authorizationEpochs,
+      previousExclusions = this.data.groupMemberExclusions?.[accountId],
+      exclusions = new Set(Array.isArray(previousExclusions?.excludedPersonIds) ? previousExclusions.excludedPersonIds : []);
+    // Revoking a person must also win over their group membership. Granting the
+    // same person again through the private list removes the exclusion.
+    for (const row of revoked) if (row.chatType === 'private') exclusions.add(row.peerId);
+    for (const peerId of settings.privatePeers) exclusions.delete(peerId);
     if (revoked.length) {
       this.data.authorizationRevocations = [...previousRevocations, ...revoked].filter((row, index, rows) =>
         rows.findIndex(other => other.accountId === row.accountId && other.chatType === row.chatType && other.peerId === row.peerId) === index);
       this.data.authorizationEpochs = { ...previousEpochs, [accountId]: (previousEpochs[accountId] || 0) + 1 };
     }
     this.data.accounts[accountId] = settings;
+    const changedExclusions = JSON.stringify(previousExclusions?.excludedPersonIds || []) !== JSON.stringify([...exclusions].sort());
+    if (changedExclusions)
+      this.data.groupMemberExclusions = { ...this.data.groupMemberExclusions, [accountId]: { excludedPersonIds: [...exclusions].sort() } };
     try {
       this.save();
     } catch (error) {
       if (before) this.data.accounts[accountId] = before;
       else delete this.data.accounts[accountId];
       this.data.authorizationRevocations = previousRevocations; this.data.authorizationEpochs = previousEpochs;
+      if (changedExclusions) {
+        if (previousExclusions === undefined) delete this.data.groupMemberExclusions[accountId];
+        else this.data.groupMemberExclusions[accountId] = previousExclusions;
+      }
       throw error;
     }
+    this.groupMemberRevision++;
+    this.groupMemberCache?.delete(accountId);
     this.onAuthorizationChange?.({ accountId, before, settings, revoked });
     return clone(settings);
   }
@@ -686,7 +788,10 @@ export class StateStore {
       if (metadata.accountId === accountId) entries.set(metadata.key, metadata);
     return [...entries.values()]
       .map(({ key, chatType, peerId }) => ({ key, accountId, chatType, peerId,
-        name: this.data.conversations[key]?.name || peerId, authorized: authorized[chatType].has(peerId) }));
+        name: this.data.conversations[key]?.name || peerId,
+        // A private conversation follows the person: an explicit grant or a
+        // membership in an authorized group.
+        authorized: chatType === 'group' ? authorized.group.has(peerId) : personAuthorized(this, accountId, peerId) }));
   }
   conversations(accountId) {
     return this.conversationSelectors(accountId)

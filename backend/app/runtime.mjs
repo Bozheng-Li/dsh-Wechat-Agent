@@ -58,6 +58,7 @@ export class WechatRuntime {
           if (online && !signal.aborted && (!wasOnline || roleAccountId !== accountId)) {
             this.channel.personMemory.nextScanAt = 0;
             this.channel.personMemory.wake(0);
+            this.channel.groupMembers?.wake(0);
             this.channel.checkMemoryPressure();
           }
           wasOnline = online; roleAccountId = accountId;

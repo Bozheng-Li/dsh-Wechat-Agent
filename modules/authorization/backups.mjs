@@ -51,7 +51,7 @@ export function purgeStateBackups(channel, scopes, keys) {
     value.scope && authorizationMatches({ ...value.scope, accountId: value.scope.accountId ?? accountId }, scope));
   const clean = (value, accountId, field = '') => {
     if (Array.isArray(value)) return value.flatMap(item => {
-      if (typeof item === 'string' && ['privatePeers', 'groups', 'adminIds', 'participants', 'people'].includes(field) && scopes.some(scope =>
+      if (typeof item === 'string' && ['privatePeers', 'groups', 'adminIds', 'participants', 'people', 'excludedPersonIds'].includes(field) && scopes.some(scope =>
         scope.accountId === accountId && scope.peerId === item)) return [];
       const next = clean(item, accountId); return next === undefined ? [] : [next];
     });

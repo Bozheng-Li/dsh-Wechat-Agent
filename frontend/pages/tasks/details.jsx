@@ -21,6 +21,13 @@ export function localDateInput(ms) {
   return new Date(ms - time.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 }
 
+/** A send that slipped past its minute is worth showing: the reader should know
+ * a 0:00 greeting left at 8:00 rather than assume it was on time. */
+export function lateLabel(ms) {
+  if (!(ms >= 60000)) return '';
+  return ms >= 3600000 ? Math.round(ms / 3600000) + ' 小时' : Math.round(ms / 60000) + ' 分钟';
+}
+
 export function scheduleLabel(schedule) {
   return schedule.kind === 'once'
     ? '一次性'
@@ -66,6 +73,7 @@ export function TaskDetails({ task, runs = [], paused, status }) {
               </div>
               <p className="wa-help">
                 本次计划：{date(run.scheduledAt)}
+                {lateLabel(run.lateMs) ? ` · 迟到 ${lateLabel(run.lateMs)}` : ''}
                 {run.acknowledgedMessageIds?.length ? ` · 微信确认 ${run.acknowledgedMessageIds.length} 条` : ''}
               </p>
               {run.reason && <p className="wa-task-warning">{run.reason}</p>}

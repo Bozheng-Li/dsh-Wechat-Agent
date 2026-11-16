@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { atomicJson } from '../../backend/storage/atomic-json.ts';
 import { atomicBytes } from '../../backend/storage/atomic-text.mjs';
 import { ChannelError } from '../../shared/contracts.mjs';
+import { conversationAuthorized } from '../../shared/authorization.mjs';
 import { materialFields, materialId, materialObject, materialSettings, materialSourceKey } from '../../shared/moments-materials.mjs';
 import { inspectAssetImage } from '../media/image-format.mjs';
 import { workPath } from '../work/policy.mjs';
@@ -56,8 +57,10 @@ export class MomentsMaterialStore {
   peers(accountId) { return this.channel.store.conversations(accountId).filter(peer => peer.authorized).map(({ chatType, peerId, name }) => ({ chatType, peerId, name })); }
   sourceAllowed(accountId, source) {
     const selected = new Set(this.account(accountId).settings.sources.map(materialSourceKey));
-    const settings = this.channel.store.settings(accountId);
-    return selected.has(materialSourceKey(source)) && (source.chatType === 'group' ? settings.groups : settings.privatePeers).includes(source.peerId);
+    // Sources follow conversation authorization, so members of an authorized
+    // group contribute without a second private grant.
+    return selected.has(materialSourceKey(source)) &&
+      conversationAuthorized(this.channel.store, { accountId, chatType: source.chatType, peerId: source.peerId });
   }
   eligible(accountId, item) {
     return !item.deleted && item.fields.enabled && (!item.fields.expiresAt || item.fields.expiresAt > this.now()) &&

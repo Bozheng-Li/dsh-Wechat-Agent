@@ -315,8 +315,14 @@ const runner = { selection: () => store.modelChoice() || { provider: 'fixture', 
       materialIds: request.materials.slice(0, 2).map(item => item.id), imageMaterialId: request.imageMode === 'library' ? request.materials.find(item => item.kind === 'image' && item.imageUse === 'publish')?.id || '' : '' }) }; } };
 let channel = new WechatChannel({ store, runner, transport: worker });
 const executionTraces = executionTraceFixture ? await seedExecutionTraceFixture(channel, accountId) : null;
-const fixturePython = process.env.WECHAT_TEST_PYTHON || path.join(root, 'storage/cache', 'dsh-plugin-python-3.13.9-' + createHash('sha256').update(fs.readFileSync(path.join(root, 'runtime/requirements.txt'))).digest('hex').slice(0, 16), 'python.exe');
+// Hash the same normalised bytes the packager uses (build-dsh-plugin.mjs), so a
+// Windows checkout with core.autocrlf lands on the same cached runtime.
+const requirementsHash = createHash('sha256')
+  .update(Buffer.from(fs.readFileSync(path.join(root, 'runtime/requirements.txt'), 'utf8').replace(/\r\n/g, '\n')))
+  .digest('hex').slice(0, 16);
+const fixturePython = process.env.WECHAT_TEST_PYTHON || path.join(root, 'storage/cache', 'dsh-plugin-python-3.13.9-' + requirementsHash, 'python.exe');
 if (fs.existsSync(fixturePython)) channel.library.pythonPath = fixturePython;
+else console.warn(`[test-ui] 未找到固定 Python 运行时 ${fixturePython}；本次将退回系统 Python，可能与发布包行为不一致`);
 if (!stickerFixture) channel.library.configure(accountId, { ...channel.library.account(accountId).settings, autoDescribe: false });
 else store.setModelConfig({ ...store.modelConfig(), vision: true });
 if (interactionsFixture) channel.momentsAutomation.interactions.automation.start();

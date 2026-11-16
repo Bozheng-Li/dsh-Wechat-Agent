@@ -11,7 +11,7 @@ const png = 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGP4z8DAAMI
 const freshSignal = () => new AbortController().signal;
 const source = (key, text, time) => ({ key, text, time, direction: 'incoming', senderId: 'alice', senderName: '阿禾' });
 
-async function fixture(t, { seedLongMemory = false } = {}) {
+async function fixture(t, { seedLongMemory = false, graceMs } = {}) {
   fs.mkdirSync(temporary, { recursive: true });
   const root = fs.mkdtempSync(path.join(temporary, 'scheduled-features-'));
   const store = new StateStore(root);
@@ -34,7 +34,7 @@ async function fixture(t, { seedLongMemory = false } = {}) {
   const runner = { run: async input => { calls.push(input); return { text: '该吃饭啦。' }; } };
   const transport = { status: () => structuredClone(state), send: async input => { sent.push(input); return { delivery: 'server-ack', serverMessageIds: ['scheduled-ack-' + sent.length] }; } };
   const channel = new WechatChannel({ store, runner, transport, longMemory, now, random: () => 0 });
-  const scheduler = new TaskScheduler({ store, channel, now }); channel.scheduler = scheduler;
+  const scheduler = new TaskScheduler({ store, channel, now, ...(graceMs ? { graceMs } : {}) }); channel.scheduler = scheduler;
   const create = (kind = 'agent', content = '提醒阿禾吃饭', extraScope = {}) => scheduler.create({ kind, content, schedule: { kind: 'once', at: stamp + 1000 } }, { ...scope, ...extraScope });
   const receive = text => {
     const id = 'scheduled-input-' + ++sequence;
@@ -196,8 +196,74 @@ test('definite unsent failure retries the same draft after delay without regener
   assert.equal(f.task(task.id).state, 'completed');
 });
 
+test('a one-off reminder that comes due while the app is closed lapses instead of arriving late', async t => {
+  const f = await fixture(t);
+  const task = f.create('message', '祝那女的生日快乐');
+  f.advance(8 * 3600000);
+  await f.scheduler.tick();
+  assert.equal(f.sent.length, 0, 'a midnight greeting must not be sent eight hours later');
+  const current = f.task(task.id);
+  assert.equal(current.state, 'expired');
+  assert.equal(current.lastState, 'expired');
+  const run = f.scheduler.list(owner).runs.at(-1);
+  assert.equal(run.state, 'expired');
+  assert.equal(run.lateMs, 8 * 3600000 - 1000);
+  assert.match(run.reason, /未补发/u);
+  await f.scheduler.tick();
+  assert.equal(f.sent.length, 0, 'an expired task never turns into a late send');
+});
+
+test('a recurring plan coalesces a long outage into one reminder instead of a backlog', async t => {
+  const f = await fixture(t);
+  const task = f.scheduler.create({ kind: 'message', content: '该吃饭啦', schedule: { kind: 'daily', time: '08:00' } }, f.scope);
+  f.advance(2 * 86400000 + 3600000);
+  await f.scheduler.tick();
+  assert.equal(f.sent.length, 1, 'two missed days still produce exactly one reminder');
+  const current = f.task(task.id);
+  assert.equal(current.state, 'pending', 'the plan keeps running');
+  assert(current.nextRunAt > f.now(), 'the next occurrence is in the future');
+  const run = f.scheduler.list(owner).runs.at(-1);
+  assert.equal(run.state, 'sent');
+  assert(run.lateMs > 0, 'the execution records how late it was');
+  await f.scheduler.tick();
+  assert.equal(f.sent.length, 1, 'the backlog is not replayed');
+});
+
+test('a permanently rejected send stops after the attempt budget and pauses with a reason', async t => {
+  const f = await fixture(t);
+  let attempts = 0;
+  f.transport.send = async () => {
+    attempts++;
+    throw new ChannelError('ERR_MENTION_TARGET', '提醒对象已不在当前群的已同步成员名单中，整条回复尚未发送', { delivery: 'rejected' });
+  };
+  const task = f.create('message', '生日快乐');
+  for (const wait of [1000, 60000, 120000, 240000]) { f.advance(wait); await f.scheduler.tick(); }
+  const current = f.task(task.id);
+  assert.equal(f.sent.length, 0);
+  assert.equal(attempts, 4, 'the budget is four attempts, not an endless retry');
+  assert.equal(current.state, 'paused');
+  assert.equal(current.attempts, 4);
+  assert.equal(current.retryAt, undefined, 'no further retry is queued');
+  assert.match(current.lastError, /已连续尝试 4 次/u);
+  f.advance(10 * 60000); await f.scheduler.tick();
+  assert.equal(attempts, 4, 'a paused task stays quiet');
+});
+
+test('run history keeps only recent executions so a long-lived plan cannot grow the file', async t => {
+  const f = await fixture(t);
+  const task = f.create('message', '喝水');
+  for (let index = 0; index < 120; index++)
+    f.scheduler.data.runs.push({ id: 'bulk-' + index, taskId: task.id, accountId: owner, scheduledAt: f.now(), startedAt: f.now(), finishedAt: f.now(), state: 'sent', acknowledgedMessageIds: [] });
+  f.scheduler.save();
+  const kept = f.scheduler.data.runs.filter((run) => run.taskId === task.id);
+  assert.equal(kept.length, 50);
+  assert.equal(kept.at(-1).id, 'bulk-119', 'the newest execution survives pruning');
+});
+
 test('a saved reminder still executes after all related memory expires', async t => {
-  const f = await fixture(t, { seedLongMemory: true });
+  // The subject is memory expiry, not lateness: widen the window so a deliberate
+  // 31-day jump still exercises delivery rather than the stale-slot guard.
+  const f = await fixture(t, { seedLongMemory: true, graceMs: 40 * 86400000 });
   const task = f.create('message', '核对一个月后的合同'); f.advance(31 * 86400000);
   assert.equal(f.longMemory.adminNotes(f.scope), ''); assert.equal(f.longMemory.view(owner).factCount, 0);
   await f.scheduler.tick(); assert.equal(f.sent.length, 1); assert.equal(f.sent[0].message[0].data.text, task.content);
@@ -208,6 +274,7 @@ test('restart recovers only reminders interrupted before send and coalesces miss
   const task = f.scheduler.create({ kind: 'message', content: '重复提醒', schedule: { kind: 'interval', minutes: 1 } }, f.scope);
   const original = f.scheduler.data.tasks[0]; original.state = 'running'; original.recordKey = 'scheduled:pre-send-crash'; f.scheduler.save();
   f.store.add({ key: original.recordKey, contextKey: 'isolated', accountId: owner, chatType: 'group', peerId: room, messageId: original.recordKey, state: 'generating', createdAt: f.now(), updatedAt: f.now() });
+  // Recovery is the subject here; a recurring plan coalesces the three-day gap.
   const restored = new TaskScheduler({ store: f.store, channel: f.channel, now: f.now }); f.channel.scheduler = restored;
   t.after(() => restored.close()); f.advance(3 * 86400000); await restored.tick();
   assert.equal(f.sent.length, 1); assert.equal(restored.list(owner).tasks[0].state, 'pending');

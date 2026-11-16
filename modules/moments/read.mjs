@@ -1,5 +1,5 @@
 import { ChannelError } from '../../shared/contracts.mjs';
-import { personAuthorized, assertPersonAuthorized, authorizationEpoch, assertAuthorizationEpoch } from '../../shared/authorization.mjs';
+import { personAuthorized, assertPersonAuthorized, authorizedPeople, authorizationEpoch, assertAuthorizationEpoch } from '../../shared/authorization.mjs';
 
 const allowed = (channel, accountId, userId) => userId === accountId || personAuthorized(channel.store, accountId, userId);
 const ownerKey = (accountId, postId) => accountId + ':' + postId;
@@ -13,7 +13,7 @@ export async function readMomentsWithMemory(channel, params, signal, check = () 
   if (params.query?.userId && params.query.userId !== params.accountId)
     assertPersonAuthorized(channel.store, params.accountId, params.query.userId);
   const combined = channel.authorization?.combine(params.accountId, signal) ?? signal;
-  const raw = await channel.transport.readMoments({ ...params, authorizedUserIds: [...channel.store.settings(params.accountId).privatePeers] }, combined);
+  const raw = await channel.transport.readMoments({ ...params, authorizedUserIds: authorizedPeople(channel.store, params.accountId) }, combined);
   check();
   assertAuthorizationEpoch(channel.store, params.accountId, epoch);
   if (raw?.accountId !== params.accountId || raw.source !== 'wechat-sns-live' || !Array.isArray(raw.items))

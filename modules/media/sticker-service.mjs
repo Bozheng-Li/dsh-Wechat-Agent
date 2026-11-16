@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { ChannelError, eligible, publicError } from '../../shared/contracts.mjs';
+import { ChannelError, publicError } from '../../shared/contracts.mjs';
+import { conversationEligible } from '../../shared/authorization.mjs';
 import { validStickerMd5 } from './wechat-stickers.mjs';
 import { decodeBase64 } from './validation.mjs';
 import { MEDIA_LIBRARY_LIMITS } from './limits.mjs';
@@ -77,11 +78,11 @@ export class WechatStickerService {
         const assets = this.channel.library.account(accountId).assets.filter(asset => asset.kind === 'sticker' && asset.bytes > 0 &&
           this.channel.library.assetEnabled(this.channel.library.account(accountId), asset) && (!asset.description || !asset.usage) &&
           (!asset.descriptionAttemptedAt || !asset.descriptionError || this.channel.now() - asset.descriptionAttemptedAt >= 10 * 60 * 1000) &&
-          (!asset.sourceMessage || asset.nativeSticker?.favorite || eligible(this.channel.store.settings(accountId), asset.sourceMessage))).slice(0, 4);
+          (!asset.sourceMessage || asset.nativeSticker?.favorite || conversationEligible(this.channel.store, { ...asset.sourceMessage, accountId }))).slice(0, 4);
         if (!assets.length) return;
         const assertAllowed = () => {
           this.descriptionAllowed(accountId, signal);
-          if (assets.some(asset => asset.sourceMessage && !asset.nativeSticker?.favorite && !eligible(this.channel.store.settings(accountId), asset.sourceMessage)))
+          if (assets.some(asset => asset.sourceMessage && !asset.nativeSticker?.favorite && !conversationEligible(this.channel.store, { ...asset.sourceMessage, accountId })))
             throw new ChannelError('AUTH_CHANGED', '来源会话已撤销授权，未保存新的表情说明');
         };
         await this.channel.library.describe(accountId, assets.map(asset => asset.id), this.channel.runner,
@@ -155,7 +156,7 @@ export class WechatStickerService {
   canCollect(accountId, message) {
     return ['incoming', 'outgoing'].includes(message?.direction) && message.source === 'longlink:NewSync' &&
       Array.isArray(message.message) && message.message.some(segment => segment.type === 'face' && segment.data?.resourceId) &&
-      this.channel.library.account(accountId).settings.captureIncoming && eligible(this.channel.store.settings(accountId), message);
+      this.channel.library.account(accountId).settings.captureIncoming && conversationEligible(this.channel.store, { ...message, accountId });
   }
   capture(accountId, message, { historical = false } = {}) {
     if (this.controller.signal.aborted || !this.canCollect(accountId, message)) return Promise.resolve({ skipped: true, reason: '该聊天未启用表情收集，或不是可收集的表情消息' });

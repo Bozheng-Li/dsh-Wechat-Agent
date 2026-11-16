@@ -713,7 +713,18 @@ export class MediaLibrary {
       while (this.completedUploads.size > 100) this.completedUploads.delete(this.completedUploads.keys().next().value);
       return clone(result);
     } finally {
-      this.abortUpload(id, uploadId);
+      this.releaseUpload(uploadId);
+    }
+  }
+  /** Drops the upload registry entry even when the temp file cannot be removed. */
+  releaseUpload(uploadId) {
+    const upload = this.uploads.get(uploadId);
+    if (!upload) return;
+    this.uploads.delete(uploadId);
+    try {
+      fs.unlinkSync(upload.file);
+    } catch {
+      /* The import already succeeded; a leftover temp file must not fail it. */
     }
   }
   abortUpload(id, uploadId) {
@@ -721,16 +732,22 @@ export class MediaLibrary {
     if (!upload) return { cancelled: false };
     if (upload.accountId !== accountId(id)) throw error('ASSET_UPLOAD_MISSING', '上传不属于当前账号');
     this.assertLocal(upload.file, false);
+    this.uploads.delete(uploadId);
     try {
       fs.unlinkSync(upload.file);
     } catch (failure) {
       if (failure.code !== 'ENOENT') throw error('ASSET_UPLOAD_INVALID', '上传已取消，临时文件暂未清理');
     }
-    this.uploads.delete(uploadId);
     return { cancelled: true };
   }
   describe(id, assetIds, runner, signal, options) { return describeAssets(this, id, assetIds, runner, signal, options); }
   close() {
-    for (const upload of [...this.uploads.values()]) this.abortUpload(upload.accountId, upload.id);
+    for (const upload of [...this.uploads.values()]) {
+      try {
+        this.abortUpload(upload.accountId, upload.id);
+      } catch {
+        /* One unruly temp file must not strand the remaining uploads. */
+      }
+    }
   }
 }

@@ -8,7 +8,7 @@ import { processReply } from "./reply.mjs";
 import { scheduleMemoryMaintenance } from "./memory-maintenance.mjs";
 import { checkMemoryPressure } from "./memory-maintenance.mjs";
 import { maintainConversationMemory } from "./memory-maintenance.mjs";
-import { ChannelError, eligible, messageText, nicknameMentioned, publicError } from "../../shared/contracts.mjs";
+import { ChannelError, messageText, nicknameMentioned, publicError } from "../../shared/contracts.mjs";
 import { identity } from "../../backend/storage/keys.mjs";
 import { ConversationMemory } from "../memory/conversation/store.mjs";
 
@@ -30,6 +30,8 @@ import { MomentsAutomation } from '../moments/automation.mjs';
 import { PersonMemoryMaintenance } from '../memory/roles/maintenance.mjs';
 import { attachExecutionTraces } from '../traces/instrument.mjs';
 import { ObjectAuthorization } from '../authorization/service.mjs';
+import { conversationEligible } from '../../shared/authorization.mjs';
+import { GroupMemberIndex } from '../authorization/members.mjs';
 
 export class WechatChannel {
   get timeoutMs() { return this.timeoutOverride ?? timeLimitMs(this.store, 'conversationTimeoutSeconds'); }
@@ -82,6 +84,7 @@ export class WechatChannel {
     this.memory.forcedState = this.memoryForced;
     this.natural = new NaturalChat(this);
     this.authorization = new ObjectAuthorization(this);
+    this.groupMembers = new GroupMemberIndex(this);
     attachExecutionTraces(this);
     this.imageMemory.start();
     this.memoryTimer = setInterval(() => this.checkMemoryPressure(), 15000);
@@ -200,7 +203,7 @@ export class WechatChannel {
       this.fault ||
       !status.online ||
       status.account?.id !== item.record.accountId ||
-      !eligible(this.store.settings(item.record.accountId), item.message)
+      !conversationEligible(this.store, { ...item.message, accountId: item.record.accountId })
     )
       throw new ChannelError('AUTH_CHANGED', '微信连接或会话授权已变更，未继续回复');
     if ([...this.pauses.values()].some((pause) => matches(item.record, pause.selector)))
@@ -425,6 +428,7 @@ export class WechatChannel {
     this.natural.stop();
     this.imageMemory.close();
     this.closed = true;
+    this.groupMembers?.close();
     this.authorization?.close();
     const stickersClosing = this.stickers.close();
     const peopleClosing = this.personMemory?.close();

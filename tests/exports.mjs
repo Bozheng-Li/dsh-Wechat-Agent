@@ -21,6 +21,7 @@ export { buildWechatPrompt, personaInstructions } from '../prompts/reply/compose
 export { PersonMemoryMaintenance } from '../modules/memory/roles/maintenance.mjs';
 export * from '../shared/authorization.mjs';
 export { ObjectAuthorization } from '../modules/authorization/service.mjs';
+export * from '../modules/authorization/members.mjs';
 export { readMomentsWithMemory } from '../modules/moments/read.mjs';
 export { generateInteractionComments } from '../modules/moments/interaction-content.mjs';
 export * from "../modules/memory/long-term/store.mjs";

@@ -1,5 +1,5 @@
-import { ChannelError, authorizedConversation, publishScopeOf } from '../../shared/contracts.mjs';
-import { assertConversationAuthorized, personAuthorized, authorizationEpoch, assertAuthorizationEpoch } from '../../shared/authorization.mjs';
+import { ChannelError, publishScopeOf } from '../../shared/contracts.mjs';
+import { assertConversationAuthorized, personAuthorized, conversationScopeAuthorized, authorizedPeople, authorizationEpoch, assertAuthorizationEpoch } from '../../shared/authorization.mjs';
 import { filterAuthorizedMoments, filterAuthorizedMomentsImages, assertMomentTargetAuthorized, assertMomentReplyAuthorized } from '../moments/read.mjs';
 import { purgeConversationData } from './conversations.mjs';
 import { purgeFeatureData, storedObjectScopes } from './features.mjs';
@@ -88,7 +88,7 @@ export class ObjectAuthorization {
     workbench.call = wrapped; this.originals.push({ object: workbench, name: 'call', original, wrapped });
     this.ready = this.reconcile();
   }
-  people(accountId) { return this.channel.store.settings(accountId).privatePeers.filter(id => personAuthorized(this.channel.store, accountId, id)); }
+  people(accountId) { return authorizedPeople(this.channel.store, accountId); }
   combine(accountId, signal) {
     let controller = this.controllers.get(accountId);
     if (!controller) { controller = new AbortController(); this.controllers.set(accountId, controller); }
@@ -118,6 +118,8 @@ export class ObjectAuthorization {
     finally { combined.removeEventListener('abort', listener); this.calls.delete(call); }
   }
   changed({ accountId, before, settings, revoked }) {
+    // A new or removed group changes who is covered, so refresh its members.
+    this.channel.groupMembers?.wake(0);
     if (!revoked.length && !(before?.enabled && !settings.enabled)) return;
     const reason = stopping();
     this.controllers.get(accountId)?.abort(reason); this.controllers.set(accountId, new AbortController());
@@ -148,7 +150,7 @@ export class ObjectAuthorization {
   }
   reconcile() {
     const { channel } = this;
-    const scopes = storedObjectScopes(channel).filter(scope => !authorizedConversation(channel.store.settings(scope.accountId), scope));
+    const scopes = storedObjectScopes(channel).filter(scope => !conversationScopeAuthorized(channel.store, scope));
     if (scopes.length) {
       const rows = channel.store.data.authorizationRevocations;
       for (const scope of scopes) if (!rows.some(row => row.accountId === scope.accountId && row.chatType === scope.chatType && row.peerId === scope.peerId)) rows.push(scope);
@@ -189,6 +191,7 @@ export class ObjectAuthorization {
     } finally {
       for (const accountId of accounts) this.cleaning.delete(accountId);
       for (const resume of resumes.reverse()) resume();
+      if (!this.closed) this.channel.groupMembers?.wake(0);
     }
   }
   async whenIdle() { await this.pending; }

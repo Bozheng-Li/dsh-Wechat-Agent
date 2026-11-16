@@ -1,5 +1,5 @@
 import { promptText } from "../../prompts/loader.mjs";
-import { ChannelError, eligible, messageText, nicknameMentioned, publicError } from "../../shared/contracts.mjs";
+import { ChannelError, messageText, nicknameMentioned, publicError } from "../../shared/contracts.mjs";
 import { identity } from "../../backend/storage/keys.mjs";
 import { randomUUID } from 'node:crypto';
 import { NATURAL_REASONS } from "./natural-chat.mjs";
@@ -10,7 +10,7 @@ import { workCommand } from '../work/commands.mjs';
 import { executionModeCommand } from '../work/modes/commands.mjs';
 import { workAdministrator } from '../work/policy.mjs';
 import { unavailableMessage } from '../../shared/message-content.mjs';
-import { conversationAuthorized } from '../../shared/authorization.mjs';
+import { conversationAuthorized, conversationEligible } from '../../shared/authorization.mjs';
 
 export function receiveMessage(channel, message, accountId) {
   if (
@@ -37,7 +37,7 @@ export function receiveMessage(channel, message, accountId) {
     const key = identity([account.id, message.chatType, message.peerId, message.serverMessageId || message.id]);
     if (Object.hasOwn(channel.store.data.seen, key)) return;
     const settings = channel.store.settings(account.id);
-    if (!eligible(settings, message)) {
+    if (!conversationEligible(channel.store, { ...message, accountId: account.id })) {
       channel.store.remember(key, channel.now());
       return;
     }
@@ -335,7 +335,7 @@ export function observeManualReply(channel, message, accountId) {
       !Number.isFinite(age) ||
       age < -60000 ||
       age > 600000 ||
-      !eligible(channel.store.settings(accountId), message)
+      !conversationEligible(channel.store, { ...message, accountId })
     )
       return;
     const config = channel.store.conversationSettings(accountId, message.chatType, message.peerId);

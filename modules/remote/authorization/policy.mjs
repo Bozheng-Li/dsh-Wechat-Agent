@@ -1,4 +1,5 @@
-import { ChannelError, eligible } from '../../../shared/contracts.mjs';
+import { ChannelError } from '../../../shared/contracts.mjs';
+import { conversationEligible } from '../../../shared/authorization.mjs';
 import { promptText } from '../../../prompts/loader.mjs';
 
 /** Sender identity always comes from the current protocol message, never from its text. */
@@ -11,7 +12,7 @@ export function remoteAccessReason(channel, scope) {
       scope.peerId.endsWith('@chatroom') !== (scope.chatType === 'group') ||
       scope.senderId === scope.accountId || scope.senderId.endsWith('@chatroom') ||
       (scope.chatType === 'private' && scope.senderId !== scope.peerId)) return 'scope';
-  if (!eligible(channel.store.settings(scope.accountId), scope)) return 'conversation';
+  if (!conversationEligible(channel.store, scope)) return 'conversation';
   const config = channel.store.conversationSettings(scope.accountId, scope.chatType, scope.peerId);
   const global = channel.store.config.section('remote')?.globalAdminIds ?? [];
   if (config.remoteEnabled !== true) return 'disabled';

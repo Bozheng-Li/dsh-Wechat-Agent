@@ -2,12 +2,45 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { atomicJson } from "../../backend/storage/atomic-json.ts";
-import { ChannelError, eligible } from "../../shared/contracts.mjs";
-import { assertConversationAuthorized, assertPersonAuthorized } from '../../shared/authorization.mjs';
+import { ChannelError } from "../../shared/contracts.mjs";
+import { assertConversationAuthorized, assertPersonAuthorized, conversationEligible } from '../../shared/authorization.mjs';
 
 const clone = (value) => structuredClone(value);
 const active = new Set(['pending', 'running']);
 const MAX_TASK_TARGETS = 20;
+// A reminder that missed its moment must not arrive hours later. Fifteen
+// minutes covers a sleep/wake or a brief disconnect without turning a 0:00
+// greeting into a midday apology.
+const DEFAULT_GRACE_MS = 15 * 60000;
+// Definite failures retry a bounded number of times with growing gaps. The
+// first step keeps the previous one-minute cadence so ordinary transient
+// errors still recover quickly; the last stops a permanently rejected send
+// from hammering WeChat forever.
+const RETRY_STEPS = [60000, 120000, 240000, 480000, 900000];
+// Four tries finish inside the default grace window, so a rejected send ends as
+// a paused task that says why, instead of silently lapsing as "too late".
+const MAX_ATTEMPTS = 4;
+const RUNS_PER_TASK = 50;
+const RUNS_TOTAL = 2000;
+const timeLabel = (ms, timeZone = 'Asia/Shanghai') =>
+  new Date(ms).toLocaleString('zh-CN', {
+    timeZone,
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+/** Absolute deadline for receipts: "11月26日 00:00:00" leaves no room for a
+ * model to restate a relative date it may have computed wrong. */
+export const whenLabel = (ms, timeZone = 'Asia/Shanghai') => timeLabel(ms, timeZone);
+function durationLabel(ms) {
+  if (ms >= 86400000) return Math.floor(ms / 86400000) + '天';
+  if (ms >= 3600000) return Math.round(ms / 3600000) + '小时';
+  return Math.max(1, Math.round(ms / 60000)) + '分钟';
+}
 const memberId = (value) =>
   typeof value === 'string' &&
   /^[\w@.:-]{1,256}$/.test(value) &&
@@ -85,8 +118,14 @@ export function validateSchedule(value, now = Date.now()) {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new ChannelError('INVALID_TASK', '请选择执行时间');
   if (value.kind === 'once') {
-    if (!Number.isSafeInteger(value.at) || value.at <= now || value.at > now + 366 * 86400000)
-      throw new ChannelError('INVALID_TASK', '一次性任务应安排在未来一年内');
+    if (!Number.isSafeInteger(value.at)) throw new ChannelError('INVALID_TASK', '请提供明确的执行时间');
+    if (value.at <= now)
+      throw new ChannelError(
+        'INVALID_TASK',
+        `这个时间（${timeLabel(value.at)}）已经过去了，请核对日期是否说错了月份或年份；尚未创建`
+      );
+    if (value.at > now + 366 * 86400000)
+      throw new ChannelError('INVALID_TASK', '一次性任务最多安排在未来一年内');
     return { kind: 'once', at: value.at };
   }
   if (value.kind === 'interval') {
@@ -109,8 +148,8 @@ export function scheduleNext(schedule, after) {
 }
 
 export class TaskScheduler {
-  constructor({ store, channel, now = Date.now, retryMs = 60000 }) {
-    Object.assign(this, { store, channel, now, retryMs });
+  constructor({ store, channel, now = Date.now, retryMs = RETRY_STEPS[0], graceMs = DEFAULT_GRACE_MS, maxAttempts = MAX_ATTEMPTS }) {
+    Object.assign(this, { store, channel, now, retryMs, graceMs, maxAttempts });
     this.file = path.join(store.root, 'storage/tasks/schedules.json');
     try {
       this.data = JSON.parse(fs.readFileSync(this.file, 'utf8'));
@@ -169,16 +208,96 @@ export class TaskScheduler {
     channel.authorization?.reconcile();
   }
   save() {
+    this.pruneRuns();
     try {
       atomicJson(this.file, this.data);
     } catch {
       throw new ChannelError('STATE_WRITE_FAILED', '定时任务状态未能保存，已停止本次调度，请检查磁盘和目录权限');
     }
   }
+  /** Run history is evidence, not an archive: keep the recent executions of each
+   * task (and the attempt in flight) so schedules.json cannot grow without
+   * bound on a long-lived recurring plan. */
+  pruneRuns() {
+    if (!this.data.runs.length) return;
+    const tasks = new Map(this.data.tasks.map((task) => [task.id, task]));
+    const kept = new Set(),
+      counted = new Map();
+    for (let index = this.data.runs.length - 1; index >= 0; index--) {
+      const run = this.data.runs[index],
+        seen = counted.get(run.taskId) || 0;
+      if (seen >= RUNS_PER_TASK && run.id !== tasks.get(run.taskId)?.runId) continue;
+      counted.set(run.taskId, seen + 1);
+      kept.add(run);
+    }
+    const runs = this.data.runs.filter((run) => kept.has(run));
+    this.data.runs = runs.length > RUNS_TOTAL ? runs.slice(-RUNS_TOTAL) : runs;
+  }
+  /** A definite failure is worth another try, but only a few and with growing
+   * gaps. Running out of attempts pauses the task and says so, so a permanently
+   * rejected send (for example a member who left the group) stops instead of
+   * retrying every minute forever. */
+  reschedule(task, record) {
+    const attempts = (task.attempts || 0) + 1;
+    task.attempts = attempts;
+    if (attempts >= this.maxAttempts) {
+      task.state = 'paused';
+      task.lastError = `${task.lastError || '发送未成功'}；已连续尝试 ${attempts} 次仍未成功，已停止自动重试，请先在微信核对再重新安排`;
+      delete task.retryAt;
+      return false;
+    }
+    const step = Math.min(this.retryMs * 2 ** (attempts - 1), RETRY_STEPS[RETRY_STEPS.length - 1]);
+    // Never queue a retry the grace window will then refuse to perform: say so
+    // plainly here instead of letting the attempt lapse as "expired" later.
+    if (task.schedule.kind === 'once' && this.now() + step > task.nextRunAt + this.graceMs) {
+      task.state = 'paused';
+      task.lastError = `${task.lastError || '发送未成功'}；再重试就会超过允许的迟到时间，已停止，请先在微信核对再重新安排`;
+      delete task.retryAt;
+      return false;
+    }
+    task.state = 'pending';
+    task.retryAt = this.now() + step;
+    if (record?.replyDraft) {
+      task.retryText = record.replyDraft;
+      task.retryAsset = record.replyMedia;
+    }
+    return true;
+  }
+  /** Give up on a one-off reminder whose moment has passed: a 0:00 greeting that
+   * only leaves at 8:00 is worse than no greeting. Recurring plans deliberately
+   * keep the documented catch-up instead — missed periods coalesce into a single
+   * reminder, so a daily 08:00 nudge still arrives once after a long shutdown. */
+  skipStale(task) {
+    if (task.schedule.kind !== 'once') return false;
+    const late = this.now() - task.nextRunAt;
+    const reason = `错过计划时间 ${durationLabel(late)}，超过允许的迟到 ${durationLabel(this.graceMs)}，未补发`;
+    this.data.runs.push({
+      id: randomUUID(),
+      taskId: task.id,
+      accountId: task.accountId,
+      scheduledAt: task.nextRunAt,
+      startedAt: this.now(),
+      finishedAt: this.now(),
+      lateMs: late,
+      state: 'expired',
+      acknowledgedMessageIds: [],
+      reason,
+    });
+    task.state = 'expired';
+    task.lastState = 'expired';
+    task.lastError = reason;
+    delete task.retryAt;
+    delete task.retryText;
+    delete task.retryAsset;
+    task.updatedAt = this.now();
+    task.revision++;
+    this.save();
+    return true;
+  }
   authorized(selector, fromChat = false) {
     assertConversationAuthorized(this.store, selector);
     for (const target of selector.targets || []) assertPersonAuthorized(this.store, selector.accountId, target.id);
-    if (!eligible(this.store.settings(selector.accountId), selector))
+    if (!conversationEligible(this.store, selector))
       throw new ChannelError('TASK_NOT_AUTHORIZED', '该会话未授权或自动回复已暂停，未执行定时任务');
     if (
       fromChat &&
@@ -344,6 +463,7 @@ export class TaskScheduler {
       createdAt: this.now(),
       updatedAt: this.now(),
       revision: 1,
+      attempts: 0,
       lastState: null,
       lastError: null,
     };
@@ -407,6 +527,7 @@ export class TaskScheduler {
     const previous = clone(task);
     task.state = 'pending';
     task.retryAt = null;
+    task.attempts = 0;
     task.revision++;
     task.updatedAt = this.now();
     try {
@@ -486,6 +607,12 @@ export class TaskScheduler {
       } catch {
         continue;
       }
+      // The moment has passed while the machine slept, the account was offline
+      // or the channel was paused. Sending "生日快乐" eight hours late is worse
+      // than not sending it, so a missed one-off lapses instead of arriving late.
+      // A recurring plan is different: its missed periods coalesce into one
+      // reminder, which is the documented behaviour of a repeating schedule.
+      if (task.schedule.kind === 'once' && this.now() > task.nextRunAt + this.graceMs && this.skipStale(task)) continue;
       const controller = new AbortController(),
         id = randomUUID();
       const run = {
@@ -494,6 +621,7 @@ export class TaskScheduler {
         accountId: task.accountId,
         scheduledAt: task.nextRunAt,
         startedAt: this.now(),
+        lateMs: Math.max(0, this.now() - task.nextRunAt),
         state: 'queued',
         acknowledgedMessageIds: [],
       };
@@ -527,20 +655,15 @@ export class TaskScheduler {
               !record.acknowledgedMessageIds?.length &&
               !['unknown', 'partial'].includes(record.state) &&
               (!record.sendAttempted || ['rejected', 'not-sent'].includes(record.delivery));
-            task.state = safe ? 'pending' : 'paused';
-            if (safe) {
-              task.retryAt = this.now() + this.retryMs;
-              if (record.replyDraft) {
-                task.retryText = record.replyDraft;
-                task.retryAsset = record.replyMedia;
-              }
-            }
+            if (safe) this.reschedule(task, record);
+            else task.state = 'paused';
           } else if (task.schedule.kind === 'once') task.state = 'completed';
           else {
             task.state = 'pending';
             task.nextRunAt = scheduleNext(task.schedule, this.now());
           }
           if (record.state === 'sent') {
+            task.attempts = 0;
             delete task.retryAt;
             delete task.retryText;
             delete task.retryAsset;
@@ -556,8 +679,8 @@ export class TaskScheduler {
         task.lastError = run.reason;
         if (task.state === 'running') {
           const record = this.store.data.records.find((value) => value.key === task.recordKey);
-          task.state = record?.sendAttempted ? 'paused' : 'pending';
-          task.retryAt = this.now() + this.retryMs;
+          if (record?.sendAttempted) task.state = 'paused';
+          else this.reschedule(task, null);
         }
       } finally {
         task.updatedAt = this.now();

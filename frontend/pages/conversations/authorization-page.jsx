@@ -183,7 +183,7 @@ export function Authorization({
   };
   return (
     <>
-      <PageHead icon="people" title="会话授权" description="授权限定回复、自动操作和资料整理的对象。群聊授权不会扩展为成员的私聊或朋友圈授权。">
+      <PageHead icon="people" title="会话授权" description="授权限定回复、自动操作和资料整理的对象。已授权群聊的成员默认全部授权：整理其人物资料、看其朋友圈并互动、在群里 @ 他，以及和他私聊，都不必再单独授权。">
         <Button icon="refresh" disabled={disabled || !status.online} onClick={() => onAction('contacts')}>
           {busy === 'contacts' ? '正在同步…' : '同步已发现会话'}
         </Button>
@@ -192,6 +192,18 @@ export function Authorization({
       {status.authorization?.error && <p className="wa-alert is-error" role="alert">{status.authorization.error}，相关操作保持停止，后台会自动重试。</p>}
       {!status.authorization?.error && status.authorization?.pendingCount > 0 &&
         <p className="wa-help" role="status">正在清空 {status.authorization.pendingCount} 个撤销对象的数据，相关操作已停止。</p>}
+      {(() => {
+        const members = status.authorization?.members;
+        if (!members || !members.authorizedGroups) return null;
+        const synced = members.indexedGroups
+          ? `已从 ${members.indexedGroups} 个授权群聊核对 ${members.members} 位成员`
+          : '尚未取得群成员名单，正在后台读取';
+        return (
+          <p className="wa-help" role="status">
+            {synced}。这些成员的资料整理、朋友圈互动、群里 @ 和私聊回复都已默认授权，不必再单独加进私聊列表；成员退群或取消群授权后，按当前授权收回。{members.error ? `（${members.error}）` : ''}
+          </p>
+        );
+      })()}
       {!status.account ? (
         <section className="wa-card">
           <Empty icon="shield" title="先连接一个微信账号" description="连接后按名字搜索联系人和群聊。" />
@@ -245,7 +257,7 @@ export function Authorization({
           </div>
           {selectionBar(filtered, 'main', '全选当前列表')}
           <p className="wa-help wa-authorization-scope" id="wa-authorization-selection-scope">
-            取消授权会停止相关操作，并永久清空该对象的本机资料、记忆、任务与记录。重新授权后从新资料开始。
+            取消授权会停止相关操作，并永久清空该对象的本机资料、记忆、任务与记录。重新授权后从新资料开始。已授权群聊的成员不需要在这里单独授权；要单独取消某位成员，可先为他点“授权”，再取消授权，之后的群成员刷新也不会重新默认授权他。
           </p>
           <div className="wa-session-list">
             {!!filtered.length && <div className="wa-session-columns" aria-hidden="true"><span>会话</span><span>回复方式与权限</span></div>}

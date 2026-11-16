@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { ChannelError, MAX_TEXT, eligible, emptyNaturalState } from "../../shared/contracts.mjs";
+import { ChannelError, MAX_TEXT, emptyNaturalState } from "../../shared/contracts.mjs";
+import { conversationEligible } from '../../shared/authorization.mjs';
 import { publicText } from "../../backend/wechat/ai/public-output.ts";
 
 export const NATURAL_REASONS = Object.freeze({
@@ -323,7 +324,7 @@ export class NaturalChat {
     if (
       selector.chatType !== 'group' ||
       config.mode !== 'natural' ||
-      !eligible(this.store.settings(selector.accountId), selector)
+      !conversationEligible(this.store, selector)
     )
       throw new ChannelError('AUTH_CHANGED', '本群当前未启用自然陪聊或自动回复，请重新读取设置');
     if (!state.deliveryBlockedKey || input.blockedKey !== state.deliveryBlockedKey)
@@ -344,7 +345,7 @@ export class NaturalChat {
     if (selector.chatType !== 'group' || config.mode !== 'natural') return null;
     const state = this.store.naturalState(selector.accountId, selector.chatType, selector.peerId),
       status = this.channel.transport.status();
-    const reason = !eligible(this.store.settings(selector.accountId), selector)
+    const reason = !conversationEligible(this.store, selector)
       ? '自动回复已暂停或本群未授权'
       : !status.online || status.account?.id !== selector.accountId
         ? '微信离线，恢复后重新安排机会'
@@ -357,7 +358,7 @@ export class NaturalChat {
       backoff: state.backoff,
       pending: !!state.pendingKey,
       paused:
-        !eligible(this.store.settings(selector.accountId), selector) ||
+        !conversationEligible(this.store, selector) ||
         !status.online ||
         status.account?.id !== selector.accountId ||
         !!state.deliveryBlockedKey ||

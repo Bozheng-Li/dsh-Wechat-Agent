@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { ChannelError, eligible } from '../../../shared/contracts.mjs';
+import { ChannelError } from '../../../shared/contracts.mjs';
 import { ROLE_CARD_UPDATE_PROMPT, roleCardUpdateInput } from '../../../prompts/memory/role-card.mjs';
 import { validateRoleCardProposal } from './profile-extraction.mjs';
 import { roleCardSettingsRevision } from '../../../shared/role-card-settings.mjs';
 import { sourceFingerprint } from '../../../backend/storage/role-card-schedule.mjs';
 import { momentPersonSources, validMomentPersonSource } from './moments.mjs';
 import { readMomentsWithMemory } from '../../moments/read.mjs';
-import { personAuthorized, authorizationEpoch, assertAuthorizationEpoch } from '../../../shared/authorization.mjs';
+import { personAuthorized, conversationEligible, authorizationEpoch, assertAuthorizationEpoch } from '../../../shared/authorization.mjs';
 
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const urgentUpdate = text => /叫我|别(?:再|这样)?叫|不要(?:再|这样)?叫|更正|纠正|改叫|我.{0,8}(?:改喝|不再|现在.{0,12}(?:喜欢|讨厌|习惯|住在))|记住|记一下/u.test(text);
@@ -45,7 +45,7 @@ export class PersonMemoryMaintenance {
           !Number.isFinite(entry.time) || entry.time > this.now()) continue;
       const person = { accountId: scope.accountId, personId: entry.senderId };
       try {
-        if (!eligible(this.channel.store.settings(scope.accountId), scope)) continue;
+        if (!conversationEligible(this.channel.store, scope)) continue;
         const source = { id: digest([scope.accountId, scope.chatType, scope.peerId, entry.key]),
           accountId: scope.accountId, chatType: scope.chatType, peerId: scope.peerId,
           conversationName: scope.name || scope.peerId, messageKey: entry.key, messageId: entry.messageId || entry.key,
@@ -166,7 +166,7 @@ export class PersonMemoryMaintenance {
     this.scanning = true; this.scanManual = manual; this.nextScanAt = this.now() + this.scanIntervalMs;
     let peers;
     try {
-      peers = this.channel.store.conversations(accountId).filter(scope => eligible(this.channel.store.settings(accountId), scope));
+      peers = this.channel.store.conversations(accountId).filter(scope => conversationEligible(this.channel.store, scope));
       for (const view of this.cards.list(accountId, { includePending: true })) if (view.pendingCount || view.nextAt != null) this.jobs.set(view.roleId, view.scope);
     } catch (error) { this.cards.errors.set('scan', error.message); this.scanning = false; return; }
     let current, entries = [], generation;
@@ -236,7 +236,7 @@ export class PersonMemoryMaintenance {
     if (!this.available(source.accountId) || !personAuthorized(this.channel.store, source.accountId, source.senderId)) return false;
     if ([...this.channel.pauses.values()].some(pause => matches(source, pause.selector))) return false;
     if (source.kind === 'moments') return validMomentPersonSource(source) && source.time <= this.now();
-    if (!eligible(this.channel.store.settings(source.accountId), source)) return false;
+    if (!conversationEligible(this.channel.store, source)) return false;
     return this.channel.memory.load(source).generation === source.generation;
   }
   async update(input, signal = new AbortController().signal, review) {
@@ -248,7 +248,7 @@ export class PersonMemoryMaintenance {
     for (const source of doc.pending) {
       if (doc.reviewBatch.sources[source.id] !== sourceFingerprint(source)) continue;
       if (this.sourceAvailable(source)) valid.push(source);
-      else if (source.kind !== 'moments' && this.available(source.accountId) && eligible(this.channel.store.settings(source.accountId), source) &&
+      else if (source.kind !== 'moments' && this.available(source.accountId) && conversationEligible(this.channel.store, source) &&
           this.channel.memory.load(source).generation !== source.generation) discarded.add(source.id);
     }
     if (discarded.size) this.cards.mutate(scope, current => {

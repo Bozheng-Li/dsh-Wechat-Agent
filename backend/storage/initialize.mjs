@@ -25,6 +25,8 @@ export function initializeState(store, root) {
   store.claimOwners = new Map();
   store.contextOwners = new Map();
   store.written = new Map();
+  store.groupMemberCache = new Map();
+  store.groupMemberRevision = 0;
   const saved = read(store.file, true);
   if (
     saved &&
@@ -39,6 +41,11 @@ export function initializeState(store, root) {
   const authorizationMigrating = store.data.authorizationRevocations === undefined || store.data.authorizationEpochs === undefined;
   store.data.authorizationRevocations ??= [];
   store.data.authorizationEpochs ??= {};
+  // Group membership extends person authorization; the index and the explicit
+  // exclusions are part of the authorization state, not a disposable cache.
+  const membershipMigrating = store.data.groupMemberIndex === undefined || store.data.groupMemberExclusions === undefined;
+  store.data.groupMemberIndex ??= {};
+  store.data.groupMemberExclusions ??= {};
   const migrating = saved?.version === 1;
   store.data.storeId ??= migrating ? identity(['wechat-agent-v2', store.root, saved]) : randomUUID();
   store.config = new ConfigurationRepository(store.root, store.data.storeId, store.data);
@@ -63,6 +70,8 @@ export function initializeState(store, root) {
   if (
     !object(store.data.conversations) ||
     !object(store.data.conversationConfigs) ||
+    !object(store.data.groupMemberIndex) ||
+    !object(store.data.groupMemberExclusions) ||
     typeof store.data.storeId !== 'string'
   )
     throw new ChannelError('STATE_INVALID', '微信插件的会话索引无效，未重置已有数据');
@@ -127,7 +136,8 @@ export function initializeState(store, root) {
   }
   // A real server acknowledgement survives shutdown. Any unfinished send
   // remains uncertain and can never be automatically replayed.
-  let changed = migrating || !saved || modelConfigMigrating || personaTemplatesMigrating || configurationMigrating || authorizationMigrating;
+  let changed = migrating || !saved || modelConfigMigrating || personaTemplatesMigrating || configurationMigrating ||
+    authorizationMigrating || membershipMigrating;
   const recoveryTime = migrating ? Math.trunc(fs.statSync(store.file).mtimeMs) : Date.now();
   for (const record of store.data.records) {
     if (!pendingStates.has(record.state)) continue;

@@ -7,3 +7,6 @@
 *.json text eol=lf
 *.md text eol=lf
 *.yml text eol=lf
+# requirements.txt is hashed to select the pinned Python runtime, so its bytes
+# must not depend on the checkout platform.
+*.txt text eol=lf

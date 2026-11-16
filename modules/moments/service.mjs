@@ -14,7 +14,7 @@ import { readMomentsImageContext } from './image-context.mjs';
 import { matchingMomentPublication, assertPublicationAuthorization } from '../../shared/moments-publication.mjs';
 import { ownerPublicationRecord, recoverOwnerPublication } from './publication-recovery.mjs';
 import { readMomentsWithMemory, assertMomentTargetAuthorized } from './read.mjs';
-import { authorizationEpoch, assertAuthorizationEpoch, assertPersonAuthorized, personAuthorized } from '../../shared/authorization.mjs';
+import { authorizationEpoch, assertAuthorizationEpoch, assertPersonAuthorized, authorizedPeople } from '../../shared/authorization.mjs';
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
 export async function resolveMomentsQuery(transport, raw, scope, signal, check) {
@@ -230,7 +230,7 @@ export class MomentsService {
         const result = await channel.transport.writeMoments({ accountId: scope.accountId, clientId, query,
           // 只有“仅授权好友可见”才自动屏蔽未授权好友；自定义屏蔽名单不替用户屏蔽任何人。
           ...(query.action === 'publish' && publishScope === 'authorized'
-            ? { authorizedUserIds: [...settings.privatePeers] } : {}) }, signal);
+            ? { authorizedUserIds: authorizedPeople(channel.store, scope.accountId) } : {}) }, signal);
         this.validateReceipt(result, query, scope.accountId);
         // Cancellation stops further work, but an already confirmed write is
         // still needed for deduplication. Revocation must never restore it.
@@ -310,8 +310,7 @@ function validateReceipt(result, query, accountId, store) {
     // “仅授权好友可见”仍要求完整的授权回执。“自定义屏蔽名单”只要求本次真正
     // 选择过的屏蔽对象得到确认；回执若自带授权证明，仍按授权模式核对。
     if (publishScopeOf(settings) === 'authorized' || result.authorizationConfirmed === true)
-      assertPublicationAuthorization(result, accountId,
-        settings.privatePeers.filter(id => personAuthorized(store, accountId, id)));
+      assertPublicationAuthorization(result, accountId, authorizedPeople(store, accountId));
     if (query.blockedUserIds?.length || query.blockedLabelIds?.length) {
       const selection = validateAudienceSelection(query), same = (a, b) => Array.isArray(a) && JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
       const verifiedRead = result.audienceSource === 'wechat-sns-live' && result.delivery === 'verified-existing' && result.readbackConfirmed === true;

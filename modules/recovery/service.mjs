@@ -1,6 +1,6 @@
 import { promptText } from "../../prompts/loader.mjs";
 import { randomUUID } from 'node:crypto';
-import { eligible } from "../../shared/contracts.mjs";
+import { conversationEligible } from "../../shared/authorization.mjs";
 import { digest, scopeKey, checkedText, fail } from "../workbench/store.mjs";
 import { recordVersion, modes, recoveryStates } from "../workbench/helpers.mjs";
 
@@ -297,7 +297,7 @@ export async function submitRecoveryDraft(workbench, input, signal) {
     )
   )
     fail('RECOVERY_ALREADY_ATTEMPTED', '相同内容已有恢复操作或结果待核对，不能重复发送');
-  if (!eligible(workbench.store.settings(scope.accountId), scope))
+  if (!conversationEligible(workbench.store, scope))
     fail('AUTH_CHANGED', '自动回复或会话授权已关闭，未发送');
   if (draft.asset) workbench.channel.library.resolveAsset(scope.accountId, draft.asset.id);
   signal.throwIfAborted();

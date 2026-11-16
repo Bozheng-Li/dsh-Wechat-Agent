@@ -1,4 +1,5 @@
-import { ChannelError, eligible, publicError } from "../../shared/contracts.mjs";
+import { ChannelError, publicError } from "../../shared/contracts.mjs";
+import { conversationEligible } from '../../shared/authorization.mjs';
 import { identity } from "../../backend/storage/keys.mjs";
 import { memoryText } from "../memory/conversation/store.mjs";
 import { matches } from "./helpers.mjs";
@@ -11,7 +12,7 @@ export function scheduleMemoryMaintenance(channel, selector, { force = false } =
   }
   const key = identity([selector.accountId, selector.chatType, selector.peerId]);
   if (force) {
-    if (!eligible(channel.store.settings(selector.accountId), selector))
+    if (!conversationEligible(channel.store, selector))
       throw new ChannelError('AUTH_CHANGED', '此会话未授权，不能安排记忆压缩');
     channel.memory.load(selector);
     channel.memoryRetries.delete(key);
@@ -75,11 +76,11 @@ async function scanConversationMemory(channel, scan) {
   let index = 0;
   while (index < peers.length && memoryScanAllowed(channel, scan)) {
     // Recheck authorization and pauses after every yield, without rebuilding UI rows.
-    const settings = channel.store.settings(accountId), pauses = [...channel.pauses.values()], started = performance.now();
+    const pauses = [...channel.pauses.values()], started = performance.now();
     let batch = 0;
     while (index < peers.length && batch++ < 8) {
       const peer = peers[index++];
-      if (eligible(settings, peer) && !pauses.some(pause => matches(peer, pause.selector)) &&
+      if (conversationEligible(channel.store, peer) && !pauses.some(pause => matches(peer, pause.selector)) &&
           !(channel.memoryRetries.get(peer.key)?.nextAt > channel.now())) {
         try {
           const doc = channel.memory.load(peer);
@@ -110,7 +111,7 @@ export async function maintainConversationMemory(channel, selector) {
     channel.memoryRetries.get(identity([selector.accountId, selector.chatType, selector.peerId]))?.nextAt > channel.now() ||
     (!status.online && !force) ||
     status.account?.id !== selector.accountId ||
-    !eligible(channel.store.settings(selector.accountId), selector) ||
+    !conversationEligible(channel.store, selector) ||
     [...channel.pauses.values()].some((pause) => matches(selector, pause.selector))
   )
     return;

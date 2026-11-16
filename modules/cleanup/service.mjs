@@ -17,7 +17,22 @@ export class OwnerCleanup {
     const records = (manager, rows, { label, id = row => row.id, protectedRow = () => false, remove, note = evidenceNote }) => {
       if (!manager || manager.error) fail(manager?.error || '记录组件尚未就绪');
       return { label, note, rows: rows.filter(row => row.accountId === accountId && !hidden(row)).map(row => ({ id: id(row), version: digest(row), protected: protectedRow(row), row })),
-        remove: selected => { for (const entry of selected) { entry.row.historyDeleted = true; remove?.(entry.row); } manager.save(); } };
+        // Keep a snapshot so a failed save cannot leave memory ahead of disk: the
+        // preview froze a version digest of every row, so any surviving mutation
+        // would make this cleanup permanently unretryable.
+        remove: selected => {
+          const restore = selected.map(entry => ({ row: entry.row, snapshot: { ...entry.row } }));
+          try {
+            for (const entry of selected) { entry.row.historyDeleted = true; remove?.(entry.row); }
+            manager.save();
+          } catch (error) {
+            for (const { row, snapshot } of restore) {
+              for (const key of Object.keys(row)) delete row[key];
+              Object.assign(row, snapshot);
+            }
+            throw error;
+          }
+        } };
     };
     if (kind === 'moments.publishing') {
       const manager = automation?.publishing;
@@ -27,8 +42,19 @@ export class OwnerCleanup {
         note: evidenceNote + '未发布的草稿会放弃，正在处理及结果不明的记录保留。' });
       const remove = collection.remove;
       collection.remove = selected => {
+        const restore = selected.map(entry => ({ row: entry.row, snapshot: { ...entry.row } }));
         const images = selected.map(entry => entry.row.image).filter(Boolean);
-        selected.forEach(entry => { delete entry.row.image; }); remove(selected);
+        try {
+          selected.forEach(entry => { delete entry.row.image; }); remove(selected);
+        } catch (error) {
+          // The base remove restored its own snapshot; this one also brings back
+          // `image`, which is deleted before that snapshot is taken.
+          for (const { row, snapshot } of restore) {
+            for (const key of Object.keys(row)) delete row[key];
+            Object.assign(row, snapshot);
+          }
+          throw error;
+        }
         let warning = '';
         for (const image of images) try { fs.unlinkSync(workPath(this.channel.store.root, image.path)); } catch (error) { if (error.code !== 'ENOENT') warning = '记录已清理，部分配图文件暂未清除'; }
         return warning;
