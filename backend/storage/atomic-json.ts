@@ -1,4 +1,4 @@
-import { mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 
@@ -6,7 +6,15 @@ export function atomicJson(file: string, value: unknown) {
   mkdirSync(path.dirname(file), { recursive: true });
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
   try {
-    writeFileSync(temporary, JSON.stringify(value, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+    const handle = openSync(temporary, 'wx', 0o600);
+    try {
+      // Flush the bytes before the rename publishes them: otherwise a crash can
+      // leave a valid-looking but truncated conversation behind.
+      writeFileSync(handle, JSON.stringify(value, null, 2) + '\n');
+      fsyncSync(handle);
+    } finally {
+      closeSync(handle);
+    }
     for (let attempt = 0; ; attempt++) {
       try {
         renameSync(temporary, file);

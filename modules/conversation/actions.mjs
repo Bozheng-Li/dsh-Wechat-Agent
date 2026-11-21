@@ -1,4 +1,4 @@
-import { ChannelError, validateSettings, validateConversationSettings, validatePublishScope, publishScopeOf } from "../../shared/contracts.mjs";
+import { ChannelError, validateSettings, validateConversationSettings, validatePublishScope, publishScopeOf, participationMode } from "../../shared/contracts.mjs";
 import { absoluteDirectory, sameDirectory } from "../../backend/storage/paths.mjs";
 import { preserveTimeValues } from '../../shared/time-settings.mjs';
 
@@ -49,12 +49,18 @@ export async function settingsMutation(
     }
     case 'conversation.configure': {
       const selector = conversation(payload),
-        config = validateConversationSettings(payload.config);
+        before = store.conversationSettings(selector.accountId, selector.chatType, selector.peerId);
+      if (!payload.config || typeof payload.config !== 'object' || Array.isArray(payload.config))
+        throw new ChannelError('INVALID_CONVERSATION', '请提供有效的会话设置');
+      const requested = payload.config;
+      // Older clients must not erase native work fields or silently enable cold openings.
+      const config = validateConversationSettings({ ...before, ...requested,
+        ...(requested.natural && typeof requested.natural === 'object' && !Array.isArray(requested.natural)
+          ? { natural: { ...before.natural, ...requested.natural } } : {}) });
       if (config.persona)
         throw new ChannelError('PERSONA_GLOBAL_ONLY', '所有会话共用默认助手，请在“默认助手”的全局自定义入口编辑');
       if (selector.chatType === 'private' && config.mode !== 'default')
         throw new ChannelError('INVALID_CONVERSATION', '昵称唤醒、主动参与和自然陪聊仅适用于群聊');
-      const before = store.conversationSettings(selector.accountId, selector.chatType, selector.peerId);
       if (payload.preserveTimeSettings) config.natural = preserveTimeValues('natural', config.natural, before.natural);
       if (JSON.stringify(before) === JSON.stringify(config)) break;
       const withoutRemote = value => Object.fromEntries(Object.entries(value).filter(([key]) => !['remoteEnabled', 'adminIds'].includes(key)));
@@ -76,9 +82,9 @@ export async function settingsMutation(
             )
           )
             store.resetProgress(selector.accountId, selector.chatType, selector.peerId, { resetNatural: false });
-          if (config.mode === 'natural') {
+          if (participationMode(config.mode)) {
             const natural = channel.natural.state(selector, config);
-            if (before.mode !== 'natural') natural.nextCheckAt = channel.now() + channel.natural.delay(config, natural);
+            if (!participationMode(before.mode)) natural.nextCheckAt = channel.natural.nextCheck(config, natural);
             channel.natural.save(selector, natural);
           }
         },
@@ -118,14 +124,16 @@ export async function settingsMutation(
       return { blockedUserIds: settings.defaultBlockedUserIds, blockedLabelIds: settings.defaultBlockedLabelIds };
     }
     case 'settings': {
+      if (!payload.settings || typeof payload.settings !== 'object' || Array.isArray(payload.settings))
+        throw new ChannelError('INVALID_SETTINGS', '请提供有效的账号设置');
       const account = currentAccount(payload),
-        next = validateSettings(payload.settings),
-        before = store.settings(account.id);
+        before = store.settings(account.id),
+        next = validateSettings({ ...before, ...payload.settings });
       if (JSON.stringify(next) !== JSON.stringify(before)) {
         // A revocation also cancels account background operations which may
         // contain this object's sources. Their unrelated data is retained.
         const selectors =
-          next.enabled !== before.enabled || next.prompt !== before.prompt
+          next.prompt !== before.prompt
             ? [{ accountId: account.id }]
             : [
                 ['privatePeers', 'private'],
@@ -150,7 +158,11 @@ export async function settingsMutation(
           selectors
         );
       }
-      await channel.authorization?.whenIdle();
+      // The settings are already saved above; a revocation cleanup that keeps
+      // failing must not make the save look failed - it retries on its own.
+      try {
+        await channel.authorization?.whenIdle();
+      } catch {}
       break;
     }
   }

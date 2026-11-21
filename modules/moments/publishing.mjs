@@ -4,7 +4,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { atomicJson } from '../../backend/storage/atomic-json.ts';
 import { atomicBytes } from '../../backend/storage/atomic-text.mjs';
-import { ChannelError, publicError } from '../../shared/contracts.mjs';
+import { ChannelError, publicError, momentsEnabled } from '../../shared/contracts.mjs';
 import { validateAudienceSelection } from '../../shared/moments-audience.mjs';
 import { momentsPublishingSettings, momentsPlanSettings, momentsPlanId, momentsRunId, nextMomentsOccurrence, visibleMomentsText,
   MOMENTS_TEXT_FALLBACK_RESERVE_MS } from '../../shared/moments-publishing.mjs';
@@ -29,6 +29,7 @@ export class MomentsPublishing {
     this.data = { version: 1, ownerStoreId: channel.store.data.storeId, accounts: {}, plans: {}, runs: {} };
     try {
       const data = JSON.parse(fs.readFileSync(this.file(), 'utf8'));
+      let changed = false;
       if (data.version !== 1 || data.ownerStoreId !== channel.store.data.storeId || ![data.accounts, data.plans, data.runs].every(object)) throw Error();
       for (const [key, account] of Object.entries(data.accounts)) { if (typeof account.accountId !== 'string' || key !== hash(account.accountId) || typeof account.revision !== 'string') throw Error(); account.settings = momentsPublishingSettings(account.settings); }
       for (const [id, plan] of Object.entries(data.plans)) {
@@ -50,12 +51,16 @@ export class MomentsPublishing {
             run.state === 'published' && (!Number.isSafeInteger(run.publishedAt) || !/^[1-9][0-9]{0,19}$/.test(run.postId) || !['server-ack','verified-existing'].includes(run.delivery)) ||
             run.state === 'deleted' && (!/^[1-9][0-9]{0,19}$/.test(run.postId) || !object(run.deletion) || run.deletion.postId !== run.postId ||
               !Number.isSafeInteger(run.deletion.confirmedAt) || !['server-ack', 'verified-existing'].includes(run.deletion.delivery))) throw Error();
-        if (run.state === 'sending') { run.state = 'unknown'; run.error = '上次发布提交中断，结果不明，未重发；请核对回执'; }
-        if (run.state === 'generating') { run.state = 'failed'; run.error = '上次生成中断，本时段不自动再次调用 AI；已有内容保留'; }
-        if (unresolved(run.state) && run.planId) { const plan = data.plans[run.planId]; plan.settings.enabled = false; plan.nextRunAt = 0; plan.waitingReason = '上次发布或屏蔽范围尚未确认，计划已暂停，请核对回执';
+        if (run.state === 'sending') { run.state = 'unknown'; run.error = '上次发布提交中断，结果不明，未重发；请核对回执'; changed = true; }
+        if (run.state === 'generating') { run.state = 'failed'; run.error = '上次生成中断，本时段不自动再次调用 AI；已有内容保留'; changed = true; }
+        if (unresolved(run.state) && run.planId) { const plan = data.plans[run.planId]; plan.settings.enabled = false; plan.nextRunAt = 0; plan.waitingReason = '上次发布或屏蔽范围尚未确认，计划已暂停，请核对回执'; changed = true;
           if (plan.automatic) { plan.automatic.edited = true; const account = data.accounts[hash(run.accountId)]; if (account) { account.settings.automatic.enabled = false; account.automaticWaitingReason = '上次发布结果不明，自动安排已暂停，请核对回执后再开启'; } } }
       }
       this.data = data;
+      // Persist what recovery decided: the DSH plugin shares this data root and
+      // otherwise keeps reading "sending" plus an enabled plan that the UI shows
+      // as paused.
+      if (changed) try { this.save(); } catch {}
     } catch (error) { if (error.code !== 'ENOENT') this.error = '自动发布记录无法读取或归属无效；原文件保留，自动发布已停止'; }
   }
   file() { return workPath(this.channel.store.root, 'storage/moments/publishing.json'); }
@@ -70,7 +75,7 @@ export class MomentsPublishing {
     const status = this.channel.transport.status();
     if (this.channel.closed || this.channel.fault || !allowOffline && !status.online || status.account?.id !== accountId) throw new ChannelError('ACCOUNT_CHANGED', '微信账号、连接或运行状态已变化，未继续自动发布');
   }
-  account(accountId) { return this.data.accounts[hash(accountId)] ?? { accountId, settings: momentsPublishingSettings(), revision: '' }; }
+  account(accountId) { return (typeof accountId === 'string' ? this.data.accounts[hash(accountId)] : undefined) ?? { accountId, settings: momentsPublishingSettings(), revision: '' }; }
   list(accountId) {
     const visible = Object.values(this.data.plans).filter(plan => plan.accountId === accountId && !plan.deleted && !plan.automatic?.suppressed);
     const upcoming = visible.filter(plan => !plan.automatic || plan.nextRunAt > this.now());
@@ -85,12 +90,17 @@ export class MomentsPublishing {
   configure(accountId, input, signal, assertAllowed = () => {}, { timeOnly = false } = {}) {
     const check = () => { assertAllowed(); this.check(accountId, signal, timeOnly); }; check(); momentsPublishingSettings(input);
     const previous = this.account(accountId), automatic = previous.settings.automatic;
+    // Snapshot the id, not the record object: account() returns the stored record
+    // itself, so `this.account(id).revision !== previous.revision` could never be
+    // true and a "result unknown, automatic paused" state written while the
+    // audience lookup was awaiting would be silently overwritten below.
+    const revision = previous.revision;
     const settings = momentsPublishingSettings({ ...previous.settings, ...input,
       automatic: { ...automatic, ...input.automatic, content: { ...automatic.content, ...input.automatic?.content,
         image: { ...automatic.content.image, ...input.automatic?.content?.image } } } });
     if (timeOnly) assertOnlyTimeChanges('publishing', settings, previous.settings);
     const apply = () => {
-      check(); if (this.account(accountId).revision !== previous.revision) throw new ChannelError('MOMENTS_PLAN_CHANGED', '总设置已被修改，请刷新后重新保存');
+      check(); if (this.account(accountId).revision !== revision) throw new ChannelError('MOMENTS_PLAN_CHANGED', '总设置已被修改，请刷新后重新保存');
       if (this.activeAccount === accountId) this.controller?.abort(new ChannelError('MOMENTS_PLAN_CHANGED', '自动发布总设置已变更，旧操作已停止'));
       this.data.accounts[hash(accountId)] = { ...previous, accountId, settings, revision: randomUUID(), automaticWaitingReason: null };
       const reflow = hash({ ...automatic, enabled: false }) !== hash({ ...settings.automatic, enabled: false }) || settings.minGapMinutes !== previous.settings.minGapMinutes || settings.maxPostsPer24Hours !== previous.settings.maxPostsPer24Hours;
@@ -265,8 +275,17 @@ export class MomentsPublishing {
     const contacts = new Set(snapshot.contacts.map(row => row.id)), labels = new Map(snapshot.labels.map(row => [row.id, row]));
     const complete = label => Array.isArray(label?.userIds) && label.memberCount === label.userIds.length &&
       label.userIds.every(id => contacts.has(id));
-    return { blockedUserIds: stored.blockedUserIds.filter(id => contacts.has(id)),
-      blockedLabelIds: stored.blockedLabelIds.filter(id => complete(labels.get(id))) };
+    const blockedUserIds = stored.blockedUserIds.filter(id => contacts.has(id)), blockedLabelIds = [];
+    for (const id of stored.blockedLabelIds) {
+      const label = labels.get(id);
+      if (complete(label)) { blockedLabelIds.push(id); continue; }
+      // An incomplete or vanished label cannot be sent as a label id, but
+      // dropping it silently unblocked every one of its members: block the
+      // members we do know by id instead (over-blocking is the safe direction).
+      for (const member of Array.isArray(label?.userIds) ? label.userIds : [])
+        if (contacts.has(member)) blockedUserIds.push(member);
+    }
+    return { blockedUserIds: [...new Set(blockedUserIds)], blockedLabelIds };
   }
   query(run, audience) {
     if (!visibleMomentsText(run.text) || run.text.trim().length > run.settings.maxChars)
@@ -387,15 +406,28 @@ export class MomentsPublishing {
     });
   }
   cancel(accountId) { this.check(accountId); if (this.activeAccount === accountId) this.controller?.abort(); return this.list(accountId); }
-  start() { if (this.timer || this.error) return; this.stopped = false; this.timer = setInterval(() => { void this.tick().catch(() => {}); }, 10000); this.timer.unref?.(); }
+  start() {
+    if (this.timer || this.error) return;
+    this.stopped = false;
+    this.timer = setInterval(() => {
+      void Promise.resolve().then(() => this.tick()).catch(error => {
+        if (this.stopped) return;
+        this.error ??= publicError(error, '朋友圈自动发布检查失败，已暂停，请重新启动应用').message;
+        this.stopped = true; clearInterval(this.timer); this.timer = undefined; this.controller?.abort(error);
+      });
+    }, 10000);
+    this.timer.unref?.();
+  }
   async close() { this.stopped = true; clearInterval(this.timer); this.timer = undefined; this.controller?.abort(); await this.whenIdle(); }
   async whenIdle() { await this.pending?.catch(() => {}); }
   tick() {
     if (this.pending) return this.pending;
-    const status = this.channel.transport.status(), accountId = status.account?.id, account = this.account(accountId);
-    if (this.stopped || this.error || !accountId) return Promise.resolve();
+    if (this.stopped || this.error) return Promise.resolve();
+    const status = this.channel.transport.status(), accountId = status.account?.id;
+    if (typeof accountId !== 'string' || !accountId) return Promise.resolve();
+    const account = this.account(accountId);
     this.arrange(accountId);
-    if (!status.online || !status.momentsWriteReady || !this.channel.store.settings(accountId).enabled || !account.settings.enabled) return Promise.resolve();
+    if (!status.online || !status.momentsWriteReady || !momentsEnabled(this.channel.store.settings(accountId)) || !account.settings.enabled) return Promise.resolve();
     const plan = Object.values(this.data.plans).filter(plan => plan.accountId === accountId && !plan.deleted && !plan.automatic?.suppressed && (!plan.automatic || account.settings.automatic.enabled) && plan.settings.enabled && plan.nextRunAt > 0 && plan.nextRunAt <= this.now()).sort((a, b) => a.nextRunAt - b.nextRunAt || Number(!!a.automatic) - Number(!!b.automatic) || a.id.localeCompare(b.id))[0];
     if (!plan) return Promise.resolve();
     const scheduledAt = plan.nextRunAt, id = hash([accountId, plan.id, scheduledAt]), previous = this.data.runs[id];
@@ -410,8 +442,8 @@ export class MomentsPublishing {
     const snapshot = copy(plan), revision = account.revision;
     return this.operation(accountId, plan.id, null, async signal => {
       const check = () => { this.check(accountId, signal); const current = this.data.plans[plan.id];
-        if (this.stopped || !this.channel.store.settings(accountId).enabled || !this.account(accountId).settings.enabled || this.account(accountId).revision !== revision || !current?.settings.enabled || current.deleted || current.automatic?.suppressed || current.automatic && !this.account(accountId).settings.automatic.enabled || current.revision !== snapshot.revision)
-          throw new ChannelError('MOMENTS_PLAN_CHANGED', '自动发布已暂停或计划变化，旧操作未继续'); };
+        if (this.stopped || !momentsEnabled(this.channel.store.settings(accountId)) || !this.account(accountId).settings.enabled || this.account(accountId).revision !== revision || !current?.settings.enabled || current.deleted || current.automatic?.suppressed || current.automatic && !this.account(accountId).settings.automatic.enabled || current.revision !== snapshot.revision)
+          throw new ChannelError('MOMENTS_PLAN_CHANGED', '朋友圈自动功能已关闭或计划变化，旧操作未继续'); };
       const run = { id, accountId, planId: plan.id, requestId: 'moments-scheduled:' + id, inputHash: hash(snapshot.settings), settings: snapshot.settings, scheduledAt, createdAt: this.now(), updatedAt: this.now(), origin: 'schedule', state: 'generating' };
       this.data.runs[id] = run; plan.nextRunAt = nextMomentsOccurrence(snapshot.settings, scheduledAt); plan.waitingReason = null; this.save();
       try { check(); await this.generate(run, signal, check); this.deadline(run); if (!snapshot.settings.reviewRequired) await this.submit(run, signal, check); }

@@ -5,7 +5,7 @@ import { Glyph } from '../../components/glyph.jsx';
 import { emptyRoleCard } from '../../../shared/role-card.mjs';
 import { AutomationLink } from '../../components/automation-link.jsx';
 import { RoleAvatar, RoleCardDetails, RolePersonCard, roleSource, roleTone } from './role-card-view.jsx';
-import { roleCardGroups } from './role-card-groups.mjs';
+import { roleCardGroups, rolePersonDisplayName } from './role-card-groups.mjs';
 
 export function RoleCardsPage({ rpc, status, onNavigate }) {
   const accountId = status.account?.id;
@@ -22,42 +22,43 @@ export function RoleCardsPage({ rpc, status, onNavigate }) {
   const scope = { accountId, personId: selected };
   const dirty = !!doc && JSON.stringify(draft) !== JSON.stringify(doc.card);
   const canReadTags = !!accountId && status.online && status.momentsAudienceReady === true;
-  const authorizedPeople = JSON.stringify(status.settings?.privatePeers || []);
+  const authorizationKey = JSON.stringify([status.settings?.privatePeers || [], status.settings?.groups || [],
+    status.authorization?.pendingCount || 0, status.authorization?.members?.syncedAt || null]);
   useEffect(() => {
-    const allowed = new Set(status.settings?.privatePeers || []);
-    setPeople(current => current.filter(person => allowed.has(person.personId)));
-    if (selected && !allowed.has(selected)) {
-      operation.current?.abort(); setSelected(''); setDoc(null); setDraft(emptyRoleCard());
-      setEditing(false); editingRef.current = false; setError(''); setNotice('');
-    }
-  }, [accountId, authorizedPeople]);
+    setAudience(null); setTagError(''); setTagBusy(false);
+    return () => { tagOperation.current?.abort(); tagOperation.current = null; };
+  }, [accountId]);
   const loadTags = async () => {
     if (!canReadTags) return;
     tagOperation.current?.abort();
     const controller = new AbortController(); tagOperation.current = controller;
     setTagBusy(true); setTagError('');
     try {
-      const value = await rpc('moments.audience', { accountId }, controller.signal);
+      const value = await rpc('memory.role.labels', { accountId }, controller.signal);
       if (controller.signal.aborted || account.current !== accountId) return;
-      if (value.accountId !== accountId || value.source !== 'wechat-contacts-live' || value.membershipComplete !== true ||
+      if (value.accountId !== accountId || value.source !== 'wechat-role-labels-live' || value.membershipComplete !== true ||
           !Array.isArray(value.contacts) || !Array.isArray(value.labels)) throw new Error('微信标签未完整读取，请刷新重试。');
       setAudience(value);
     } catch (failure) {
-      if (!controller.signal.aborted && account.current === accountId) setTagError(failure.message);
+      if (!controller.signal.aborted && account.current === accountId) setTagError(`${failure.code ? `[${failure.code}] ` : ''}${failure.message}`);
     } finally {
       if (tagOperation.current === controller) { tagOperation.current = null; setTagBusy(false); }
     }
   };
   useEffect(() => {
-    setAudience(null); setTagError(''); setTagBusy(false);
-    return () => { tagOperation.current?.abort(); tagOperation.current = null; };
-  }, [accountId]);
-  useEffect(() => { if (canReadTags) void loadTags(); }, [accountId, canReadTags]);
+    if (canReadTags) void loadTags();
+    return () => { tagOperation.current?.abort(); };
+  }, [accountId, canReadTags]);
   const loadPeople = async signal => {
     if (!accountId) return;
     const sequence = ++listReads.current, value = await rpc('memory.role.list', { accountId }, signal);
     if (!signal?.aborted && account.current === accountId && listReads.current === sequence) {
       setPeople(value.people); setListError(value.errors?.[0] || ''); setListing(false);
+      const selectedPerson = selectedRef.current;
+      if (selectedPerson && !value.errors?.length && !value.people.some(person => person.personId === selectedPerson)) {
+        operation.current?.abort(); selectedRef.current = ''; setSelected(''); setDoc(null); setDraft(emptyRoleCard());
+        setEditing(false); editingRef.current = false; setError(''); setNotice('');
+      }
     }
   };
   const load = async signal => {
@@ -80,7 +81,7 @@ export function RoleCardsPage({ rpc, status, onNavigate }) {
     };
     void refresh(); const timer = setInterval(refresh, 5000);
     return () => { controller.abort(); clearInterval(timer); };
-  }, [accountId]);
+  }, [accountId, authorizationKey]);
   useEffect(() => {
     setDoc(null); setDraft(emptyRoleCard()); setEditing(false); editingRef.current = false;
     setError(''); setNotice(''); setBusy(false);
@@ -118,11 +119,12 @@ export function RoleCardsPage({ rpc, status, onNavigate }) {
     finally { if (operation.current === controller) { operation.current = null; setBusy(false); } }
   };
   const search = query.trim();
-  const { filtered, groups } = roleCardGroups(people, audience, query);
+  const activeAudience = audience?.accountId === accountId ? audience : null;
+  const { filtered, groups } = roleCardGroups(people, activeAudience, query);
   const person = people.find(row => row.personId === selected);
-  const name = doc?.card.label || person?.name || selected;
+  const name = doc?.card.label || rolePersonDisplayName(person || { personId: selected }, activeAudience) || selected;
   const names = new Map();
-  for (const row of people) names.set(row.name, (names.get(row.name) || 0) + 1);
+  for (const row of people) { const displayName = rolePersonDisplayName(row, activeAudience); names.set(displayName, (names.get(displayName) || 0) + 1); }
   return <>
     <PageHead icon="people" title="人物角色卡" description="根据已有聊天与已读取的朋友圈资料创建角色卡，有实际资料的人才会出现在这里。">
       <AutomationLink onNavigate={onNavigate} from="memory" section="roles">自动整理设置</AutomationLink>
@@ -154,7 +156,7 @@ export function RoleCardsPage({ rpc, status, onNavigate }) {
               {groups.map(group => <section className="wa-role-tag-group" data-testid="role-card-group" data-label-id={group.id} key={group.id}>
                 <header className="wa-role-tag-head"><h3>{group.name}</h3><span>{group.people.length} 张角色卡</span></header>
                 <div className="wa-role-grid" role="list" aria-label={group.name + '人物角色卡'}>
-                  {group.people.map(row => <RolePersonCard key={row.personId} person={row} status={status} duplicate={names.get(row.name) > 1} onOpen={event => {
+                  {group.people.map(row => <RolePersonCard key={row.personId} person={row} status={status} duplicate={names.get(rolePersonDisplayName(row, activeAudience)) > 1} onOpen={event => {
                     triggerRef.current = event.currentTarget; setSelected(row.personId);
                   }} />)}
                 </div>

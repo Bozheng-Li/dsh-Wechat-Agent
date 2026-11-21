@@ -5,7 +5,7 @@ import type { Credential } from './session.js';
 
 // GetContactLabelList (639), InitContact (851) and GetContact (182) layouts:
 // https://github.com/ThePeppy/wechat-api-ipad/blob/main/Cilent/mm/mm.proto
-const fail = (message: string): never => { throw new BridgeError('ERR_MOMENTS_AUDIENCE', message); };
+const fail = (message: string, details = {}): never => { throw new BridgeError('ERR_MOMENTS_AUDIENCE', message, details); };
 export const audienceUserId = (id: unknown): id is string => typeof id === 'string' && /^[\w.:-]{1,256}$/.test(id);
 export const audienceLabelId = (id: unknown): id is string => typeof id === 'string' && /^[1-9]\d{0,9}$/.test(id) && BigInt(id) <= 0xffffffffn;
 const field = (list: Field[], tag: number, wire: number, required = false) => {
@@ -20,7 +20,7 @@ const contactString = (list: Field[], tag: number) => {
 };
 const accepted = (body: Buffer) => {
   const list = fields(body), base = fields(field(list, 1, 2, true) as Buffer), ret = signed(field(base, 1, 0, true) as bigint);
-  if (ret !== 0) fail(`微信拒绝读取联系人或标签（ret=${ret}），屏蔽名单未取得，未发布`);
+  if (ret !== 0) fail(`微信拒绝读取联系人或标签（ret=${ret}），请稍后重新读取`, { ret });
   return list;
 };
 export function contactLabelsResponse(body: Buffer) {
@@ -67,13 +67,24 @@ export function contactDetailsResponse(body: Buffer, requested: string[]) {
 }
 export class MomentsAudienceReader {
   constructor(readonly request = requestSnsCgi) {}
-  async read(account: Credential, signal: AbortSignal, check: () => void) {
+  async read(account: Credential, signal: AbortSignal, check: () => void, contactIds?: string[]) {
+    if (contactIds !== undefined && (!Array.isArray(contactIds) || contactIds.length > 50000 || contactIds.some(id => !audienceUserId(id) || id === account.wxid)))
+      fail('读取人物标签需要当前人物的有效微信编号');
     const request = async (cmd: number, route: string, makeBody: (base: Buffer) => Buffer) => {
-      check(); signal.throwIfAborted(); const body = await this.request(account, cmd, route, makeBody, signal); check(); signal.throwIfAborted(); return body;
+      check(); signal.throwIfAborted();
+      try {
+        const body = await this.request(account, cmd, route, makeBody, signal); check(); signal.throwIfAborted(); return body;
+      } catch (error) {
+        if ((error as Error)?.name === 'TimeoutError')
+          throw new BridgeError('ERR_MOMENTS_AUDIENCE_TIMEOUT', `微信标签读取的 ${route}（CGI ${cmd}）请求超时，请重试`, { cmd });
+        throw error;
+      }
     };
     const readLabels = async () => contactLabelsResponse(await request(639, 'getcontactlabellist', base => ld(1, base)));
-    const labels = await readLabels(), ids = new Set<string>(); let wxSeq = 0n, roomSeq = 0n, complete = false;
-    for (let page = 0; page < 500; page++) {
+    const labels = await readLabels(), ids = new Set<string>(contactIds); let wxSeq = 0n, roomSeq = 0n, complete = contactIds !== undefined;
+    // Role cards already identify the people to read. Do not enumerate unrelated
+    // contacts, or mistake a scoped result for a complete publishing audience.
+    for (let page = 0; !complete && page < 500; page++) {
       const result = contactDirectoryResponse(await request(851, 'initcontact', () => Buffer.concat([ld(1, account.wxid), fv(2, wxSeq), fv(3, roomSeq)])));
       result.ids.filter(audienceUserId).filter(id => id !== account.wxid).forEach(id => ids.add(id));
       if (ids.size > 50000) fail('微信联系人数量超出读取范围，未使用不完整名单');
@@ -93,7 +104,7 @@ export class MomentsAudienceReader {
     if (JSON.stringify(await readLabels()) !== JSON.stringify(labels)) fail('读取期间微信标签发生变化，请重新读取后选择');
     const labelIds = new Set(labels.map(x => x.id));
     if (contacts.some(contact => contact.labelIds.some(id => !labelIds.has(id)))) fail('微信联系人引用了未返回的标签，请重新读取');
-    return { accountId: account.wxid, source: 'wechat-contacts-live', fetchedAt: new Date().toISOString(), membershipComplete: true, unavailableCount: unavailableIds.length,
+    return { accountId: account.wxid, source: contactIds === undefined ? 'wechat-contacts-live' : 'wechat-role-labels-live', fetchedAt: new Date().toISOString(), membershipComplete: true, unavailableCount: unavailableIds.length,
       contacts, labels: labels.map(label => { const userIds = contacts.filter(contact => contact.labelIds.includes(label.id)).map(contact => contact.id); return { ...label, userIds, memberCount: userIds.length }; }) };
   }
 }

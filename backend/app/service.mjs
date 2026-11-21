@@ -23,7 +23,11 @@ import { TRACE_ENDPOINTS, traceQuery } from '../../modules/traces/api.mjs';
 import { listTimeSettings } from '../../modules/settings/time.mjs';
 import { timeSettings, preserveTimeValues } from '../../shared/time-settings.mjs';
 import { filledRoleCardFields } from '../../shared/role-card.mjs';
-import { assertConversationAuthorized, conversationAuthorized } from '../../shared/authorization.mjs';
+import { assertConversationAuthorized, conversationAuthorized, personAuthorized, authorizationEpoch, assertAuthorizationEpoch } from '../../shared/authorization.mjs';
+import { previewPersonaChat } from '../../modules/agent/persona-chat.mjs';
+import { distillCandidates, distillPersona } from '../../modules/agent/style-distill.mjs';
+import { summarizeStyle } from '../../modules/agent/style-summary.mjs';
+import { timeLimitMs } from '../../shared/time-settings.mjs';
 
 export function createPluginService({
   ctx,
@@ -41,6 +45,7 @@ export function createPluginService({
   dshSessionPath = null,
 }) {
   let mutations = Promise.resolve();
+  let personaChatRunning = false;
   const featureOperations = new Set();
   let cleanup = new OwnerCleanup(channel, scheduler);
   let discovered;
@@ -118,6 +123,7 @@ export function createPluginService({
       modelChoice: store?.modelChoice() ?? null,
       startupError,
       persona: store?.persona() ?? emptyPersona(),
+      personas: store?.personasView?.() ?? null,
       modelConfig: store?.modelConfig() ?? { maxTokens: null, temperature: null },
       capabilities: { vision: !!ctx?.attachments?.admitPromptContent, webSearch: !!ctx?.web?.search, momentsRead: state.momentsReadReady === true,
         momentsWrite: state.momentsWriteReady === true, momentsAudience: state.momentsAudienceReady === true,
@@ -247,6 +253,47 @@ export function createPluginService({
       if (relocating) throw new ChannelError('WORKSPACE_MOVING', '正在切换全局工作目录，请等待完成后重试');
       if (endpoint === 'changelog') return { markdown: fs.readFileSync(resourcePath('CHANGELOG.md'), 'utf8') };
       if (startupError) throw new ChannelError(startupError.code, startupError.message);
+      if (endpoint === 'persona.candidates') {
+        const account = currentAccount(payload);
+        return distillCandidates({ store, memory: channel.memory, accountId: account.id });
+      }
+      if (endpoint === 'persona.distill') {
+        const account = currentAccount(payload);
+        const draft = distillPersona({ store, memory: channel.memory, accountId: account.id, senderId: payload.senderId,
+          name: payload.name, title: payload.title, warmth: payload.warmth });
+        const epoch = authorizationEpoch(store, account.id);
+        const combined = AbortSignal.any([lifetime, ...(signal ? [signal] : []),
+          channel.authorization.combine(account.id, signal),
+          AbortSignal.timeout(timeLimitMs(store, 'conversationTimeoutSeconds'))]);
+        const check = () => {
+          assertLive(combined); currentAccount(payload);
+          assertAuthorizationEpoch(store, account.id, epoch);
+        };
+        const pending = (async () => {
+          const snapshot = await runner.memoryExecutionSnapshot(combined);
+          check();
+          const summary = await summarizeStyle({ runner, executionSnapshot: snapshot, assertAllowed: check,
+            profile: draft.profile, samples: draft.samples, sampling: draft.sampling,
+            entities: draft.privacyEntities, warmth: draft.warmth, signal: combined });
+          check();
+          const { samples, privacyEntities, ...visible } = draft;
+          return { ...visible, persona: { ...draft.persona, prompt: summary.text }, summarized: true,
+            usage: summary.usage, ...(summary.warning ? { summaryWarning: summary.warning } : {}) };
+        })();
+        featureOperations.add(pending);
+        void pending.finally(() => featureOperations.delete(pending)).catch(() => {});
+        return pending;
+      }
+      if (endpoint === 'persona.chat') {
+        if (personaChatRunning) throw new ChannelError('PERSONA_CHAT_BUSY', '上一条试聊还在回复，请稍后再发');
+        const combined = AbortSignal.any([lifetime, ...(signal ? [signal] : []),
+          AbortSignal.timeout(timeLimitMs(store, 'conversationTimeoutSeconds'))]);
+        personaChatRunning = true;
+        const pending = previewPersonaChat(runner, payload, combined, () => assertLive(combined));
+        featureOperations.add(pending);
+        void pending.finally(() => { personaChatRunning = false; featureOperations.delete(pending); }).catch(() => {});
+        return pending;
+      }
       if (endpoint === 'identity.get') return identity.view();
       if (endpoint === 'time.list') return listTimeSettings({ store, channel, currentAccount, conversation }, payload);
       if (WORKBENCH_ENDPOINTS.includes(endpoint)) {
@@ -428,13 +475,11 @@ export function createPluginService({
       if (endpoint === 'memory.images.list') {
         const scope = { ...conversation(payload), collection: imageMemoryCollection(payload.collection) };
         if (scope.collection === 'generated') {
-          const settings = store.settings(scope.accountId), allowed = scope.chatType === 'group' ? settings.groups : settings.privatePeers;
-          if (allowed.includes(scope.peerId)) {
+          if (conversationAuthorized(store, scope)) {
             const combined = AbortSignal.any([lifetime, ...(signal ? [signal] : [])]),
               check = () => {
                 assertLive(combined); currentAccount(payload);
-                const current = store.settings(scope.accountId);
-                if (!(scope.chatType === 'group' ? current.groups : current.privatePeers).includes(scope.peerId))
+                if (!conversationAuthorized(store, scope))
                   throw new ChannelError('AUTH_CHANGED', '会话授权已撤销，已停止补入生成图片');
               },
               pending = channel.work.generatedImages.sync(scope, combined, check);
@@ -455,9 +500,7 @@ export function createPluginService({
         const assertAllowed = () => {
           assertLive(combined);
           currentAccount(payload);
-          const settings = store.settings(scope.accountId),
-            allowed = scope.chatType === 'group' ? settings.groups : settings.privatePeers;
-          if (!allowed.includes(scope.peerId))
+          if (!conversationAuthorized(store, scope))
             throw new ChannelError('AUTH_CHANGED', '会话授权已撤销，未继续读取和保存图片');
         };
         assertAllowed();
@@ -474,6 +517,32 @@ export function createPluginService({
       }
       if (endpoint === 'memory.global.get') return channel.longMemory.view(currentAccount(payload).id);
       if (endpoint === 'memory.role.settings') return store.roleCardSettingsView();
+      if (endpoint === 'memory.role.labels') {
+        const accountId = currentAccount(payload).id, combined = AbortSignal.any([lifetime, ...(signal ? [signal] : [])]);
+        // Existing visible cards already include people authorized through a
+        // group. Pending/empty stored subjects are not part of this gallery read.
+        const contactIds = store.roleCards.list(accountId).map(view => view.personId);
+        const check = () => {
+          assertLive(combined); currentAccount(payload);
+          if (!worker.status().online) throw new ChannelError('MOMENTS_AUDIENCE_UNAVAILABLE', '微信当前离线，请连接后重试读取标签');
+        };
+        check();
+        if (typeof worker.readMomentsAudience !== 'function' || worker.status().momentsAudienceReady !== true)
+          throw new ChannelError('MOMENTS_AUDIENCE_UNAVAILABLE', '当前微信组件缺少标签读取能力或登录参数，请检查组件版本与登录状态');
+        const pending = worker.readMomentsAudience({ accountId, contactIds }, combined).then(value => {
+          check();
+          if (value?.accountId !== accountId || value.source !== 'wechat-role-labels-live' || value.membershipComplete !== true ||
+              !Array.isArray(value.contacts) || !Array.isArray(value.labels))
+            throw new ChannelError('MOMENTS_AUDIENCE_INCOMPLETE', '人物标签读取结果不完整，请重新读取');
+          const contacts = value.contacts.filter(row => contactIds.includes(row.id) && personAuthorized(store, accountId, row.id));
+          const visible = new Set(contacts.map(row => row.id));
+          return { ...value, contacts, labels: value.labels.map(label => {
+            const userIds = label.userIds.filter(id => visible.has(id));
+            return { ...label, userIds, memberCount: userIds.length };
+          }) };
+        });
+        featureOperations.add(pending); void pending.finally(() => featureOperations.delete(pending)).catch(() => {}); return pending;
+      }
       if (endpoint === 'memory.role.list') {
         const accountId = currentAccount(payload).id;
         return { people: store.roleCards.list(accountId).map(view => ({

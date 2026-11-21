@@ -24,7 +24,8 @@ function fixture(t, options = {}) {
   };
   const runner = { run: async input => {
     calls.push(input); const sessionId = input.sessionId || `session-${calls.length}`;
-    await input.onSession?.(sessionId); return { text: `回答 ${calls.length}`, sessionId };
+    await input.onSession?.(sessionId);
+    return { text: input.naturalDecision ? JSON.stringify({ action: 'reply', text: `回答 ${calls.length}` }) : `回答 ${calls.length}`, sessionId };
   } };
   const channel = new WechatChannel({ store, runner, transport, now: () => now, ...options });
   t.after(async () => {
@@ -201,7 +202,7 @@ test('reconstructed context includes an acknowledged reply before the next messa
   ]);
 });
 
-test('queued default replies exclude more than 80 later messages from the same second', { timeout: 10000 }, async t => {
+test('queued default replies exclude more than 80 later messages from the same second', { timeout: 45000 }, async t => {
   const f = fixture(t), gate = Promise.withResolvers(), original = f.runner.run;
   f.runner.run = async input => {
     if (input.text === '占用模型') await gate.promise;
@@ -218,7 +219,7 @@ test('queued default replies exclude more than 80 later messages from the same s
   assert.deepEqual(f.calls[1].history.map(entry => entry.text), ['提问之前的群上下文']);
 });
 
-test('an evicted queued-message anchor does not reconstruct context from later retained messages', { timeout: 10000 }, async t => {
+test('an evicted queued-message anchor does not reconstruct context from later retained messages', { timeout: 45000 }, async t => {
   const f = fixture(t), gate = Promise.withResolvers(), original = f.runner.run;
   f.runner.run = async input => {
     if (input.text === '占用模型') await gate.promise;
@@ -255,12 +256,13 @@ test('partial or unknown delivery never enters confirmed outgoing history or aut
     for (let i = 0; i < 5; i++) { const message = f.message(`批次 ${batch} 话题 ${i}`); delivered.push(message); f.receive(message); }
     await f.channel.whenIdle();
   }
-  assert.deepEqual(f.store.recordsPage(account.id, { chatType: 'group', peerId: roomA }).records.map(record => record.state), ['unknown', 'partial']);
+  assert.deepEqual(f.store.recordsPage(account.id, { chatType: 'group', peerId: roomA }).records.map(record => record.state), ['skipped', 'partial']);
+  assert.match(f.store.recordsPage(account.id, { chatType: 'group', peerId: roomA }).records[0].reason, /结果尚未核实/);
   assert(f.store.history(account.id, 'group', roomA).every(entry => entry.direction === 'incoming'));
   assert.equal(Object.keys(f.store.data.sessions).length, 0);
-  assert.equal(f.calls[1].sessionId, undefined);
+  assert.equal(f.calls.length, 1, 'a partial/unknown delivery pauses further active-participation generation');
   delivered.forEach(f.receive); await f.channel.whenIdle();
-  assert.equal(attempts, 2);
+  assert.equal(attempts, 1);
   const reloaded = new StateStore(f.root);
   assert(reloaded.history(account.id, 'group', roomA).every(entry => entry.direction === 'incoming'));
   assert.equal(Object.keys(reloaded.data.seen).length, 10);

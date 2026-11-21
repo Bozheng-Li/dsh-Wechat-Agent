@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 
 export function scheduleMemoryMaintenance(channel, selector, { force = false } = {}) {
   if (channel.closed || channel.fault) {
-    if (force) throw new ChannelError('MEMORY_UNAVAILABLE', '记忆整理暂不可用，请检查微信插件状态');
+    if (force) throw new ChannelError('MEMORY_UNAVAILABLE', '记忆整理暂不可用，请检查微信助手状态');
     return;
   }
   const key = identity([selector.accountId, selector.chatType, selector.peerId]);
@@ -65,6 +65,20 @@ function memoryScanAllowed(channel, scan) {
   return !scan.cancelled && !channel.closed && !channel.fault && status.online && status.account?.id === scan.accountId;
 }
 
+// `memoryText` rebuilds the whole window text on every call, and the scan only
+// needs its length. A document that was not saved again since the last tick
+// keeps the same revision and generation, so its length cannot have changed.
+const measuredChars = new WeakMap();
+function memoryChars(memory, doc) {
+  let byKey = measuredChars.get(memory);
+  if (!byKey) measuredChars.set(memory, (byKey = new Map()));
+  const cached = byKey.get(doc.key);
+  if (cached && cached.revision === doc.revision && cached.generation === doc.generation) return cached.chars;
+  const chars = memoryText(doc).length;
+  byKey.set(doc.key, { revision: doc.revision, generation: doc.generation, chars });
+  return chars;
+}
+
 async function scanConversationMemory(channel, scan) {
   const accountId = scan.accountId, peers = channel.store.conversationSelectors(accountId).filter(peer => peer.authorized);
   if (!peers.length || !channel.store.settings(accountId).enabled) return;
@@ -86,7 +100,7 @@ async function scanConversationMemory(channel, scan) {
           const doc = channel.memory.load(peer);
           if (pendingError) throw pendingError;
           const pendingFacts = !!pending?.[peer.key]?.entries.length;
-          if (channel.memoryForced.has(peer.key) || memoryText(doc).length >= channel.memory.windowChars(peer) || pendingFacts)
+          if (channel.memoryForced.has(peer.key) || memoryChars(channel.memory, doc) >= channel.memory.windowChars(peer) || pendingFacts)
             channel.memory.onPressure?.(peer);
           else {
             channel.memoryRetries.delete(peer.key);

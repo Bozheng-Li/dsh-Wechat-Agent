@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { ChannelError } from '../../shared/contracts.mjs';
+import { TRACE_ACTIVE } from '../../shared/execution-traces.mjs';
 import { taskViews, taskHistoryVersion } from '../../shared/task-history.mjs';
 import { workPath } from '../work/policy.mjs';
 
@@ -102,6 +103,19 @@ export class OwnerCleanup {
       return { label: '历史简报', note: '删除简报、引用与其中的待办记录，无法恢复。已经创建的定时提醒继续运行，可以到定时任务页管理。',
         rows: data.summaries.map(row => ({ id: row.id, version: digest(row), row, protected: false })),
         remove: selected => { const ids = new Set(selected.map(entry => entry.id)); data.summaries = data.summaries.filter(row => !ids.has(row.id)); manager.disk.save(data); } };
+    }
+    if (kind === 'traces') {
+      const traces = this.channel.traces; if (!traces?.enabled) fail('任务执行轨迹尚未启用');
+      // Candidates are whole days: the day index is the unit the store can verify and
+      // delete; a day with a running trace is protected like an executing record.
+      return { label: '执行轨迹', note: '删除所选日期的执行轨迹（索引、步骤与内容文件），无法恢复。正在执行或等待执行的任务所在日期会保留；需要的内容请先导出。',
+        rows: traces.traceDays(accountId).map(entry => ({ id: entry.day, version: digest([entry.day, entry.rows]), row: entry,
+          protected: entry.rows.some(row => TRACE_ACTIVE.has(row.state)) })),
+        remove: selected => {
+          let failed = 0;
+          for (const { row } of selected) try { traces.dropDay(accountId, row.day); } catch { failed++; }
+          return failed ? '部分日期的执行轨迹未能删除，其余记录已清理' : undefined;
+        } };
     }
     throw new ChannelError('CLEANUP_INVALID', '不支持清理这类记录');
   }

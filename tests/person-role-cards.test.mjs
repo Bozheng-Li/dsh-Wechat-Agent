@@ -470,8 +470,11 @@ test('same-named members are distinct, unknown IDs cannot be invented, and card 
   assert.equal(results.people.length, 2); assert.notEqual(results.people[0].personId, results.people[1].personId);
   await assert.rejects(tool.execute({ action: 'read', personId: 'invented' }), { code: 'ROLE_CARD_PERSON_UNKNOWN' });
   await assert.rejects(tool.execute({ action: 'update', personId: f.group.peerId }), { code: 'ROLE_CARD_PERSON_UNKNOWN' });
-  assert.equal(readableRoleCard(f.store.roleCards.view(f.person('alice')), f.now() - 1).card.addressAs, '');
-  assert(!personRoleContext(f.channel, { ...f.privateChat, senderId: 'alice', requestedAt: f.now() - 1 }, { text: '称呼' }).includes('"addressAs":"小林"'));
+  const afterRequest = readableRoleCard(f.store.roleCards.view(f.person('alice')), f.now() - 1);
+  assert.equal(afterRequest.card.addressAs, '小林');
+  assert.equal(afterRequest.timing.addressAs.status, 'after-request');
+  const context = personRoleContext(f.channel, { ...f.privateChat, senderId: 'alice', requestedAt: f.now() - 1 }, { text: '称呼' });
+  assert(context.includes('"addressAs":"小林"')); assert(context.includes('请求后更新'));
   f.store.configure('foreign-owner', { enabled: true, privatePeers: ['alice'], groups: [], prompt: '' });
   const foreign = f.store.roleCards.view({ accountId: 'foreign-owner', personId: 'alice' });
   assert.equal(foreign.inherited, true); assert.notEqual(foreign.roleId, f.store.roleCards.identity(f.person('alice')));

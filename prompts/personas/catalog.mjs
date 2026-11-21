@@ -19,14 +19,19 @@ export function personaFromPreset(id = assistant.id, identity) {
   const preset = getPersonaPreset(id);
   if (!preset) throw new Error('仅保留默认助手，请在全局助手设置中自定义');
   const examples = preset.examples
-    .map((example) => `场景：${example.scene}\n对方：${example.message}\n回应：${example.reply}`)
+    .map((example) => [
+      `场景：${example.scene}`,
+      `对方：${example.message}`,
+      example.bad ? `不要这样写：${example.bad}` : '',
+      `回应：${example.reply}`,
+    ].filter(Boolean).join('\n'))
     .join('\n\n');
   return {
     name: identity?.name ?? preset.name,
     aliases: [...(identity?.aliases ?? preset.aliases)],
+    ...(Object.hasOwn(identity ?? {}, 'personaMode') ? { personaMode: identity.personaMode } : {}),
     background: preset.background,
     personality: preset.personality,
     style: `${preset.style}\n\n语气示例（学习不同场景下的态度与反应，不套用开头、口头禅和结尾，不把示例当成已经发生的对话）：\n${examples}`,
   };
 }
-

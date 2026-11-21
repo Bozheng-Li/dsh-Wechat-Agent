@@ -74,12 +74,18 @@ export function ExecutionTracesPage({ rpc, status }) {
   const [from, setFrom] = useState(() => dateInput(new Date(Date.now() - 6 * 86400000))), [to, setTo] = useState(() => dateInput(new Date()));
   const [data, setData] = useState(null), [error, setError] = useState(''), [loading, setLoading] = useState(false), [selected, setSelected] = useState(null);
   const [focused, setFocused] = useState(false), [counts, setCounts] = useState({});
+  const [retentionDraft, setRetentionDraft] = useState(''), [retentionDirty, setRetentionDirty] = useState(false);
+  const [retentionBusy, setRetentionBusy] = useState(false), [retentionError, setRetentionError] = useState(''), [retentionNotice, setRetentionNotice] = useState('');
   // Older builds only accept 'problems'; start with the documented 'problem' and fall back once.
   const stateAlias = useRef('problem');
   const filters = JSON.stringify({ type, state, search, from, to, accountId, preset });
   useEffect(() => { const timer = setTimeout(() => setSearch(query), 250); return () => clearTimeout(timer); }, [query]);
   useEffect(() => { setOffset(0); setSelected(null); }, [filters]);
-  useEffect(() => { setCounts({}); setFocused(false); }, [accountId]);
+  useEffect(() => { setCounts({}); setFocused(false); setRetentionDirty(false); setRetentionError(''); setRetentionNotice(''); }, [accountId]);
+  useEffect(() => {
+    if (retentionDirty || !data?.settings) return;
+    setRetentionDraft(data.settings.retentionDays == null ? '' : String(data.settings.retentionDays));
+  }, [data?.retentionRevision, data?.settings?.retentionDays, retentionDirty]);
   useEffect(() => {
     if (!accountId) { setData(null); return; }
     const controller = new AbortController(); let pending = false;
@@ -117,6 +123,26 @@ export function ExecutionTracesPage({ rpc, status }) {
   const now = Date.now(), filtered = !!search || state !== 'all', showAll = () => setPreset('all'), toggleSkip = () => setPreset(value => value === 'all' ? 'meaningful' : 'all');
   const selectTrace = id => { setSelected(id); setFocused(false); };
   const problemView = state === 'problem';
+  const retentionReady = !!data?.settings && typeof data.retentionRevision === 'string';
+  const saveRetention = async () => {
+    if (!retentionReady || retentionBusy || !retentionDirty) return;
+    const retentionDays = retentionDraft === '' ? null : Number(retentionDraft);
+    if (retentionDays !== null && ![30, 90, 365].includes(retentionDays)) {
+      setRetentionError('请选择永久、30 天、90 天或 365 天。'); return;
+    }
+    setRetentionBusy(true); setRetentionError(''); setRetentionNotice('');
+    try {
+      const value = await rpcRef.current('traces.configure', { accountId,
+        settings: { retentionDays, cacheDays: data.settings.cacheDays }, revision: data.retentionRevision }, AbortSignal.timeout(30000));
+      const settings = value?.settings || { ...data.settings, retentionDays };
+      setData(current => current ? { ...current, settings,
+        ...(typeof value?.retentionRevision === 'string' ? { retentionRevision: value.retentionRevision } : {}) } : current);
+      setRetentionDraft(settings.retentionDays == null ? '' : String(settings.retentionDays));
+      setRetentionDirty(false); setRetentionNotice('全局轨迹保存期限已更新；过期清理按后台周期执行。');
+      setRefresh(current => current + 1);
+    } catch (failure) { setRetentionError(failure.message || '保存轨迹保存期限失败。'); }
+    finally { setRetentionBusy(false); }
+  };
   return <section className="wa-traces-page" data-testid="execution-traces-page" data-account-id={accountId || ''} data-show-detail={!!selected} data-focused={focused && !!selected} data-preset={preset}>
     <PageHead title="任务执行轨迹" description="从一次任务出发，看清每个调用与结果。" className="wa-trace-page-head">
       <div className="wa-trace-capture-mark" aria-hidden="true"><TraceNetworkMark /><span><strong>看见任务的来龙去脉</strong><small>模型 · 工具 · 微信回执</small></span></div>
@@ -136,6 +162,22 @@ export function ExecutionTracesPage({ rpc, status }) {
           </div></details>
           <Button disabled={loading} onClick={() => setRefresh(value => value + 1)}><Glyph name="refresh" size={14} /><span>刷新轨迹</span></Button>
         </div>
+        <section className="wa-trace-retention" data-testid="trace-retention-settings" aria-label="全局轨迹保存期限">
+          <div><strong>轨迹保存期限（全局）</strong>
+            <p className="wa-trace-note">所有微信账号共用此设置。缩短期限前建议先导出需要保留的记录；仅影响后续过期清理。</p></div>
+          <label><span className="wa-sr-only">任务轨迹保存期限</span>
+            <select className="wa-select" value={retentionDraft} disabled={!retentionReady || retentionBusy}
+              aria-label="任务轨迹保存期限" onChange={event => { setRetentionDraft(event.target.value); setRetentionDirty(true); setRetentionNotice(''); setRetentionError(''); }}>
+              <option value="">永久保留</option><option value="30">30 天</option><option value="90">90 天</option><option value="365">365 天</option>
+            </select></label>
+          <Button disabled={!retentionReady || !retentionDirty || retentionBusy} onClick={() => void saveRetention()}>
+            {retentionBusy ? '正在保存…' : '保存期限'}
+          </Button>
+          {retentionError && <p className="wa-trace-warning" role="alert">{retentionError}</p>}
+          {retentionNotice && <p className="wa-trace-note" role="status">{retentionNotice}</p>}
+          {data?.retentionWarning && <p className="wa-trace-warning" role="alert">过期轨迹未能清理：{data.retentionWarning}</p>}
+          {!retentionReady && data && <p className="wa-trace-warning" role="alert">保存期限设置不可读取，为保护既有记录，暂不能修改。</p>}
+        </section>
         <div className="wa-trace-quick">
           <button type="button" className="wa-trace-quick-button" aria-pressed={problemView} onClick={() => setState(problemView ? 'all' : 'problem')}><Glyph name="shield" size={12} /><span>仅看异常</span></button>
           {problemView && <button type="button" className="wa-trace-text-button" onClick={() => setState('all')}>查看全部状态</button>}

@@ -32,8 +32,8 @@ function fixture(t, options = {}) {
   const channel = new WechatChannel({ store, transport, runner, now: () => clock.value, random: () => 0, ...options });
   const config = (peer = room, overrides = {}) => {
     const value = { mode: 'natural', intervalMode: 'fixed', fixedMessages: 3, minMessages: 3, maxMessages: 3, recordsPath: '',
-      ...overrides, natural: { ...emptyNaturalSettings(), intervalMode: 'fixed', fixedMinutes: 5, minGapMinutes: 1,
-        activeHours: false, followupSeconds: 0, ...overrides.natural } };
+      ...overrides, natural: { ...emptyNaturalSettings(), messageEnabled: true, timerEnabled: true, followupEnabled: true,
+        intervalMode: 'fixed', fixedMinutes: 5, minGapMinutes: 1, activeHours: false, followupSeconds: 0, ...overrides.natural } };
     return store.setConversationSettings(owner.id, 'group', peer, value);
   };
   config();
@@ -364,23 +364,23 @@ test('character changes, task cancellation and reply toggles preserve uncertain 
   assert.equal(f.calls.length, 1); assert.equal(f.records().find(record => record.key === blockedKey).state, 'unknown');
 });
 
-test('count checks blocked by the shared cooldown do not repeatedly postpone the timer', async t => {
+test('new chat activity resets cold-opening silence while count checks still respect the shared cooldown', async t => {
   const f = fixture(t); f.config(room, { fixedMessages: 1, minMessages: 1, maxMessages: 1, natural: { minGapMinutes: 10 } });
   f.receive(f.message('小胖，先看看营地')); await f.channel.whenIdle();
-  const due = f.state().nextCheckAt;
   f.clock.value += 60000; f.receive(f.message('普通新话题一')); await f.channel.whenIdle();
-  assert.equal(f.state().nextCheckAt, due);
+  const due = f.state().nextCheckAt;
+  assert.equal(due, f.clock.value + 5 * 60000);
   f.clock.value += 60000; f.receive(f.message('普通新话题二')); await f.channel.whenIdle();
-  assert.equal(f.state().nextCheckAt, due); assert.equal(f.calls.length, 1);
+  assert.equal(f.state().nextCheckAt, f.clock.value + 5 * 60000); assert.equal(f.calls.length, 1);
   assert.match(f.records()[0].reason, /刚刚已经发言/);
 });
 
-test('an unrelated followup skip neither increases cold-opening backoff nor shifts the independent timer', async t => {
+test('an unrelated followup skip resets silence but does not increase cold-opening backoff', async t => {
   const f = fixture(t); f.config(room, { fixedMessages: 100, minMessages: 100, maxMessages: 100, natural: { followupSeconds: 120 } });
   f.receive(f.message('小胖，怎么选营地')); await f.channel.whenIdle();
-  const due = f.state().nextCheckAt; f.clock.value += 10000;
+  f.clock.value += 10000;
   f.outputs.push('{"action":"skip","reason":"no_followup","text":""}');
   f.receive(f.message('接下来跟小林聊电影')); await f.channel.whenIdle();
-  assert.equal(f.calls[1].naturalDecision.trigger, 'followup'); assert.equal(f.state().nextCheckAt, due);
+  assert.equal(f.calls[1].naturalDecision.trigger, 'followup'); assert.equal(f.state().nextCheckAt, f.clock.value + 5 * 60000);
   assert.equal(f.state().backoff, 0); assert.equal(f.sent.length, 1);
 });

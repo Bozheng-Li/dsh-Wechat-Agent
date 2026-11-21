@@ -24,14 +24,29 @@ if (!process.versions.electron) {
 const hostRequire = createRequire(path.join(installation, 'resources/app.asar/dsh/package.json'));
 const { Context } = hostRequire('@deepseek-ai/cordis');
 const { LlmAdapter } = hostRequire('@deepseek-ai/dsh-llm');
-const { buildModelCatalog } = hostRequire('@deepseek-ai/dsh-api-session-controller');
-const { DshAgentRunner, WechatChannel, StateStore, TaskScheduler, AgentIdentity, conversationMemoryTool, imageMemoryTool, conversationImageTool, completedText, conversationTaskTool, webSearchTool, ChannelError, selectModel, readModelInfo, emptyNaturalSettings, REPLY_STYLE_REVIEW_NOTE } = require(path.join(repo, 'lib/testing.js'));
+const { buildModelCatalog: legacyBuildModelCatalog } = hostRequire('@deepseek-ai/dsh-api-session-controller');
+const modelCatalogSurface = typeof legacyBuildModelCatalog === 'function' ? 'session-controller-public-helper' : 'live-llm-registry-fixture-projection';
+// Newer DSH releases no longer export the session-controller catalog helper.
+// Project the actual registered providers/models for this SDK fixture instead;
+// this verifies registry replacement/routing, not the browser picker transport.
+const buildModelCatalog = typeof legacyBuildModelCatalog === 'function' ? legacyBuildModelCatalog : async context => {
+  const groups = [], failures = [];
+  for (const provider of context.llm.listProviders()) {
+    try { groups.push({ id: provider.id, name: provider.name || provider.id, models: await context.llm.listModels(provider.id) }); }
+    catch (error) { failures.push({ provider: provider.id, message: error.message }); }
+  }
+  return { groups, failures, default: context.agentDefaultModel.currentSelection() };
+};
+const { DshAgentRunner: BuiltDshAgentRunner, WechatChannel, StateStore, TaskScheduler, AgentIdentity, conversationMemoryTool, imageMemoryTool, conversationImageTool, completedText, conversationTaskTool, webSearchTool, ChannelError, selectModel, readModelInfo, emptyNaturalSettings, REPLY_STYLE_REVIEW_NOTE } = require(path.join(repo, 'lib/testing.js'));
+let DshAgentRunner = BuiltDshAgentRunner;
+const runnerSource = process.env.WECHAT_NATIVE_BASELINE === '1' ? 'git-HEAD-runner-with-current-pure-dependencies' : 'current-built-runner';
 const { momentsLikeRequestTool, momentsInteractionTool, momentsImagesTool, momentsPublishingTools } = require(path.join(repo, 'lib/testing.js'));
 const root = fs.mkdtempSync(path.join(repo, 'storage/tmp/dsh-native-'));
 process.env.DSH_HOME = path.join(root, 'home');
-process.env.DSH_AGENTS_HOME = path.join(root, 'agents');
+process.env.DSH_AGENTS_HOME = path.join(root, 'agents'); process.env.DSH_PROFILE_DIR = path.join(root, 'profile');
 const ctx = new Context();
 const requests = [];
+const nativeTails = new Map();
 const longCompleteReply = '收到你的问题。\n' + '双曲线：x²/a² − y²/b² = 1。抛物线：y² = 2px。\n'.repeat(500) + '完整结尾。';
 let mode = 'complete';
 let emptyResponses = 0;
@@ -168,7 +183,8 @@ class FixtureAdapter extends LlmAdapter {
       assert(options.tools.some(tool => tool.name === 'wechat_memory'), 'physical coverage must not revoke legitimate follow-up queries');
     }
     if (mode === 'natural-reply' || mode === 'natural-skip') {
-      assert(systems.includes('自然陪聊判断')); assert(systems.includes('只输出一个 JSON 对象'));
+      assert(systems.includes('本轮是群聊参与判断')); assert(systems.includes('后台已经处理时间、条数、冷却与授权'));
+      assert(systems.includes('只输出一个 JSON 对象'));
       const text = '<think>PRIVATE_NATURAL_REASONING</think>' + JSON.stringify(mode === 'natural-reply' ? { action: 'reply', text: '湖边风大，记得把帐篷固定好。' } : { action: 'skip', reason: 'repeated', text: '' });
       yield { type: 'block-start', index: 0, blockType: 'text' }; yield { type: 'text-delta', index: 0, text };
       yield { type: 'block-end', index: 0, block: { type: 'text', text } }; yield { type: 'finish', reason: { kind: 'stop' } }; return;
@@ -284,6 +300,22 @@ async function verifyPluginLifecycle(hostContext) {
 }
 
 (async () => {
+  if (process.env.WECHAT_NATIVE_BASELINE === '1') {
+    // Reproduce the pre-sync runner against this same installed kernel without
+    // changing the working tree or lib. Current pure dependencies stay fixed.
+    const baseline = spawnSync('git', ['show', 'HEAD:modules/agent/runner.mjs'], { cwd: repo, encoding: 'utf8', windowsHide: true });
+    if (baseline.error) throw baseline.error;
+    assert.equal(baseline.status, 0, baseline.stderr || 'Could not read the HEAD runner');
+    const entry = path.join(repo, 'modules/agent/runner.mjs');
+    const output = path.join(root, 'baseline-runner.cjs');
+    const { rolldown } = await import('rolldown');
+    const bundle = await rolldown({ input: entry, platform: 'node', external: id => id.startsWith('node:'),
+      plugins: [{ name: 'head-runner-only', load(id) { if (path.resolve(id) === entry) return baseline.stdout; } }] });
+    try { await bundle.write({ file: output, format: 'cjs', exports: 'named' }); } finally { await bundle.close(); }
+    DshAgentRunner = require(output).DshAgentRunner;
+    assert.equal(typeof DshAgentRunner, 'function');
+    console.log('Reproducing git HEAD runner against current kernel:', output);
+  }
   const forks = [];
   const mount = async (name, config = {}) => {
     const module = hostRequire(`@deepseek-ai/${name}`);
@@ -298,7 +330,10 @@ async function verifyPluginLifecycle(hostContext) {
   await mount('dsh-system-prompt', { personaPrefix: 'HOST_SECRET_PERSONA' });
   await mount('dsh-fs-local');
   await mount('dsh-working-directory', { defaultDirectory: root });
-  await mount('dsh-tools', { mode: 'native' });
+  let nativeExecutor;
+    try { nativeExecutor = hostRequire('@deepseek-ai/dsh-tool-executor-native'); } catch (error) { if (error.code !== 'MODULE_NOT_FOUND') throw error; }
+    await mount('dsh-tools', nativeExecutor ? {} : { mode: 'native' });
+    if (nativeExecutor) await mount('dsh-tool-executor-native');
   const hostTool = ctx.tools.register({ name: 'host_fixture_forbidden', description: 'Must never be inherited by a WeChat agent.',
     parameters: { type: 'object', properties: {}, additionalProperties: false },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] }, execute: () => { throw new Error('Inherited host tool executed'); } });
@@ -315,6 +350,17 @@ async function verifyPluginLifecycle(hostContext) {
   ctx.on('agent/request', async (_payload, next) => ({ ...await next(), temperature: 0.65 }));
   const providers = ['wechat-test-fixture', 'wechat-test-alternate'];
   const registration = ctx.llm.registerAdapter(providers, new FixtureAdapter());
+  for (const operation of ['create', 'resume']) {
+    const open = ctx.agents[operation].bind(ctx.agents);
+    ctx.agents[operation] = async options => {
+      const handle = await open(options), dispose = handle.dispose.bind(handle);
+      handle.dispose = async () => {
+        try { nativeTails.set(options.sessionId || options.resumeSessionId, handle.agent.session.snapshotEvents(0).slice(-12)); } catch {}
+        return dispose();
+      };
+      return handle;
+    };
+  }
   const catalog = await buildModelCatalog(ctx);
   assert.deepEqual(catalog.groups.map(group => group.id), providers); assert.equal(catalog.failures.length, 0);
   assert(catalog.groups.every(group => group.models.some(model => model.id === 'alternate')));
@@ -333,6 +379,20 @@ async function verifyPluginLifecycle(hostContext) {
   const identity = new AgentIdentity(path.join(root, 'identity'));
   identity.edit('# 微信全局身份\nNATIVE_GLOBAL_FIRST：自然接话。', identity.view().revision);
   const runner = new DshAgentRunner(ctx, () => store.modelChoice(), () => ({ ...runtime, persona: store.persona(), identityMarkdown: identity.view().markdown })), controller = new AbortController();
+  const nativeRun = runner.run.bind(runner);
+  runner.run = async request => {
+    let sessionId = request.sessionId;
+    try { return await nativeRun({ ...request, onSession: async id => { sessionId = id; await request.onSession?.(id); } }); }
+    catch (error) {
+      let tail;
+      try { tail = ctx.sessions.get(sessionId)?.snapshotEvents(0).slice(-12); } catch {}
+      tail ??= nativeTails.get(sessionId);
+      const terminal = tail?.findLast(event => event.type === 'turn/end');
+      if (!['truncate', 'cancel', 'empty-always', 'empty-after-tool'].includes(mode) && error.code !== 'MODEL_UNAVAILABLE')
+        console.error('Synthetic native failure detail:', JSON.stringify({ mode, runnerSource, sessionId, root, terminal }, null, 2));
+      throw error;
+    }
+  };
   const first = await runner.run({ text: '第一问', group: true, mode: 'participate', prompt: '回答简洁', signal: controller.signal,
     onSession: id => {
       assert.equal(ctx.sessions.get(id).header.cwd, workspace);
@@ -594,7 +654,7 @@ async function verifyPluginLifecycle(hostContext) {
   const naturalStore = new StateStore(path.join(root, 'natural-chat')), naturalRoom = 'native-natural@chatroom';
   naturalStore.configure('fake-owner', { enabled: true, privatePeers: [], groups: [naturalRoom], prompt: '' });
   naturalStore.setConversationSettings('fake-owner', 'group', naturalRoom, { mode: 'natural', intervalMode: 'fixed', fixedMessages: 100, minMessages: 100, maxMessages: 100, recordsPath: '',
-    natural: { ...emptyNaturalSettings(), activeHours: false, intervalMode: 'fixed', fixedMinutes: 1, minGapMinutes: 1, followupSeconds: 0 } });
+    natural: { ...emptyNaturalSettings(), timerEnabled: true, activeHours: false, intervalMode: 'fixed', fixedMinutes: 1, minGapMinutes: 1, followupSeconds: 0 } });
   let naturalNow = Date.now(); const naturalSent = [], nativeNaturalBefore = requests.length;
   const naturalTransport = { status: () => ({ online: true, account: { id: 'fake-owner' } }), send: async params => { naturalSent.push(params); return { delivery: 'server-ack', serverMessageIds: ['native-natural-ack'] }; } };
   const naturalChannel = new WechatChannel({ store: naturalStore, runner, transport: naturalTransport, now: () => naturalNow, random: () => 0 });
@@ -669,8 +729,9 @@ async function verifyPluginLifecycle(hostContext) {
   assert(requests.slice(beforeBatches).every(request => request.messages.filter(message => message.role === 'user')
     .flatMap(message => message.content).reduce((total, block) => total + (block.text?.length ?? 0), 0) < MAX_COMPRESSION_INPUT_CHARS + 4000));
   await verifyPluginLifecycle(ctx);
-  const report = { ok: true, dsh: hostRequire('./package.json').version, node: process.versions.node,
-    assertions: ['shared native model catalog', 'model choice persistence', 'real provider/model routing on resume', 'chosen model reasoning defaults', 'removed provider refuses fallback', 'return to DSH default', 'real temperature and maxTokens request controls', 'null temperature preserves Host default', 'persona and participation instructions in model prompt', 'workspace stored on create and retained on resume', 'configured Host session root observed through injection', 'Host session root stays independent of workspace', 'real agent create', 'persistent resume', 'complete prompt isolation', 'no inherited tools', 'final reasoning filtering', 'max-token refusal', 'cancellation', 'queued channel-to-agent-to-ACK', 'reload deduplication', 'real plugin apply and WorkerClient shutdown preserve participation progress', 'initial offline snapshots preserve progress but live disconnect resets it'], requests: requests.length, at: new Date().toISOString() };
+  const report = { ok: true, dsh: hostRequire('@deepseek-ai/dsh/package.json').version, node: process.versions.node,
+    runnerSource, modelCatalogSurface, browserModelPickerTransportVerified: typeof legacyBuildModelCatalog === 'function',
+    assertions: [modelCatalogSurface === 'session-controller-public-helper' ? 'shared native model catalog' : 'live native provider/model registry through a fixture-only catalog projection', 'model choice persistence', 'real provider/model routing on resume', 'chosen model reasoning defaults', 'removed provider refuses fallback', 'return to DSH default', 'real temperature and maxTokens request controls', 'null temperature preserves Host default', 'persona and participation instructions in model prompt', 'workspace stored on create and retained on resume', 'configured Host session root observed through injection', 'Host session root stays independent of workspace', 'real agent create', 'persistent resume', 'complete prompt isolation', 'no inherited tools', 'final reasoning filtering', 'max-token refusal', 'cancellation', 'queued channel-to-agent-to-ACK', 'reload deduplication', 'real plugin apply and WorkerClient shutdown preserve participation progress', 'initial offline snapshots preserve progress but live disconnect resets it'], requests: requests.length, at: new Date().toISOString() };
   report.assertions.push('native scoped tool registration and actual task creation', 'quoted task requests denied inside the native tool boundary', 'native search tool calls only the bounded public query', 'actual DSH image admission and two ordered multimodal blocks');
   report.assertions.push('durable global identity reloaded in the native prompt', 'the single global assistant and common language policy survive native create and resume', 'native scoped memory tool preserves the receive-time boundary');
   report.assertions.push('actual editor-saved persona fields and examples receive their own principles on native create and persisted resume');

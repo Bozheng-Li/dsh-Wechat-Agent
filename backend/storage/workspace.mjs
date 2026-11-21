@@ -177,12 +177,14 @@ function atomicBytes(file, bytes) {
     }
     syncDirectory(path.dirname(file));
   } finally {
-    if (descriptor !== undefined) fs.closeSync(descriptor);
+    // Cleanup must never replace the real failure: a full disk used to surface as
+    // "could not delete the temporary file" instead of the write error itself.
+    try {
+      if (descriptor !== undefined) fs.closeSync(descriptor);
+    } catch {}
     try {
       fs.unlinkSync(temporary);
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-    }
+    } catch {}
   }
 }
 

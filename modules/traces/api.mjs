@@ -1,9 +1,10 @@
 import { ChannelError } from '../../shared/contracts.mjs';
-export const TRACE_ENDPOINTS = ['traces.list', 'traces.get', 'traces.content', 'traces.export'];
+export const TRACE_ENDPOINTS = ['traces.list', 'traces.get', 'traces.content', 'traces.export', 'traces.configure'];
 
 export async function traceQuery(traces, endpoint, accountId, payload, signal) {
   if (!traces) throw new ChannelError('TRACE_UNAVAILABLE', '任务执行轨迹尚未启用');
   signal?.throwIfAborted();
+  if (endpoint === 'traces.configure') return traces.configure(payload.settings, payload.revision);
   if (endpoint === 'traces.list') return traces.list(accountId, payload);
   if (endpoint === 'traces.get') return traces.get(accountId, payload.traceId, payload);
   if (endpoint === 'traces.content') return traces.content(accountId, payload.traceId, payload.contentId);

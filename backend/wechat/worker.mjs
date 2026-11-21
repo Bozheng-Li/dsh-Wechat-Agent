@@ -25,6 +25,9 @@ function publicDeliveryParts(value) {
   if (!Array.isArray(value) || value.length > 256 || !value.every((part, index) => part?.index === index && ['text', 'image', 'face', 'file'].includes(part.type) &&
     ['acknowledged', 'unknown', 'not-sent'].includes(part.state) && (part.state !== 'acknowledged' || typeof part.serverMessageId === 'string' && part.serverMessageId && part.serverMessageId !== '0'))) return null;
   return value.map(part => ({ index: part.index, type: part.type, state: part.state, ...(part.state === 'acknowledged' ? { serverMessageId: part.serverMessageId } : {}),
+    ...(part.type === 'text' && typeof part.text === 'string' && part.text.length <= 24000 ? { text: part.text } : {}),
+    ...(part.state === 'acknowledged' && Number.isSafeInteger(part.time) && part.time > 0 ? { time: part.time } : {}),
+    ...(part.state === 'acknowledged' && Number.isSafeInteger(part.observedAt) && part.observedAt > 0 ? { observedAt: part.observedAt } : {}),
     ...(part.nativeFallback === true ? { nativeFallback: true } : {}),
     ...(typeof part.name === 'string' && part.name.length <= 240 && !/[\\/:\u0000-\u001f\u007f]/.test(part.name) && Number.isSafeInteger(part.bytes) && part.bytes > 0 && /^[a-f0-9]{64}$/.test(part.sha256) ? { name: part.name, bytes: part.bytes, sha256: part.sha256 } : {}) }));
 }
@@ -40,7 +43,9 @@ function snapshot() {
     momentsWriteReady: status.online && !!backend.session.value?.image_base_request,
     momentsAudienceReady: status.online && !!backend.session.value?.image_base_request,
     nativeStickersReady: status.online && !!(backend.session.value?.image_base_request ?? backend.session.value?.heartbeat_base_request),
-    ...diagnostics.lastError ? { error: '微信连接异常，请检查网络；持续离线时请重新扫码' } : {}
+    reloginRequired: diagnostics.reloginRequired === true,
+    ...diagnostics.reloginRequired === true ? { error: '微信登录已失效，请重新扫码登录' }
+      : diagnostics.lastError ? { error: '微信连接异常，请检查网络；持续离线时请重新扫码' } : {}
   };
 }
 function publishStatus() { send({ type: 'status', status: snapshot() }); }
@@ -110,7 +115,7 @@ async function perform(id, op, args) {
       const account = backend.session.value;
       if (!account || args?.accountId !== account.wxid) throw new ChannelError('ACCOUNT_CHANGED', '微信账号已变化，未读取其他账号的标签和联系人');
       const controller = new AbortController(); sending.set(id, controller);
-      try { return await backend.readMomentsAudience(controller.signal); }
+      try { return await backend.readMomentsAudience(controller.signal, args.contactIds); }
       finally { sending.delete(id); }
     }
     case 'moments.publication':
@@ -176,11 +181,11 @@ process.on('message', async message => {
       code: error?.code || 'WECHAT_FAILED',
       message: error instanceof ChannelError || /^ERR_STICKER_/.test(error?.code ?? '') || message.op === 'files' && /^ERR_FILE_/.test(error?.code ?? '') || ['ERR_LOGIN_BUSY', 'ERR_SESSION_EXISTS', 'ERR_LOGIN_HANDOFF', 'ERR_IMAGE_FORMAT', 'ERR_IMAGE_CREDENTIAL', 'ERR_FILE_CREDENTIAL', 'ERR_FILE_REJECTED', 'ERR_FILE_NETWORK', 'ERR_FILE_PROTOCOL', 'ERR_UNSUPPORTED_IMAGE', 'ERR_MENTION_TARGET', 'ERR_MENTION_LIMIT',
         'ERR_INVALID_MOMENTS_QUERY', 'ERR_MOMENTS_OFFLINE', 'ERR_MOMENTS_CREDENTIAL', 'ERR_MOMENTS_NETWORK', 'ERR_MOMENTS_REJECTED', 'ERR_MOMENTS_PROTOCOL', 'ERR_MOMENTS_CURSOR', 'ERR_MOMENTS_ACCOUNT_CHANGED',
-        'ERR_INVALID_MOMENTS_WRITE', 'ERR_MOMENTS_WRITE_REJECTED', 'ERR_MOMENTS_WRITE_PROTOCOL', 'ERR_MOMENTS_TARGET_UNAVAILABLE', 'ERR_MOMENTS_AUDIENCE'].includes(error?.code)
+        'ERR_INVALID_MOMENTS_WRITE', 'ERR_MOMENTS_WRITE_REJECTED', 'ERR_MOMENTS_WRITE_PROTOCOL', 'ERR_MOMENTS_TARGET_UNAVAILABLE', 'ERR_MOMENTS_AUDIENCE', 'ERR_MOMENTS_AUDIENCE_TIMEOUT'].includes(error?.code)
         ? error.message : message.op === 'send' ? publicSendErrorMessage(error) ?? '微信发送失败，请检查连接及回执记录' : '微信操作失败，请检查连接状态',
       details: {
           ...(message.op === 'moments.write' && ['unknown', 'not-sent', 'rejected'].includes(details.delivery) ? { snsDelivery: details.delivery } : {}),
-        ...(['send', 'moments.read', 'moments.images', 'moments.publication', 'moments.write'].includes(message.op) && Number.isSafeInteger(details.ret) && details.ret >= -0x80000000 && details.ret <= 0x7fffffff ? { ret: details.ret } : {}),
+        ...(['send', 'moments.read', 'moments.images', 'moments.publication', 'moments.write', 'moments.audience'].includes(message.op) && Number.isSafeInteger(details.ret) && details.ret >= -0x80000000 && details.ret <= 0x7fffffff ? { ret: details.ret } : {}),
         ...(publication ? { publication } : {}),
         ...['unknown', 'partially-acknowledged', 'rejected', 'not-sent'].includes(details.delivery) ? { delivery: details.delivery } : {},
         ...Array.isArray(details.acknowledgedMessageIds) ? { acknowledgedMessageIds: details.acknowledgedMessageIds } : {},

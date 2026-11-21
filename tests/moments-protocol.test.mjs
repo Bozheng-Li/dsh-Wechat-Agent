@@ -228,6 +228,39 @@ test('live audience reader completes pagination, requests at most 20 contacts an
   assert.equal(result.contacts[0].name, '备注'); assert.equal(result.accountId, account.wxid);
 });
 
+test('role labels read only requested people in batches, without InitContact or a full-audience claim', async () => {
+  const ids = Array.from({ length: 25 }, (_, i) => `role-person-${i}`), calls = [];
+  const reader = new api.MomentsAudienceReader(async (_account, cmd, _route, makeBody) => {
+    calls.push(cmd);
+    if (cmd === 639) return labelAck();
+    assert.equal(cmd, 182, 'scoped reads must never invoke InitContact');
+    const body = fields(makeBody(Buffer.from(account.image_base_request, 'hex')));
+    const batch = body.filter(row => row.tag === 3).map(row => bytes(fields(row.value), 1).toString());
+    assert(batch.length <= 20); assert(batch.every(id => ids.includes(id))); return contactAck(batch);
+  });
+  const result = await reader.read(account, new AbortController().signal, () => {}, ids);
+  assert.deepEqual(calls, [639, 182, 182, 639]); assert.equal(result.source, 'wechat-role-labels-live');
+  assert.deepEqual(result.contacts.map(row => row.id), ids);
+  calls.length = 0;
+  const empty = await reader.read(account, new AbortController().signal, () => {}, []);
+  assert.deepEqual(calls, [639, 639]); assert.deepEqual(empty.contacts, []);
+  calls.length = 0;
+  await assert.rejects(reader.read(account, new AbortController().signal, () => {}, ['room@chatroom']), error => error.code === 'ERR_MOMENTS_AUDIENCE');
+  assert.deepEqual(calls, []);
+});
+
+test('label request timeout retains its CGI stage and server rejection retains the real ret', async () => {
+  const reader = new api.MomentsAudienceReader(async () => { throw new DOMException('synthetic request timeout', 'TimeoutError'); });
+  await assert.rejects(reader.read(account, new AbortController().signal, () => {}, ['role-person']), error => {
+    assert.equal(error.code, 'ERR_MOMENTS_AUDIENCE_TIMEOUT'); assert.equal(error.details.cmd, 639);
+    assert.match(error.message, /getcontactlabellist.*639.*超时/); return true;
+  });
+  assert.throws(() => api.contactLabelsResponse(ld(1, fv(1, -2))), error => {
+    assert.equal(error.code, 'ERR_MOMENTS_AUDIENCE'); assert.equal(error.details.ret, -2);
+    assert.match(error.message, /ret=-2/); assert.doesNotMatch(error.message, /未发布/); return true;
+  });
+});
+
 test('audience reader rejects partial, nonadvancing, changing-label and wrong-contact results without a usable snapshot', async () => {
   for (const mode of ['partial', 'paging', 'labels', 'identity', 'rejected', 'unknown-label']) {
     let labelsRead = 0;

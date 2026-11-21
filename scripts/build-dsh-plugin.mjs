@@ -132,6 +132,6 @@ if (process.argv.includes('--pack')) {
   const tarball = path.join(release, `${manifest.name}-${manifest.version}.tgz`);
   const digest = hash(fs.readFileSync(tarball));
   fs.writeFileSync(tarball + '.sha256', `${digest}  ${path.basename(tarball)}\n`);
-  fs.writeFileSync(path.join(release, 'build.json'), JSON.stringify({ name: manifest.name, version: manifest.version, testedDsh: '0.2.1-rc.5', bytes: fs.statSync(tarball).size, sha256: digest, stage, at: new Date().toISOString() }, null, 2));
+  fs.writeFileSync(path.join(release, 'build.json'), JSON.stringify({ name: manifest.name, version: manifest.version, testedDsh: '0.2.2-rc.3', bytes: fs.statSync(tarball).size, sha256: digest, stage, at: new Date().toISOString() }, null, 2));
   console.log(`Installable DSH plugin: ${tarball}`);
 }

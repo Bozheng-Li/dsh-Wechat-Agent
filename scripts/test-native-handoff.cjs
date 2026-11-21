@@ -18,7 +18,7 @@ const { StateStore, WorkStore, DshAgentRunner, WechatChannel, ImageGenerationSer
 const systemTemp = path.join(require('node:os').homedir(), 'AppData/Local/Temp');
 const root = fs.mkdtempSync(path.join(systemTemp, 'wechat-native-handoff-'));
 process.env.TEMP = systemTemp; process.env.TMP = systemTemp;
-process.env.DSH_HOME = path.join(root, 'home'); process.env.DSH_AGENTS_HOME = path.join(root, 'agents');
+process.env.DSH_HOME = path.join(root, 'home'); process.env.DSH_AGENTS_HOME = path.join(root, 'agents'); process.env.DSH_PROFILE_DIR = path.join(root, 'profile');
 const { stickerPng } = require(path.join(repo, 'tests/fixtures/stickers.mjs'));
 const imageBytes = stickerPng();
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -232,7 +232,10 @@ const until = async predicate => {
   const mount = async (name, config = {}) => { const module = host('@deepseek-ai/' + name), fork = ctx.plugin(module.default || module, config); forks.push(fork); await fork.await(); };
   try {
     for (const name of ['dsh-session', 'dsh-session-projection', 'dsh-agent', 'dsh-llm', 'dsh-system-prompt', 'dsh-fs-local', 'dsh-subprocess-local']) await mount(name);
-    await mount('dsh-tools', { mode: 'native' }); await mount('dsh-working-directory', { defaultDirectory: root });
+    let nativeExecutor;
+    try { nativeExecutor = host('@deepseek-ai/dsh-tool-executor-native'); } catch (error) { if (error.code !== 'MODULE_NOT_FOUND') throw error; }
+    await mount('dsh-tools', nativeExecutor ? {} : { mode: 'native' });
+    if (nativeExecutor) await mount('dsh-tool-executor-native'); await mount('dsh-working-directory', { defaultDirectory: root });
     await mount('dsh-sandbox-policy', { mode: 'danger-full-access', workspaceRoot: root }); await mount('dsh-sandbox-local');
     const confine = ctx.sandbox.confine.bind(ctx.sandbox); ctx.sandbox.confine = (...args) => { confinedCalls++; return confine(...args); };
     await mount('cordis-plugin-loader', { baseUrl: ctx.baseUrl }); await mount('dsh-agent-preset-registry', { default: 'native-test-coding' });
@@ -387,7 +390,7 @@ const until = async predicate => {
     const legacyProject = await ctx.workspaceRegistry.create(legacyCwd, '微信agent'); await legacyProject.attachSession(legacySessionId);
     channel.work.store.add({ ...parent, id: legacyJobId, folder: legacyFolder, sessionId: legacySessionId, conversationTurn: false });
     const legacyLive = await ctx.agents.resume({ resumeSessionId: legacySessionId, agentOptions: { provider: 'work-default', model: 'native-fixture' },
-      setup: local => { local.tools.presentAs('native'); } });
+      setup: local => { if (typeof local.tools.presentAs === 'function') local.tools.presentAs('native'); } });
     legacyLive.agent.followup(Object.freeze({ id: randomUUID(), role: 'user', content: [{ type: 'text', text: legacyBusyRequest }], source: { kind: 'user' } }));
     try {
       await legacyBusyEntered.promise; assert.equal(legacyLive.agent.status, 'running');
@@ -404,7 +407,7 @@ const until = async predicate => {
     const sharedHandle = await ctx.agents.create({ sessionId: sharedLegacyId,
       meta: { cwd: chatCwd, agentPreset: 'native-test-coding' },
       agentOptions: { provider: 'work-default', model: 'native-fixture' },
-      setup: local => { local.tools.presentAs('native'); } });
+      setup: local => { if (typeof local.tools.presentAs === 'function') local.tools.presentAs('native'); } });
     sharedHandle.agent.followup(Object.freeze({ id: randomUUID(), role: 'user', content: [{ type: 'text', text: legacyBusyRequest }], source: { kind: 'user' } }));
     await sharedHandle.agent.whenIdle(); await sharedHandle.dispose();
     const sharedOriginal = await ctx.sessionPersistence.open(sharedLegacyId, 'read');
@@ -528,7 +531,7 @@ const until = async predicate => {
     const apiFailure = await completed('测试润色 API 故障'); assert.equal(apiFailure.state, 'succeeded'); assert.equal(apiFailure.result.polish.state, 'fallback'); assert.equal(apiFailure.result.text, '原生 DSH 返回 42。');
     const alpha = children.find(job => job.request.includes('alpha.txt'));
     retained = await ctx.agents.resume({ resumeSessionId: alpha.sessionId, agentOptions: { provider: 'work-default', model: 'native-fixture' }, signal: new AbortController().signal });
-    await retained.agent.whenIdle(); const retainedAgent = retained.agent, retainedSeq = retainedAgent.session.seq, retainedEvents = retainedAgent.session.snapshotEvents(), retainedPresentation = ctx.tools.modeFor(retainedAgent);
+    await retained.agent.whenIdle(); const retainedAgent = retained.agent, retainedSeq = retainedAgent.session.seq, retainedEvents = retainedAgent.session.snapshotEvents(), retainedPresentation = (ctx.tools.modeFor?.(retainedAgent) ?? 'native');
     const consolidatedLive = await consolidateWorkProjects(ctx, channel.work.store, store.ensureWorkspace(), AbortSignal.timeout(5000));
     assert(!consolidatedLive.pending.some(row => row.sessionId === alpha.sessionId));
     assert.equal(ctx.agents.get(alpha.sessionId), retainedAgent); assert.equal(retainedAgent.session.seq, retainedSeq);
@@ -540,7 +543,7 @@ const until = async predicate => {
     assert.equal(repeated.state, 'succeeded', JSON.stringify(repeated)); assert.equal(repeated.sessionId, alpha.sessionId);
     assert.equal(JSON.stringify(channel.work.store.get(continued.id).operations), previousOperations);
     assert.equal(repeated.operations.filter(operation => operation.tool === 'wechat_work_read').length, 1);
-    assert.equal(ctx.tools.modeFor(retainedAgent), retainedPresentation); assert.equal(ctx.agents.get(alpha.sessionId), retainedAgent);
+    assert.equal((ctx.tools.modeFor?.(retainedAgent) ?? 'native'), retainedPresentation); assert.equal(ctx.agents.get(alpha.sessionId), retainedAgent);
     const revoked = store.config.snapshot(store.data); revoked.remote = { globalAdminIds: [] }; store.config.commit(revoked); administrator = false;
     const beforeRevokedMessage = { native: nativeRequests.length, jobs: channel.work.list(scope).jobs.length, sent: sent.length };
     receive('解释工具调用'); await channel.whenIdle();

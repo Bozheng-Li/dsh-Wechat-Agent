@@ -44,6 +44,9 @@ conversationDefaults:
   memoryMode: always
   memoryWindowChars: null
   natural:
+    messageEnabled: true
+    timerEnabled: false
+    followupEnabled: false
     temperament: balanced
     intervalMode: random
     minMinutes: 30

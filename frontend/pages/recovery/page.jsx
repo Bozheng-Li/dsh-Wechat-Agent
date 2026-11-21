@@ -9,6 +9,7 @@ export function RecoveryPage({ rpc, status }) {
     [draft, setDraft] = useState(null),
     [verified, setVerified] = useState(false),
     [sendConfirmed, setSendConfirmed] = useState(false),
+    [partIndexes, setPartIndexes] = useState([]),
     [filter, setFilter] = useState('all');
   const [deleteTarget, setDeleteTarget] = useState(null);
   const identity = (row) => [row.chatType, row.peerId, row.key].join(':'),
@@ -22,19 +23,26 @@ export function RecoveryPage({ rpc, status }) {
   const records = (state.data?.records || []).filter((record) => filter === 'all' || record.state === filter),
     record = records.find((row) => identity(row) === selected),
     count = state.data?.counts?.[filter] || 0;
+  const availableParts = record?.replyPlan?.filter(plan => {
+    const receipts = record.deliveryParts?.filter(part => part.planIndex === plan.index) || [];
+    return receipts.length > 0 && receipts.every(part => part.state === 'not-sent');
+  }) || [];
+  const selectedParts = availableParts.filter(part => partIndexes.includes(part.index));
   const locked = state.busy || !!deleteTarget;
   const select = (row) => {
     setSelected(identity(row));
     setDraft(null);
     setVerified(false);
     setSendConfirmed(false);
+    setPartIndexes([]);
   };
-  const prepare = async (mode) => {
+  const prepare = async (mode, selectedParts) => {
     const value = await state.execute('recovery.prepare', {
       ...record,
       recordKey: record.key,
       mode,
       confirmUnreceived: verified,
+      ...(selectedParts ? { partIndexes: selectedParts } : {}),
     });
     if (value) {
       setDraft(value);
@@ -74,6 +82,7 @@ export function RecoveryPage({ rpc, status }) {
                 setDraft(null);
                 setVerified(false);
                 setSendConfirmed(false);
+                setPartIndexes([]);
               }}
               disabled={locked}
             >
@@ -158,18 +167,33 @@ export function RecoveryPage({ rpc, status }) {
                   <p>{record.reply || record.replyDraft || '尚未生成可用文字'}</p>
                   {record.replyMedia && <div className="wa-wb-asset">▧ {record.replyMedia.name}</div>}
                 </div>
-                {record.deliveryParts?.length > 0 && (
+                {record.replyPlan?.length > 0 && (
+                  <section className="wa-recovery-bubbles" aria-label="原回复气泡和回执">
+                    <h3>原回复分段</h3>
+                    {record.replyPlan.map(plan => {
+                      const receipts = record.deliveryParts?.filter(part => part.planIndex === plan.index) || [];
+                      const canSelect = receipts.length > 0 && receipts.every(part => part.state === 'not-sent');
+                      const stateLabel = !receipts.length ? '未记录回执'
+                        : receipts.every(part => part.state === 'acknowledged') ? '微信已确认'
+                          : receipts.every(part => part.state === 'not-sent') ? '明确未发送'
+                            : '结果待核对';
+                      return <label className="wa-recovery-bubble" key={plan.index} data-state={stateLabel}>
+                        <input type="checkbox" checked={partIndexes.includes(plan.index)} disabled={locked || !canSelect}
+                          onChange={event => setPartIndexes(current => event.target.checked
+                            ? [...new Set([...current, plan.index])].sort((a, b) => a - b)
+                            : current.filter(index => index !== plan.index))} />
+                        <span><strong>{plan.type === 'text' ? '文字气泡' : plan.type === 'face' ? '表情气泡' : '图片气泡'} {plan.index + 1}</strong>
+                          <small>{stateLabel}</small>{plan.type === 'text' && <span className="wa-recovery-bubble-text">{plan.text}</span>}
+                          {plan.media?.name && <span className="wa-recovery-bubble-text">{plan.media.name}</span>}</span>
+                      </label>;
+                    })}
+                  </section>
+                )}
+                {record.deliveryParts?.length > 0 && !record.replyPlan?.length && (
                   <div className="wa-wb-parts">
-                    {record.deliveryParts.map((part) => (
-                      <span key={part.index}>
-                        {part.type === 'text' ? '文字' : '图片'} {part.index + 1} ·{' '}
-                        {part.state === 'acknowledged'
-                          ? '已有回执'
-                          : part.state === 'not-sent'
-                            ? '尚未发送'
-                            : '结果待核对'}
-                      </span>
-                    ))}
+                    {record.deliveryParts.map((part) => <span key={part.index}>
+                      {part.type === 'text' ? '文字' : '图片'} {part.index + 1} · {part.state === 'acknowledged' ? '已有回执' : part.state === 'not-sent' ? '尚未发送' : '结果待核对'}
+                    </span>)}
                   </div>
                 )}
                 {['unknown', 'partial'].includes(record.state) && (
@@ -183,29 +207,38 @@ export function RecoveryPage({ rpc, status }) {
                     我已在微信核对，准备恢复的内容尚未收到
                   </label>
                 )}
+                {record.contentUnavailable && <p className="wa-wb-note" role="note">原消息正文无法读取；只可补发原来的读取提示，不可重新生成回复。</p>}
+                {record.unavailableNotice && record.replyDraft && <div className="wa-wb-paper"><small>固定读取提示</small><p>{record.replyDraft}</p></div>}
                 {!record.authorized && <p className="wa-wb-note">当前会话已撤销授权，请到会话页核对授权后操作。</p>}
                 <div className="wa-wb-actions wa-recovery-prepare">
-                  <Button disabled={locked || record.busy || !record.authorized} onClick={() => prepare('retry')}>
-                    准备原回复
-                  </Button>
-                  <details className="wa-recovery-options">
-                  <summary>其他恢复方式</summary>
-                  <div className="wa-wb-actions">
-                  {[
-                    ['text', '仅恢复文字'],
-                    ['image', '仅恢复图片'],
-                    ['regenerate', '重新生成文字'],
-                  ].map(([mode, label]) => (
-                    <Button
-                      key={mode}
-                      quiet
-                      disabled={locked || record.busy || !record.authorized || (mode === 'image' && !record.replyMedia)}
-                      onClick={() => prepare(mode)}
-                    >
-                      {label}
+                  {record.replyPlan?.length && availableParts.length ? <>
+                    <Button disabled={locked || record.busy || !record.authorized || !selectedParts.length}
+                      onClick={() => prepare('retry', selectedParts.map(part => part.index))}>
+                      准备所选未发送气泡（{selectedParts.length}）
                     </Button>
-                  ))}
-                  </div>
+                    <Button quiet disabled={locked || record.busy || !record.authorized || availableParts.length === selectedParts.length}
+                      onClick={() => prepare('retry', availableParts.map(part => part.index))}>
+                      准备全部未发送气泡（{availableParts.length}）
+                    </Button>
+                  </> : record.replyPlan?.length ? <p className="wa-wb-note">没有可安全恢复的明确未发送气泡；已确认或结果不明内容不能重发。</p>
+                    : <Button disabled={locked || record.busy || !record.authorized} onClick={() => prepare('retry')}>准备原回复</Button>}
+                  <details className="wa-recovery-options">
+                    <summary>其他恢复方式</summary>
+                    <div className="wa-wb-actions">
+                      {[
+                        ['text', '仅恢复文字'],
+                        ['image', '仅恢复图片'],
+                        ['regenerate', '重新生成文字'],
+                      ].map(([mode, label]) => (
+                        <Button key={mode} quiet
+                          disabled={locked || record.busy || !record.authorized ||
+                            (mode === 'image' && !record.replyMedia) ||
+                            (mode === 'regenerate' && record.contentUnavailable) ||
+                            (mode === 'regenerate' && record.replyPlan?.length && availableParts.filter(part => part.type === 'text').length !== 1) ||
+                            (record.replyPlan?.length && mode !== 'regenerate' && !availableParts.some(part => mode === 'image' ? ['image', 'face'].includes(part.type) : part.type === 'text'))}
+                          onClick={() => prepare(mode)}>{label}</Button>
+                      ))}
+                    </div>
                   </details>
                 </div>
                 {draft && (
@@ -218,8 +251,10 @@ export function RecoveryPage({ rpc, status }) {
                       接收会话：<strong>{record.conversationName}</strong>
                     </p>
                     <div className="wa-wb-paper">
-                      {draft.text || '仅发送图片'}
-                      {draft.asset && <p>▧ {draft.asset.name}</p>}
+                      {draft.plan?.length ? draft.plan.map((part, index) => <div className="wa-recovery-preview-part" key={index}>
+                        <small>{part.type === 'text' ? '文字气泡' : part.type === 'face' ? '表情气泡' : '图片气泡'}</small>
+                        {part.type === 'text' ? <p>{part.text}</p> : <p>▧ {part.media?.name || draft.asset?.name || '已保存图片'}</p>}
+                      </div>) : <>{draft.text || '仅发送图片'}{draft.asset && <p>▧ {draft.asset.name}</p>}</>}
                     </div>
                     <label className="wa-wb-check">
                       <input

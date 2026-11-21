@@ -31,6 +31,8 @@ export function validateArchiveView(store, view, conversation) {
   if (view.natural !== undefined) validateNaturalState(view.natural);
 }
 
+const TEMPORARY_FILE = /^conversation\.json\.\d+\.[0-9a-f-]{36}\.tmp$/;
+
 export function writeArchiveSnapshot(store, view, directory, expectedRevision) {
   const file = path.join(directory, 'conversation.json');
   let release;
@@ -74,11 +76,25 @@ export function writeArchiveSnapshot(store, view, directory, expectedRevision) {
       }
     } else if (expectedRevision !== undefined) {
       throw new ChannelError('STATE_WRITE_FAILED', '已使用的会话文件缺失，未创建空记录替代；请检查保存目录');
-    } else if (fs.readdirSync(directory).some((name) => name !== '.wechat-agent-write.lock')) {
-      throw new ChannelError(
-        'CONVERSATION_PATH_CONFLICT',
-        '目标会话目录不是空目录，未覆盖已有文件；请选择其他保存路径'
-      );
+    } else {
+      // atomicJson publishes through `conversation.json.<pid>.<uuid>.tmp`; a crash
+      // between create and rename leaves one behind. Counting it as a foreign file
+      // would make this deterministic directory unwritable forever, so our own
+      // stale temporaries are reaped (under the lock) instead of blocking the write.
+      const present = fs.readdirSync(directory);
+      const stale = present.filter((name) => TEMPORARY_FILE.test(name));
+      for (const name of stale) {
+        try {
+          fs.unlinkSync(path.join(directory, name));
+        } catch {
+          /* Kept below if it cannot be removed: it still is not foreign data. */
+        }
+      }
+      if (present.some((name) => name !== '.wechat-agent-write.lock' && !TEMPORARY_FILE.test(name)))
+        throw new ChannelError(
+          'CONVERSATION_PATH_CONFLICT',
+          '目标会话目录不是空目录，未覆盖已有文件；请选择其他保存路径'
+        );
     }
     write(file, view);
   } catch (error) {
@@ -91,6 +107,7 @@ export function writeArchiveSnapshot(store, view, directory, expectedRevision) {
 
 export function withSourceLocks(store, views, operation) {
   const releases = [];
+  let result, primary;
   try {
     for (const view of [...views].sort((a, b) => a.key.localeCompare(b.key))) {
       const directory = store.data.conversations[view.key].directory;
@@ -110,16 +127,22 @@ export function withSourceLocks(store, views, operation) {
           '源会话记录已被其他实例更新或仍有未保存状态，未迁移；请重新启用插件读取最新记录'
         );
     }
-    return operation();
+    result = operation();
+  } catch (error) {
+    primary = error;
+    throw error;
   } finally {
-    let error;
+    let failure;
     for (const release of releases.reverse()) {
       try {
         release();
-      } catch (failure) {
-        error ??= failure;
+      } catch (error) {
+        failure ??= error;
       }
     }
-    if (error) throw error;
+    // A lock that cannot be released must not replace the real reason the
+    // operation failed (a full disk used to be reported as a lock problem).
+    if (failure && !primary) throw failure;
   }
+  return result;
 }

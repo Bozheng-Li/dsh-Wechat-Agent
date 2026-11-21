@@ -1,4 +1,4 @@
-import { projectMemory } from './retrieval.mjs';
+import { projectMemory, recentRoleHistory } from './retrieval.mjs';
 import { conversationPeople } from './people.mjs';
 import { factEvidence } from './references.mjs';
 
@@ -8,9 +8,10 @@ export function roleMemoryData(memory, input, { document, history = [], persona,
     section = doc.sections.find(section => section.key === scope.key),
     facts = (section?.facts || []).filter(fact => Number.isFinite(fact.createdAt) && fact.createdAt <= cutoff),
     speaker = { id: input.senderId || (scope.chatType === 'private' ? scope.peerId : ''), name: input.senderName || input.sender || '' },
-    people = conversationPeople(memory.store, scope, { entries: history, facts, speaker, beforeTime: cutoff });
+    observedHistory = recentRoleHistory({ scope, history, beforeTime: cutoff }, Infinity, Infinity),
+    people = conversationPeople(memory.store, scope, { entries: observedHistory, facts, speaker, beforeTime: cutoff });
   const personId = speaker.id && speaker.id !== scope.accountId && !speaker.id.endsWith('@chatroom') ? speaker.id : null;
-  return { scope, now: at, query: text, history, speaker, people, persona: persona || memory.store.conversationPersona(scope.accountId, scope.chatType, scope.peerId),
+  return { scope, now: at, beforeTime: cutoff, query: text, history: observedHistory, speaker, people, persona: persona || memory.store.conversationPersona(scope.accountId, scope.chatType, scope.peerId),
     personaHasCard: true, card: null,
     roleId: personId ? memory.store.roleCards?.identity({ accountId: scope.accountId, personId }) : undefined,
     globalNotes: doc.globalNotesExpired ? '' : doc.globalNotes,

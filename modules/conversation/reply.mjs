@@ -6,6 +6,9 @@ import { REMINDER_REACTIONS, reminderReaction, reminderReceipt } from "./task-co
 import { simpleReminder } from "../tasks/scheduler.mjs";
 import { conversationTaskTool, mediaReplyTool } from "../tasks/conversation-tools.mjs";
 import { stickerReplyTools } from '../media/sticker-tools.mjs';
+import { selectStickerCandidates } from '../media/sticker-candidates.mjs';
+import { imageGenerationTool } from '../tools/image-generation.mjs';
+import { captureChatGeneratedImage, acknowledgeChatGeneratedImage, generatedChatImageSegment, resolveChatGeneratedImageMemory } from '../memory/images/chat-generated.mjs';
 import { conversationMemoryTool } from "../memory/query/tool.mjs";
 import { NATURAL_REASONS, parseNaturalDecision } from "./natural-chat.mjs";
 import { imageMemoryTool } from "../memory/images/tool.mjs";
@@ -24,6 +27,7 @@ import { chatMomentsMedia } from '../moments/media.mjs';
 import { momentsPublishingTools } from '../tools/moments-publishing.mjs';
 import { timeLimitMs } from '../../shared/time-settings.mjs';
 import { personRoleCardTool, personRoleContext } from '../memory/roles/tool.mjs';
+import { splitChatReply, replySegments } from '../../shared/chat-reply-split.mjs';
 
 export async function processReply(channel, item) {
   const { record } = item;
@@ -52,10 +56,13 @@ export async function processReply(channel, item) {
       item.naturalRevision = channel.store.naturalState(record.accountId, record.chatType, record.peerId).humanRevision;
     item.externalSignal?.throwIfAborted();
     channel.store.update(record, { state: 'generating' });
-    if (item.workRouting) {
+    if (item.workRouting && !item.unavailableNotice) {
       const decision = await routeWorkMessage(channel, item, controller.signal);
       item.workRoute = decision;
       if (decision.action === 'chat') {
+        item.mode = 'default';
+        item.workRouting = false;
+        item.workRoutingResolved = true;
         channel.store.update(record, { mode: 'default', workRoute: decision },
           { message: item.message });
         item.memorySnapshot = channel.memory.snapshot(record, record.key);
@@ -78,6 +85,7 @@ export async function processReply(channel, item) {
     let result;
     let confirmationTask;
     let selectedMedia;
+    let capturedGeneratedImage;
     const imageReferences = [];
     const imageNoteChecks = [];
     let replySelectionApplied = false;
@@ -105,7 +113,9 @@ export async function processReply(channel, item) {
         ? simpleReminder(item.text, [persona.name, ...persona.aliases], record.createdAt)
         : null;
     const work = item.workCommand;
-    if (item.modeControl) {
+    if (item.unavailableNotice) {
+      result = { text: item.unavailableNotice, template: true };
+    } else if (item.modeControl) {
       result = { text: item.modeResult };
     } else if (item.remoteCommand) {
       try {
@@ -138,11 +148,12 @@ export async function processReply(channel, item) {
           asset: channel.library.resolveAsset(record.accountId, item.scheduled.retryAsset.id),
           caption: result.text,
         };
-      if (item.scheduled.recovery?.asset)
-        selectedMedia = {
-          asset: channel.library.resolveAsset(record.accountId, item.scheduled.recovery.asset.id),
-          caption: result.text,
-        };
+      if (item.scheduled.recovery?.asset) {
+        const asset = channel.library.resolveAsset(record.accountId, item.scheduled.recovery.asset.id,
+          { enabledOnly: item.scheduled.recovery.asset.generation ? false : true });
+        selectedMedia = { asset, caption: result.text,
+          ...(item.scheduled.recovery.asset.generation ? { generated: { ...item.scheduled.recovery.asset.generation } } : {}) };
+      }
     } else if (reminder) {
       channel.assertAllowed(item);
       controller.signal.throwIfAborted();
@@ -255,42 +266,71 @@ export async function processReply(channel, item) {
               ]
             : [];
         const library = channel.library.list(record.accountId, { limit: 1 });
+        const mediaEnabled = library.settings.enabled && library.counts.enabled > 0;
         const lastMedia = channel.store.data.records.findLast(
           (value) => matches(value, record) && value.state === 'sent' && value.replyMedia
         );
         const sinceMedia = lastMedia
-          ? history.filter((entry) => entry.direction === 'incoming' && entry.observedAt > lastMedia.updatedAt).length +
-            1
+          ? history.filter((entry) => entry.direction === 'incoming' && entry.observedAt > (lastMedia.sentAt ?? lastMedia.updatedAt)).length +
+            (!item.scheduled && !item.ambient && item.mode !== 'participate' ? 1 : 0)
           : Infinity;
-        const requestedImage = /表情包|发(?:一)?(?:张|个).{0,12}(?:图|表情)|配图|图片回复/u.test(item.text);
-        if (
-          !item.naturalDecision &&
-          library.settings.enabled &&
-          library.counts.enabled
-        )
-        {
-          const assertMediaAllowed = () => {
-                controller.signal.throwIfAborted();
-                channel.assertAllowed(item);
-              };
-          const selectMedia = (value) => {
-                selectedMedia = value;
-                channel.store.update(record, {
-                  replyMedia: {
-                    id: value.asset.id,
-                    name: value.asset.name,
-                    kind: value.asset.kind,
-                    description: value.asset.description,
-                    usage: value.asset.usage || '',
-                  },
-                });
-              };
-          const options = { excludeIds: lastMedia?.replyMedia?.id ? [lastMedia.replyMedia.id] : [], random: channel.random,
-            explicitRequest: requestedImage, cooldown: sinceMedia < library.settings.minGapMessages };
-          if (channel.library.search(record.accountId, '', { kind: 'sticker', limit: 1 }).length)
-            tools.push(...stickerReplyTools(channel.library, scope, assertMediaAllowed, selectMedia, options));
-          if ((requestedImage || sinceMedia >= library.settings.minGapMessages) && channel.library.search(record.accountId, '', { kind: 'image', limit: 1 }).length)
+        const requestedImage = /表情包|发(?:一)?(?:张|个).{0,12}(?:图|表情)|配图|图片回复/u.test(item.text || '');
+        const assertMediaAllowed = () => { controller.signal.throwIfAborted(); channel.assertAllowed(item); };
+        const selectMedia = async value => {
+          if (value.generated) {
+            try {
+              capturedGeneratedImage = await captureChatGeneratedImage(channel.imageMemory, scope, record,
+                value.generated, assertMediaAllowed, controller.signal);
+              if (capturedGeneratedImage) value.generated.memory = capturedGeneratedImage;
+            } catch (error) {
+              controller.signal.throwIfAborted(); channel.assertAllowed(item);
+              try {
+                const generatedScope = { ...scope, collection: 'generated' };
+                channel.imageMemory.errors.set(channel.imageMemory.selector(generatedScope).key,
+                  error instanceof ChannelError ? error.message : '本轮生成图片记忆暂未保存；图片仍可在素材库查看');
+              } catch {}
+              capturedGeneratedImage = null;
+            }
+          }
+          const metadata = value.generated ? {
+            jobId: capturedGeneratedImage?.generation.jobId || value.generated.jobId,
+            fileName: value.generated.fileName || value.asset.name, requesterId: capturedGeneratedImage?.generation.requesterId || record.senderId || record.accountId,
+            deliveryState: 'not-confirmed', serverMessageIds: [], prompt: String(value.generated.prompt || '').slice(0, 4000),
+            ...(value.generated.providerName ? { providerName: String(value.generated.providerName).slice(0, 4000) } : {}),
+            ...(value.generated.model ? { model: String(value.generated.model).slice(0, 4000) } : {}),
+            ...(capturedGeneratedImage ? { imageMemoryId: capturedGeneratedImage.id } : {}),
+          } : undefined;
+          if (value.generated) value.generated.generation = metadata;
+          selectedMedia = value;
+          channel.store.update(record, { replyMedia: { id: value.asset.id, name: value.asset.name, kind: value.asset.kind,
+            description: value.asset.description, usage: value.asset.usage || '', ...(metadata ? { generation: metadata } : {}) } });
+        };
+        const options = { random: channel.random, explicitRequest: requestedImage,
+          cooldown: sinceMedia < library.settings.minGapMessages };
+        // Chat-side generation must work with a newly installed empty/disabled
+        // sticker library. It has its own API switch and returns a trusted pixel buffer.
+        let generationStatus;
+        try { generationStatus = channel.imageGeneration?.status?.(); } catch { generationStatus = undefined; }
+        if (!item.naturalDecision && generationStatus?.enabled && generationStatus.credentialConfigured)
+          tools.push(imageGenerationTool({ imageGeneration: channel.imageGeneration, library: channel.library, scope,
+            select: selectMedia, assertAllowed: assertMediaAllowed }));
+        if (mediaEnabled && (!item.naturalDecision || ['natural', 'participate'].includes(item.mode))) {
+          const suggestion = channel.library.replyStickerCandidates(record.accountId, {
+            ...options, text: item.text, history, names: [persona.name, ...(persona.aliases || [])], limit: 4,
+          });
+          if (suggestion.eligibleCount) {
+            const candidates = suggestion.candidates.map(asset => ({ id: asset.id, name: asset.name,
+              usage: asset.usage || '', description: asset.description || '', tags: asset.tags || [] }));
+            tools.push(...stickerReplyTools(channel.library, scope, assertMediaAllowed, selectMedia,
+              { ...options, candidates }));
+          }
+          if (!item.naturalDecision && (requestedImage || sinceMedia >= library.settings.minGapMessages) &&
+              channel.library.search(record.accountId, '', { kind: 'image', limit: 1 }).length)
             tools.push(mediaReplyTool(channel.library, scope, assertMediaAllowed, selectMedia, { ...options, imagesOnly: true }));
+          channel.store.update(record, { stickerContext: {
+            eligible: suggestion.eligibleCount, candidates: suggestion.candidates.length, relevant: suggestion.relevantCount,
+            cooldown: options.cooldown, explicitRequest: options.explicitRequest, mode: item.naturalDecision ? 'natural' : 'reply',
+          } });
         }
         const onDemand = item.config.memoryMode === 'on-demand';
         const memoryReadResults = [];
@@ -432,15 +472,16 @@ export async function processReply(channel, item) {
           context.referenceChars = context.memory.length;
         }
         channel.store.update(record, { memoryContext: {
-          mode: context.mode,
-          recentMessages: context.history.length,
-          referenceChars: context.referenceChars,
-          ...(role ? { roleId: role.roleId, selectedFacts: role.selectedIds, targetPeople: role.targets } : {}),
-          ...(context.matchedTerms ? { matchedTerms: context.matchedTerms, omitted: context.omitted } : {}),
-        } });
+            mode: context.mode,
+            recentMessages: context.history.length,
+            referenceChars: context.referenceChars,
+            ...(role ? { roleId: role.roleId, selectedFacts: role.selectedIds, targetPeople: role.targets } : {}),
+            ...(context.matchedTerms ? { matchedTerms: context.matchedTerms, omitted: context.omitted } : {}),
+          },
+        });
         let decision;
-        const chooseNatural = (raw) => {
-          decision = parseNaturalDecision(raw);
+        const chooseNatural = raw => {
+          decision = parseNaturalDecision(raw, { allowEmptyReply: !!selectedMedia });
           return decision.text;
         };
         controller.signal.throwIfAborted();
@@ -449,6 +490,12 @@ export async function processReply(channel, item) {
           text: item.text + (imageContext ? promptText("conversation/templates.json", "reply-text-4", [imageContext]) : '') +
             (generatedContext ? '\n\n' + generatedContext : ''),
           group: item.message.chatType === 'group',
+          now: () => channel.now(),
+          messageTime: item.message.time,
+          personaModeOverride: persona?.personaMode,
+          selectedReply: () => selectedMedia ? { asset: { id: selectedMedia.asset.id, name: selectedMedia.asset.name,
+            kind: selectedMedia.asset.kind, description: selectedMedia.asset.description, usage: selectedMedia.asset.usage || '' },
+            text: selectedMedia.caption || '' } : null,
           mode: item.mode,
           prompt: item.prompt,
           persona: role?.persona || persona,
@@ -475,6 +522,7 @@ export async function processReply(channel, item) {
           onRequestMetrics: requestMetrics => channel.store.update(record, { requestMetrics }),
           onSession: (id) => channel.store.update(record, { sessionId: id }),
         });
+        if (result.personaMode) channel.store.update(record, { personaMode: result.personaMode, personaPasses: result.personaPasses });
         if (item.naturalDecision) {
           if (!decision) {
             decision = parseNaturalDecision(result.text);
@@ -490,7 +538,7 @@ export async function processReply(channel, item) {
         }
         for (const reference of imageReferences) channel.imageMemory.assertReference(reference);
         for (const check of imageNoteChecks) check();
-        if (selectedMedia && !replySelectionApplied)
+        if (selectedMedia && !replySelectionApplied && !result.personaApplied)
           result.text =
             typeof channel.runner.polishReply === 'function'
               ? await channel.runner.polishReply(selectedMedia.caption, item.text, controller.signal, persona, {
@@ -551,85 +599,146 @@ export async function processReply(channel, item) {
       result.text = await channel.runner.polishReport(result.text,item.text,replySignal,workPresentation(channel,record));
       replySignal.throwIfAborted(); channel.assertAllowed(item);
     }
-    const message = result.text ? [{ type: 'text', data: { text: result.text } }] : [];
-    const workArtifacts = item.scheduled?.workJobId && !item.scheduled.workProgress ? channel.work.prepareArtifacts(item.scheduled.workJobId, record, replySignal, item.scheduled.workRetryId) : [];
-    message.push(...workArtifacts.map(value => value.segment));
+    const recoveryPlan = item.scheduled?.recovery?.plan;
+    const texts = recoveryPlan ? recoveryPlan.filter(part => part.type === 'text').map(part => part.text)
+      : result.text ? (result.template ? [result.text] : splitChatReply(result.text)) : [];
+    const cleanReply = texts.join('\n');
     channel.store.update(record, {
       replyDraft: result.text,
-      ...(workArtifacts.length ? { replyArtifacts: workArtifacts.map(value => value.metadata) } : {}),
       ...(result.replyStyleWarning ? { replyStyleWarning: result.replyStyleWarning } : {}),
       ...(result.emptyResponseRetries ? { emptyResponseRetries: result.emptyResponseRetries } : {}),
+      ...(result.personaMode ? { personaMode: result.personaMode, personaPasses: result.personaPasses } : {}),
     });
-    let replyMedia;
+    const workArtifacts = item.scheduled?.workJobId && !item.scheduled.workProgress
+      ? channel.work.prepareArtifacts(item.scheduled.workJobId, record, replySignal, item.scheduled.workRetryId) : [];
+    let replyMedia, preparedMediaSegment;
     if (selectedMedia) {
-      const asset = channel.library.resolveAsset(record.accountId, selectedMedia.asset.id);
-      replyMedia = { id: asset.id, name: asset.name, kind: asset.kind, description: asset.description };
-      message.push(await channel.library.prepareSendSegment(record.accountId, asset.id, replySignal,
-        { nativeReady: channel.transport.status().nativeStickersReady !== false }));
+      const generated = !!selectedMedia.generated;
+      const asset = channel.library.resolveAsset(record.accountId, selectedMedia.asset.id, { enabledOnly: !generated });
+      replyMedia = { id: asset.id, name: asset.name, kind: asset.kind, description: asset.description,
+        ...(selectedMedia.generated?.generation ? { generation: selectedMedia.generated.generation } : {}) };
+      preparedMediaSegment = generated
+        ? generatedChatImageSegment(channel.library, record.accountId, selectedMedia)
+        : await channel.library.prepareSendSegment(record.accountId, asset.id, replySignal,
+          { nativeReady: channel.transport.status().nativeStickersReady !== false });
     }
-    if (!message.length) throw new ChannelError('MODEL_EMPTY', '本轮没有可发送的文字或图片');
-    replySignal.throwIfAborted();
-    channel.assertAllowed(item);
+    const business = [];
+    if (recoveryPlan) {
+      let textIndex = 0;
+      for (const source of recoveryPlan) {
+        if (source.type === 'text') business.push({ segment: { type: 'text', data: { text: source.text } }, plan: {
+          type: 'text', text: source.text, ...(source.sourceIndex === undefined ? { sourceIndex: source.index } : { sourceIndex: source.sourceIndex }) } });
+        else if (['image', 'face'].includes(source.type) && preparedMediaSegment) business.push({ segment: preparedMediaSegment, plan: {
+          type: source.type, media: source.media ?? replyMedia, ...(source.sourceIndex === undefined ? { sourceIndex: source.index } : { sourceIndex: source.sourceIndex }) } });
+        textIndex++;
+      }
+    } else {
+      for (const text of texts) business.push({ segment: { type: 'text', data: { text } }, plan: { type: 'text', text } });
+      for (const artifact of workArtifacts) business.push({ segment: artifact.segment, plan: { type: artifact.segment.type, media: artifact.metadata, artifact: artifact.metadata } });
+      if (preparedMediaSegment) business.push({ segment: preparedMediaSegment,
+        plan: { type: preparedMediaSegment.type, ...(replyMedia ? { media: replyMedia } : {}) } });
+    }
+    if (!business.length) throw new ChannelError('MODEL_EMPTY', '本轮没有可发送的文字或图片');
+    replySignal.throwIfAborted(); channel.assertAllowed(item);
     const targets = item.scheduled?.targets?.length
-      ? await channel.scheduler.resolveTargets(item.scheduled.targets, scope, replySignal)
-      : [];
-    if (targets.length)
-      message.unshift(...targets.map((target) => ({ type: 'at', data: { qq: target.id, name: target.name } })));
-    replySignal.throwIfAborted();
-    channel.assertAllowed(item);
+      ? await channel.scheduler.resolveTargets(item.scheduled.targets, scope, replySignal) : [];
     if (confirmationTask) {
       const currentTask = channel.scheduler.get(confirmationTask.id, scope, true);
       if (!['pending', 'running'].includes(currentTask.state) || currentTask.revision !== confirmationTask.revision)
         throw new ChannelError('TASK_CHANGED', '提醒已取消、暂停或修改，旧确认未发送');
     }
-    if (replyMedia) channel.library.resolveAsset(record.accountId, replyMedia.id);
     for (const reference of imageReferences) channel.imageMemory.assertReference(reference);
     for (const check of imageNoteChecks) check();
-    // Commit intent before crossing the side-effect boundary.
-    channel.store.update(record, {
-      state: 'sending',
-      sendAttempted: true,
-      reply: result.text,
-      ...(targets.length ? { replyMentions: targets } : {}),
-      ...(replyMedia ? { replyMedia } : {}),
-    });
-    if (item.scheduled?.workJobId && !item.scheduled.workProgress) channel.work.sending(item.scheduled.workJobId, item.scheduled.workRetryId);
-    const sent = await channel.transport.send(
-      { accountId: record.accountId, chatType: item.message.chatType, peerId: item.message.peerId, message },
-      replySignal
-    );
-    const ids = sent?.serverMessageIds;
-    if (
-      sent?.delivery !== 'server-ack' ||
-      !Array.isArray(ids) ||
-      !ids.length ||
-      ids.some((id) => typeof id !== 'string' || !id || id === '0')
-    )
-      throw new ChannelError('SEND_UNKNOWN', '没有收到可核对的微信服务端回执，结果不明，未自动重发', {
-        delivery: 'unknown',
-      });
-    if (workArtifacts.length) {
-      const parts = sent.deliveryParts?.filter(value => value.type !== 'text');
-      if (!Array.isArray(parts) || parts.length !== workArtifacts.length || new Set(parts.map(part => part.serverMessageId)).size !== parts.length || parts.some((part, index) => {
-        const artifact = workArtifacts[index].metadata;
-        return part.state !== 'acknowledged' || part.type !== artifact.kind || part.name !== artifact.name || part.sha256 !== artifact.sha256 || part.bytes !== artifact.bytes || !ids.includes(part.serverMessageId);
-      })) throw new ChannelError('SEND_UNKNOWN', '工作成果缺少逐文件可核对的微信确认，送达结果不明，未自动重发', {
-        delivery: 'partially-acknowledged', acknowledgedMessageIds: ids, deliveryParts: sent.deliveryParts ?? [],
-      });
+    const mentions = targets.map(target => ({ type: 'at', data: { qq: target.id, name: target.name } }));
+    const sends = replySegments([...mentions, ...business.map(value => value.segment)]);
+    if (!sends.length || sends.length !== business.length) throw new ChannelError('MODEL_EMPTY', '分条计划没有对应的可发送正文');
+    const replyPlan = sends.map((segment, index) => ({ index, ...business[index].plan,
+      ...(segment.some(part => part.type === 'at') ? { mentions: targets } : {}) }));
+    // Validate every outbound media segment before the first network write.
+    for (const segment of sends.flat()) {
+      if (!['image', 'face'].includes(segment.type)) continue;
+      const status = channel.transport.status(), native = segment.data?.nativeSticker;
+      if (native && (!/^[0-9a-f]{32}$/iu.test(native.md5 || '') || status.nativeStickersReady === false))
+        throw new ChannelError('MEDIA_INVALID', '原生表情内容或发送权限无效，整轮尚未发送');
+      if (native && !segment.data?.base64) continue;
+      const encoded = segment.data?.base64, bytes = Buffer.from(encoded || '', 'base64');
+      if (!bytes.length || bytes.length > 10 * 1024 * 1024 || bytes.toString('base64') !== encoded)
+        throw new ChannelError('MEDIA_INVALID', '图片内容无效或超过限制，整轮尚未发送');
+      const { inspectAssetImage } = await import('../media/image-format.mjs'), info = inspectAssetImage(bytes);
+      if (!['image/png', 'image/jpeg'].includes(info.mediaType) || info.mediaType !== segment.data.mediaType || status.imageUploadReady === false)
+        throw new ChannelError('MEDIA_INVALID', '图片格式或发送权限无效，整轮尚未发送');
     }
-    // Even cancellation after a network write must preserve a real ACK.
-    const natural = item.modeControl || item.workCommand || item.scheduled?.workJobId ? undefined : channel.natural.after(item, 'sent', result.text, ids);
-    channel.store.update(
-      record,
-      {
-        state: 'sent',
-        sentAt: channel.now(),
-        acknowledgedMessageIds: ids,
-        ...(sent.deliveryParts ? { deliveryParts: sent.deliveryParts } : {}),
-        reason: undefined,
-      },
-      { natural }
-    );
+    channel.assertAllowed(item); replySignal.throwIfAborted();
+    const acknowledged = [], deliveredParts = [];
+    const globalParts = parts => parts.map((part, index) => ({ ...part, index }));
+    const remaining = start => replyPlan.slice(start).map(plan => ({ planIndex: plan.index,
+      ...(plan.sourceIndex === undefined ? {} : { sourceIndex: plan.sourceIndex }), type: plan.type, state: 'not-sent',
+      ...(plan.artifact ? { name: plan.artifact.name, sha256: plan.artifact.sha256, bytes: plan.artifact.bytes } : {}) }));
+    channel.store.update(record, { state: 'sending', sendAttempted: true, reply: cleanReply, replyPlan,
+      deliveryParts: globalParts(remaining(0)), ...(targets.length ? { replyMentions: targets } : {}),
+      ...(replyMedia ? { replyMedia } : {}) });
+    if (item.scheduled?.workJobId && !item.scheduled.workProgress) channel.work.sending(item.scheduled.workJobId, item.scheduled.workRetryId);
+    for (let sendIndex = 0; sendIndex < sends.length; sendIndex++) {
+      const segment = sends[sendIndex], planned = replyPlan[sendIndex]; let started = false;
+      const receiptParts = (parts, ids, fallbackState, complete = false) => {
+        if (parts.length) return parts.map(part => ({ ...part, planIndex: planned.index,
+          ...(planned.sourceIndex === undefined ? {} : { sourceIndex: planned.sourceIndex }) }));
+        if (complete && ids.length === 1 && !planned.artifact) return [{ planIndex: planned.index,
+          ...(planned.sourceIndex === undefined ? {} : { sourceIndex: planned.sourceIndex }), type: planned.type,
+          state: 'acknowledged', serverMessageId: ids[0], observedAt: channel.now(),
+          ...(planned.type === 'text' ? { text: planned.text } : planned.media ? { name: planned.media.name } : {}) }];
+        return [{ planIndex: planned.index, ...(planned.sourceIndex === undefined ? {} : { sourceIndex: planned.sourceIndex }),
+          type: planned.type, state: fallbackState }];
+      };
+      try {
+        replySignal.throwIfAborted(); channel.assertAllowed(item);
+        // A crash after this commit is ambiguous, never evidence that this bubble was unsent.
+        channel.store.update(record, { acknowledgedMessageIds: [...acknowledged], deliveryParts: globalParts([
+          ...deliveredParts, { planIndex: planned.index, ...(planned.sourceIndex === undefined ? {} : { sourceIndex: planned.sourceIndex }),
+            type: planned.type, state: 'unknown' }, ...remaining(sendIndex + 1) ]) });
+        started = true;
+        const sent = await channel.transport.send({ accountId: record.accountId, chatType: item.message.chatType,
+          peerId: item.message.peerId, message: segment }, replySignal);
+        const ids = sent?.serverMessageIds;
+        const received = Array.isArray(ids) ? ids.filter(id => typeof id === 'string' && id && id !== '0') : [];
+        let parts = receiptParts(Array.isArray(sent?.deliveryParts) ? sent.deliveryParts : [], received, 'unknown', true);
+        const valid = sent?.delivery === 'server-ack' && received.length === (ids?.length ?? 0) && received.length > 0 &&
+          new Set(received).size === received.length && !received.some(id => acknowledged.includes(id)) &&
+          parts.length > 0 && parts.every(part => part.state === 'acknowledged' && received.includes(part.serverMessageId));
+        if (!valid) throw new ChannelError('SEND_UNKNOWN', '没有收到可核对的逐段微信服务端回执，结果不明，未自动重发', {
+          delivery: received.length ? 'partially-acknowledged' : 'unknown', acknowledgedMessageIds: received,
+          deliveryParts: Array.isArray(sent?.deliveryParts) ? sent.deliveryParts : [] });
+        if (planned.artifact) {
+          const files = parts.filter(part => part.type !== 'text');
+          if (files.length !== 1 || files[0].name !== planned.artifact.name || files[0].sha256 !== planned.artifact.sha256 ||
+              files[0].bytes !== planned.artifact.bytes || !received.includes(files[0].serverMessageId))
+            throw new ChannelError('SEND_UNKNOWN', '工作成果缺少逐文件可核对的微信确认，送达结果不明，未自动重发', {
+              delivery: 'partially-acknowledged', acknowledgedMessageIds: received, deliveryParts: sent.deliveryParts ?? [] });
+        }
+        acknowledged.push(...received); deliveredParts.push(...parts);
+        channel.store.update(record, { acknowledgedMessageIds: [...acknowledged], deliveryParts: globalParts([...deliveredParts, ...remaining(sendIndex + 1)]) });
+        if (planned.media?.generation?.imageMemoryId) {
+          const generation = selectedMedia?.generated?.generation ?? planned.media.generation;
+          const recovered = selectedMedia?.generated?.memory ?? resolveChatGeneratedImageMemory(channel.imageMemory, scope, generation);
+          acknowledgeChatGeneratedImage(channel.imageMemory, recovered, { deliveryParts: parts, planIndex: planned.index,
+            sentAt: channel.now(), serverMessageIds: received });
+        }
+      } catch (error) {
+        if (error?.code === 'STATE_WRITE_FAILED') throw error;
+        const details = error.details ?? {}, ownIds = (Array.isArray(details.acknowledgedMessageIds) ? details.acknowledgedMessageIds : [])
+          .filter(id => typeof id === 'string' && id && id !== '0'), allIds = [...acknowledged, ...ownIds];
+        const ownParts = Array.isArray(details.deliveryParts) ? details.deliveryParts : [];
+        const fallback = !started || ['rejected', 'not-sent'].includes(details.delivery) ? 'not-sent' : 'unknown';
+        error.details = { ...details, acknowledgedMessageIds: allIds,
+          deliveryParts: globalParts([...deliveredParts, ...receiptParts(ownParts, ownIds, fallback), ...remaining(sendIndex + 1)]),
+          delivery: allIds.length ? 'partially-acknowledged' : fallback };
+        throw error;
+      }
+    }
+    const ids = acknowledged;
+    const natural = channel.natural.after(item, 'sent', cleanReply, ids);
+    channel.store.update(record, { state: 'sent', sentAt: channel.now(), acknowledgedMessageIds: ids,
+      deliveryParts: globalParts(deliveredParts), reason: undefined }, { natural });
     if (result.sessionId) channel.store.saveSession(record.contextKey, result.sessionId);
   } catch (error) {
     if (error?.code === 'STATE_WRITE_FAILED') throw error;

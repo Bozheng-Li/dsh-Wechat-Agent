@@ -45,14 +45,16 @@ test('quoted pictures do not start reference lookup, media downloads or backgrou
   assert.equal(f.requests[0].text, '只按我这句文字回答');
 });
 
-test('unsupported placeholders are recorded silently and do not replace the next readable request', async t => {
+test('unsupported placeholders send a fixed notice without invoking the model and do not replace the next readable request', async t => {
   const f = fixture(t), placeholder = { type: 'text', data: { text: '无法显示此消息，你目前使用的微信版本暂时不支持此类型的信息。' } };
   f.receive([placeholder]); f.receive([placeholder]); await f.channel.whenIdle();
-  assert.equal(f.requests.length, 0); assert.equal(f.sent.length, 0);
-  assert(f.store.data.records.every(record => record.state === 'skipped' && record.contentUnavailable));
+  assert.equal(f.requests.length, 0);
+  assert.equal(f.sent.length, 2);
+  assert(f.sent.every(payload => payload.message[0]?.data?.text === '这条消息我这边读不到。若是引用回复，请把要说的话直接发成文字。'));
+  assert(f.store.data.records.every(record => record.state === 'sent' && record.contentUnavailable && record.unavailableNotice));
   f.receive([{ type: 'text', data: { text: '把刚才的文档改好后返回' } }]); await f.channel.whenIdle();
   assert.equal(f.requests.length, 1); assert.equal(f.requests[0].text, '把刚才的文档改好后返回');
-  assert.equal(f.sent.length, 1);
+  assert.equal(f.sent.length, 3);
 });
 
 test('describing an original attachment still updates only its own pixels', () => {

@@ -31,7 +31,7 @@ export function tracePayload(value, { maxChars = 4 * 1024 * 1024, maxNodes = 500
       }
       const text = cleanText(input);
       const budget = Math.max(0, remaining); remaining -= text.length;
-      if (text.length > budget) { limited = true; return text.slice(0, budget) + '\n[内容超过单项记录上限]'; }
+      if (text.length > budget) { limited = true; return sliceText(text, budget) + '\n[内容超过单项记录上限]'; }
       return text;
     }
     if (typeof input === 'number') return Number.isFinite(input) ? input : null;
@@ -73,7 +73,15 @@ export function tracePayload(value, { maxChars = 4 * 1024 * 1024, maxNodes = 500
   return { value: visit(value), limited, binaryOmitted, credentialsHidden, reasoningOmitted };
 }
 
+/** Slice without splitting a surrogate pair, which would render as U+FFFD. */
+function sliceText(text, length) {
+  if (text.length <= length) return text;
+  let cut = Math.max(0, length);
+  if (cut > 0 && /[\uD800-\uDBFF]/.test(text[cut - 1])) cut -= 1;
+  return text.slice(0, cut);
+}
+
 export function traceSnippet(value, length = 180) {
   const clean = tracePayload(typeof value === 'string' ? value : '', { maxChars: 2000 }).value;
-  return clean.replace(/\s+/g, ' ').slice(0, length);
+  return sliceText(clean.replace(/\s+/g, ' '), length);
 }

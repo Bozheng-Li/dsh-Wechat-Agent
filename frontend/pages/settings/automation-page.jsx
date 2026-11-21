@@ -20,6 +20,15 @@ function AutomationGroup({ id, title, description, initialSection, children }) {
   </details>;
 }
 
+const toggles = [
+  { id: 'replies', key: 'enabled', title: '自动回复',
+    hints: ['按已授权会话的模式回复新消息，包含记忆整理与素材收集。', '已暂停回复新消息；授权、历史与定时任务照常保留。'] },
+  { id: 'schedules', key: 'schedules', title: '定时任务',
+    hints: ['按计划发送定时提醒与消息，会话仍需授权。', '已暂停所有定时任务，已有任务和时间设置保留。'] },
+  { id: 'moments', key: 'moments', title: '朋友圈自动功能',
+    hints: ['点赞、评论回复、自动互动、发布与素材整理按各自的设置执行。', '已暂停朋友圈自动功能，各分组的设置继续保留。'] },
+];
+
 export function AutomationSettings({ rpc, status, rows, target = {}, blocked, notice, onToggle, onNavigate, onBack, backLabel }) {
   const accountId = status.account?.id;
   const group = (id, title, description, content) => <AutomationGroup key={id} id={id} title={title} description={description}
@@ -27,16 +36,20 @@ export function AutomationSettings({ rpc, status, rows, target = {}, blocked, no
   const accountProps = { rpc, status, blocked };
   return <section className="wa-wb-page wa-automation-settings" data-testid="automation-settings-page">
     <Back onClick={onBack} label={backLabel} />
-    <PageHead icon="settings" title="自动功能" description="统一管理自动回复、朋友圈、记忆与素材。各组独立保存。">
+    <PageHead icon="settings" title="自动功能" description="分别控制自动回复、定时任务和朋友圈，各组独立保存。">
       <Button quiet icon="clock" onClick={() => onNavigate('time', 'automation')}>时间设置</Button>
     </PageHead>
-    <section className="wa-automation-master wa-section-space" aria-label="自动回复总开关">
-      <div><h2>自动回复总开关</h2><p className="wa-help">{status.settings.enabled
-        ? '按已授权会话的模式处理新消息，并允许定时任务和朋友圈自动功能运行。'
-        : '已暂停回复、定时发送和朋友圈自动执行，授权与已有记录继续保留。'}</p></div>
-      <label className="wa-toggle"><input type="checkbox" role="switch" aria-label="启用自动回复"
-        checked={status.settings.enabled} disabled={blocked || !accountId} onChange={event => onToggle(event.target.checked)} />
-        <span>{status.settings.enabled ? '已开启' : '已暂停'}</span></label>
+    <section className="wa-automation-master wa-section-space" aria-label="自动功能开关">
+      {toggles.map((item) => {
+        const on = (status.settings?.[item.key] ?? status.settings?.enabled) === true;
+        return <div className="wa-automation-switch" key={item.id} data-testid={'automation-switch-' + item.id}>
+          <div><h2>{item.title}</h2><p className="wa-help">{on ? item.hints[0] : item.hints[1]}</p></div>
+          <label className="wa-toggle"><input type="checkbox" role="switch" aria-label={'启用' + item.title}
+            data-testid={'automation-switch-input-' + item.id}
+            checked={on} disabled={blocked || !accountId} onChange={event => onToggle(item.id, event.target.checked)} />
+            <span>{on ? '已开启' : '已关闭'}</span></label>
+        </div>;
+      })}
     </section>
     <Notice notice={notice} area="automation" />
     <section className="wa-section-space" aria-label="当前微信账号自动功能">

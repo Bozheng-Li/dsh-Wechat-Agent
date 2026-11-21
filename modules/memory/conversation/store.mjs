@@ -33,6 +33,15 @@ function write(file, data) {
     throw new ChannelError('STATE_WRITE_FAILED', '记忆未能保存，请检查磁盘空间和记忆目录权限');
   }
 }
+/** File identity for cache validation: any external rewrite changes one of these. */
+function fileStamp(file) {
+  try {
+    const stat = fs.statSync(file);
+    return stat.mtimeMs + ':' + stat.size;
+  } catch {
+    return null;
+  }
+}
 
 
 
@@ -73,6 +82,10 @@ export class ConversationMemory {
     this.errors = new Map();
     this.compacting = new Set();
     this.compressionParts = new Map();
+    // Parsed documents, keyed by conversation key. Every caller still receives
+    // its own copy: replies, image notes and compaction compare snapshots, so a
+    // shared mutable object would erase their change detection.
+    this.documents = new Map();
     this.images = new ImageMemory(store, { now });
   }
   selector(input) {
@@ -90,11 +103,20 @@ export class ConversationMemory {
       throw new ChannelError('MEMORY_INVALID', '记忆目录超出当前记忆库范围');
     return target;
   }
+  remember(key, file, doc) {
+    this.documents.set(key, { file, stamp: fileStamp(file), doc: clone(doc) });
+    return doc;
+  }
   load(input, { incomingKey } = {}) {
     const selector = this.selector(input),
       file = this.file(selector),
-      known = this.index.conversations[selector.key];
-    let doc = read(file);
+      known = this.index.conversations[selector.key],
+      stamp = fileStamp(file),
+      cached = this.documents.get(selector.key);
+    // A valid entry already holds the bytes that are on disk, so a repeated call
+    // on the same message path costs one stat instead of a read and parse.
+    let doc =
+      cached && cached.file === file && cached.stamp === stamp ? clone(cached.doc) : read(file);
     if (doc) {
       if (
         doc.version !== 1 ||
@@ -114,7 +136,7 @@ export class ConversationMemory {
         doc.retentionVersion = 1;
         this.save(doc);
       }
-      return this.expire(doc, true);
+      return this.remember(selector.key, file, this.expire(doc, true));
     }
     const history = this.store.history(selector.accountId, selector.chatType, selector.peerId, 1000).map((entry) => {
       if (!entry.attachments?.length && entry.mediaOnly && /图片|表情/u.test(entry.text)) {
@@ -148,13 +170,17 @@ export class ConversationMemory {
     write(file, doc);
     this.index.conversations[selector.key] = { ...selector, folder: path.relative(this.root, path.dirname(file)) };
     write(this.indexFile, indexSnapshot(this.index));
-    return doc;
+    return this.remember(selector.key, file, doc);
   }
   save(doc) {
     assertConversationAuthorized(this.store, doc);
     doc.revision++;
     doc.updatedAt = this.now();
-    write(this.file(doc), doc);
+    const file = this.file(doc);
+    write(file, doc);
+    // Only a committed write may refresh the cache, so a failed save can never
+    // leave memory ahead of the bytes on disk.
+    this.remember(doc.key, file, doc);
   }
   saveIndex() { write(this.indexFile, indexSnapshot(this.index)); }
   expire(doc, persist = false) {
@@ -192,11 +218,23 @@ export class ConversationMemory {
   }
   append(input, entry) {
     const doc = this.load(input, { incomingKey: entry.key });
-    if (!doc.seen.includes(entry.key)) {
+    // `seen` is a bounded ring, so a key that already fell out of it is still
+    // deduplicated as long as the stored entries keep the message.
+    if (!doc.seen.includes(entry.key) && !doc.entries.some(row => row.key === entry.key)) {
       doc.entries.push({ ...clone(entry), rememberedAt: this.now() });
       doc.seen.push(entry.key);
       doc.seen = doc.seen.slice(-4000);
       this.save(doc);
+    } else if (entry.direction === 'outgoing' && entry.kind === 'reply' && entry.sourceKey) {
+      // A native echo may precede its structured ACK. Enrich only that exact
+      // still-retained message; never renew retention or recreate cleared data.
+      const index = doc.entries.findIndex(row => row.key === entry.key && row.messageId === entry.messageId &&
+        row.direction === 'outgoing' && row.senderId === entry.senderId);
+      if (index >= 0) {
+        const previous = doc.entries[index];
+        const next = { ...previous, ...clone(entry), rememberedAt: previous.rememberedAt ?? doc.createdAt };
+        if (JSON.stringify(previous) !== JSON.stringify(next)) { doc.entries[index] = next; this.save(doc); }
+      }
     }
     // A new conversation may have just seeded this exact message from its
     // archive during load(). It still needs to reach background memory queues.
@@ -232,12 +270,13 @@ export class ConversationMemory {
       if (memoryText(this.load(selector)).length >= this.windowChars(selector)) this.onPressure?.(selector);
   }
   snapshot(input, beforeKey) {
-    const doc = this.load(input);
+    let doc = this.load(input);
     if (beforeKey) {
       const position = doc.entries.findIndex((entry) => entry.key === beforeKey);
       // A queued turn must not acquire later room messages. Its snapshot is
-      // normally taken on receipt, before another compaction can cover it.
-      if (position >= 0) doc.entries = doc.entries.slice(0, position);
+      // normally taken on receipt, before another compaction can cover it, and
+      // it must never edit the cached document in place.
+      if (position >= 0) doc = { ...doc, entries: doc.entries.slice(0, position) };
     }
     return doc;
   }
@@ -375,9 +414,10 @@ export class ConversationMemory {
       (imageRequest
         ? entry.key === imageRequest.key && attachment.resourceId === imageRequest.resourceId
         : (!!attachment.error && !attachment.description) || needsClearerImage(attachment));
-    let imageGeneration;
+    let imageGeneration, imageState;
     try {
-      imageGeneration = this.images.load(input).generation;
+      imageState = this.images.load(input);
+      imageGeneration = imageState.generation;
     } catch {}
     const sources =
       imageRequest?.entry && !initial.entries.some((entry) => entry.key === imageRequest.key)
@@ -396,7 +436,7 @@ export class ConversationMemory {
               !!entry.messageId &&
               (!attachment.imageMemoryAttempted || retryFailed) &&
               (!!attachment.description || !attachment.error || retryFailed) &&
-              this.images.needsCapture(input, entry, attachment);
+              this.images.needsCapture(input, entry, attachment, imageState);
           } catch (error) {
             this.images.errors.set(
               initial.key,
@@ -547,6 +587,7 @@ export class ConversationMemory {
     this.compacting.add(key);
     this.errors.delete(key);
     try {
+      const before = memoryText(this.load(input)).length;
       for (let round = 0; round < 4; round++) {
         signal.throwIfAborted();
         const doc = this.load(input),
@@ -599,6 +640,13 @@ export class ConversationMemory {
           this.errors.delete(key);
           return;
         }
+      }
+      // Every round already saved its result, so a window that got shorter is a
+      // partial success: reporting failure made the UI show "压缩失败" and retry
+      // content that was already archived.
+      if (memoryText(this.load(input)).length < before) {
+        this.errors.delete(key);
+        return;
       }
       throw new ChannelError('MEMORY_COMPRESSION_FAILED', '压缩期间仍有新消息超过窗口，剩余内容已保留，将自动继续压缩');
     } catch (error) {

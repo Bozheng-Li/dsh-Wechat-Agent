@@ -1,4 +1,4 @@
-import { personaText, emptyNaturalSettings } from "../../shared/contracts.mjs";
+import { personaText, emptyNaturalSettings, conversationNaturalSettings } from "../../shared/contracts.mjs";
 import { splitLines } from "./conversations.mjs";
 
 export const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -6,6 +6,7 @@ export const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 export const personaDraft = (value = {}) => ({
   name: value.name || '微信助手',
   aliases: (value.aliases || []).join('\n'),
+  personaMode: value.personaMode || 'standard',
   prompt: personaText(value),
 });
 
@@ -18,6 +19,8 @@ export const modelDraft = (value = {}) => ({
   webSearch: value.webSearch ?? false,
   searchProvider: value.searchProvider ?? 'tavily',
   tavilyBaseURL: value.tavilyBaseURL ?? 'https://api.tavily.com',
+  deepseekBaseURL: value.deepseekBaseURL ?? 'https://api.deepseek.com/anthropic/v1',
+  deepseekModel: value.deepseekModel ?? 'deepseek-v4-flash',
 });
 
 export const storageDraft = (value = {}) => ({ basePath: value.basePath || '' });
@@ -46,7 +49,7 @@ export const naturalPayload = (value) =>
   );
 
 export const configDraft = (value = {}) => ({
-  mode: value.mode || 'default',
+  mode: value.mode === 'participate' ? 'natural' : value.mode || 'default',
   executionMode: value.executionMode || 'chat',
   workSenderIds: (value.workSenderIds || []).join('\n'),
   remoteEnabled: value.remoteEnabled ?? false,
@@ -59,7 +62,10 @@ export const configDraft = (value = {}) => ({
   memoryMode: value.memoryMode || 'always',
   memoryWindowChars: value.memoryWindowChars == null ? '' : String(value.memoryWindowChars),
   allowChatTasks: value.allowChatTasks ?? true,
-  natural: naturalDraft(value.natural),
+  natural: naturalDraft({
+    ...conversationNaturalSettings(value),
+    ...(value.mode === 'participate' ? { messageEnabled: true, timerEnabled: false, followupEnabled: false } : {}),
+  }),
 });
 
 export const configPayload = ({ personaMode, persona, ...value }) => ({

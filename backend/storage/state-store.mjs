@@ -15,8 +15,12 @@ import {
   validateSettings,
   validateModelChoice,
   validateGlobalPersona,
+  validatePersonaEntry,
+  validatePersonaList,
+  PERSONA_LIMIT,
   validateModelConfig,
   validateConversationSettings,
+  personaText,
   emptyNaturalState,
   validateNaturalState,
 } from "../../shared/contracts.mjs";
@@ -26,6 +30,63 @@ import { CONFIG_FIELDS } from '../config/repository.mjs';
 import { RoleCards } from './role-cards.mjs';
 import { roleCardSettings, roleCardSettingsRevision } from '../../shared/role-card-settings.mjs';
 import { revokedObjects, personAuthorized } from '../../shared/authorization.mjs';
+
+/** Markers kept on a view; symbol keys never reach the archive JSON. */
+const DIRTY = Symbol('unsaved changes');
+const WRITTEN = Symbol('written structure');
+
+/** Answers the archive layer's freshness check for a view that has unsaved state. */
+const UNSAVED = '\u0000unsaved';
+
+/**
+ * Structural fingerprint of what a conversation can be edited through outside the
+ * write paths below: the authorization purge replaces messages and records and
+ * resets progress. It is far cheaper than serializing the archive and only has to
+ * notice that something changed, so array identity, lengths and the small derived
+ * states are enough.
+ */
+function fingerprint(view) {
+  return {
+    messages: view.messages,
+    records: view.records,
+    messagesLength: view.messages.length,
+    recordsLength: view.records.length,
+    progress: JSON.stringify(view.progress ?? null),
+    natural: view.natural === undefined ? '' : JSON.stringify(view.natural),
+  };
+}
+function sameFingerprint(written, current) {
+  return Boolean(written) && written.messages === current.messages && written.records === current.records &&
+    written.messagesLength === current.messagesLength && written.recordsLength === current.recordsLength &&
+    written.progress === current.progress && written.natural === current.natural;
+}
+/** Claim and session maps hold numbers and the session objects of `data.sessions`. */
+function sameEntries(before, after) {
+  const keys = Object.keys(after);
+  return Object.keys(before).length === keys.length &&
+    keys.every((key) => Object.hasOwn(before, key) && before[key] === after[key]);
+}
+
+/**
+ * The last snapshot written for each conversation. Keeping the revision of that
+ * write, instead of a second full JSON copy of every view, is what lets a save skip
+ * unchanged conversations without serializing them. `archive.mjs` still compares a
+ * snapshot with the file, so `get` rebuilds one on demand: only for a view that
+ * still matches what was written, and never for one with unsaved state (which could
+ * not match a file anyway).
+ */
+class WrittenSnapshots extends Map {
+  constructor(store) {
+    super();
+    this.store = store;
+  }
+  get(key) {
+    if (!this.has(key)) return undefined;
+    const view = this.store.views.get(key);
+    if (!view || super.get(key) !== view.revision || this.store._changed(view)) return UNSAVED;
+    return JSON.stringify(view);
+  }
+}
 
 /**
  * config.yaml owns settings; channel.json owns the runtime/path index. Each conversation owns one
@@ -81,7 +142,7 @@ export class StateStore {
     try {
       this._writeAt(view, this.data.conversations[conversation.key].directory);
       this._saveRoot();
-      this.written.set(conversation.key, JSON.stringify(view));
+      this._committed(view);
       return view;
     } catch (error) {
       this.views.delete(conversation.key);
@@ -91,6 +152,57 @@ export class StateStore {
   }
   _writeAt(view, directory, expectedRevision) {
     return writeArchiveSnapshot(this, view, directory, expectedRevision);
+  }
+  /** Put a snapshot back where the index points after a failed directory switch. */
+  _restoreDirectory(view) {
+    try {
+      this._writeAt(view, this.data.conversations[view.key].directory);
+      this._committed(view);
+    } catch {
+      // The next save must rewrite unconditionally rather than trust a snapshot the
+      // index no longer points at.
+      this.written.delete(view.key);
+    }
+  }
+  /** Record that this conversation changed and the next save has to write it. */
+  _touch(view) {
+    view[DIRTY] = true;
+  }
+  /** Whether the view differs from the snapshot that was written last. */
+  _changed(view) {
+    return view[DIRTY] === true || !sameFingerprint(view[WRITTEN], fingerprint(view));
+  }
+  /** Whether `save()` still has to write this conversation. */
+  _pending(view) {
+    return this._changed(view) || !this.written.has(view.key);
+  }
+  /** Accept the current content as written and keep which revision it was. */
+  _committed(view) {
+    view[DIRTY] = false;
+    view[WRITTEN] = fingerprint(view);
+    this._writtenSnapshots().set(view.key, view.revision);
+  }
+  /**
+   * State loading seeds `written` with a serialized copy of every conversation.
+   * Compare each view once here instead of on every save, then keep revisions.
+   */
+  _writtenSnapshots() {
+    if (this.written instanceof WrittenSnapshots) return this.written;
+    const seeded = this.written,
+      snapshots = new WrittenSnapshots(this);
+    this.written = snapshots;
+    for (const [key, snapshot] of seeded) {
+      const view = this.views.get(key);
+      if (!view) continue;
+      // Loaded views can already be edited (interrupted sends are reset to
+      // unknown), so only a view that still equals its snapshot starts clean.
+      if (typeof snapshot === 'string' && JSON.stringify(view) === snapshot) this._committed(view);
+      else {
+        this._touch(view);
+        snapshots.set(key, view.revision);
+      }
+    }
+    return snapshots;
   }
   _rootSnapshot() {
     const snapshot = {
@@ -105,6 +217,11 @@ export class StateStore {
   _saveRoot() {
     const snapshot = this._rootSnapshot(),
       serialized = JSON.stringify(snapshot);
+    // Only the indented copy that is actually written is serialized again; the
+    // compact form is the one `rootWritten` (and a workspace migration) compares.
+    // channel.json is message state, not configuration: `commit` verifies the files
+    // on disk only when it replaces config.yaml, so an owner's manual YAML edit
+    // stops the next configuration write instead of freezing auto replies.
     this.config.commit(this.config.snapshot(this.data), serialized !== this.rootWritten
       ? [{ file: this.file, bytes: Buffer.from(JSON.stringify(snapshot, null, 2) + '\n') }] : []);
     this.rootWritten = serialized;
@@ -113,20 +230,26 @@ export class StateStore {
     return withSourceLocks(this, views, operation);
   }
   save() {
+    this._writtenSnapshots();
     for (const [key, view] of this.views) {
-      view.seen = Object.fromEntries(
-        Object.entries(this.data.seen).filter(([claim]) => this.claimOwners.get(claim) === key)
-      );
-      view.sessions = Object.fromEntries(
-        Object.entries(this.data.sessions).filter(([context]) => this.contextOwners.get(context) === key)
-      );
-      const comparable = JSON.stringify(view);
-      if (comparable === this.written.get(key)) continue;
+      const seen = Object.fromEntries(
+          Object.entries(this.data.seen).filter(([claim]) => this.claimOwners.get(claim) === key)
+        ),
+        sessions = Object.fromEntries(
+          Object.entries(this.data.sessions).filter(([context]) => this.contextOwners.get(context) === key)
+        );
+      // Claims and sessions are derived here, so a change in either marks the view.
+      if (!sameEntries(view.seen, seen) || !sameEntries(view.sessions, sessions)) this._touch(view);
+      view.seen = seen;
+      view.sessions = sessions;
+      // Unchanged conversations are skipped without serializing them; see
+      // `_pending` and WrittenSnapshots.
+      if (!this._pending(view)) continue;
       const revision = view.revision;
       view.revision++;
       try {
         this._writeAt(view, this.data.conversations[key].directory, this.written.has(key) ? revision : undefined);
-        this.written.set(key, JSON.stringify(view));
+        this._committed(view);
       } catch (error) {
         view.revision = revision;
         if (error.code === 'STATE_WRITE_FAILED') throw error;
@@ -231,8 +354,83 @@ export class StateStore {
   modelChoice() {
     return clone(this.data.modelChoice ?? null);
   }
+  /** Named personas sit beside the active one; `data.persona` mirrors the active entry. */
+  personaEntries() {
+    const stored = Array.isArray(this.data.personas) ? this.data.personas : [];
+    if (stored.length)
+      return stored.map(entry => ({ id: entry.id, name: entry.name, source: entry.source,
+        createdAt: entry.createdAt, updatedAt: entry.updatedAt, persona: clone(entry.persona),
+        ...(entry.provenance ? { provenance: clone(entry.provenance) } : {}) }));
+    // Older workspaces hold a single persona; present it as one entry.
+    const legacy = clone(this.data.persona ?? defaults.persona());
+    return [{ id: 'default', name: legacy.name || '微信助手', source: 'manual', createdAt: 0, persona: legacy }];
+  }
+  activePersonaId() {
+    const entries = this.personaEntries();
+    return (entries.find(entry => entry.id === this.data.activePersonaId) || entries[0])?.id ?? null;
+  }
   persona() {
+    const stored = Array.isArray(this.data.personas) ? this.personaEntries() : [];
+    if (stored.length) {
+      const active = stored.find(entry => entry.id === this.activePersonaId());
+      return clone(active?.persona ?? defaults.persona());
+    }
     return clone(this.data.persona ?? defaults.persona());
+  }
+  personasView() {
+    const entries = this.personaEntries();
+    return {
+      activeId: this.activePersonaId(),
+      items: entries.map(entry => ({ id: entry.id, name: entry.name, source: entry.source,
+        createdAt: entry.createdAt, updatedAt: entry.updatedAt || entry.createdAt,
+        chars: Array.from(personaText(entry.persona)).length })),
+    };
+  }
+  _writePersonas(list, activeId) {
+    const personas = validatePersonaList(list);
+    const active = personas.find(entry => entry.id === activeId) || personas[0];
+    const before = { personas: this.data.personas, activePersonaId: this.data.activePersonaId, persona: this.data.persona };
+    this.data.personas = personas;
+    this.data.activePersonaId = active?.id ?? personas[0].id;
+    this.data.persona = clone(active?.persona ?? defaults.persona());
+    try {
+      this.save();
+    } catch (error) {
+      this.data.personas = before.personas;
+      if (before.activePersonaId === undefined) delete this.data.activePersonaId;
+      else this.data.activePersonaId = before.activePersonaId;
+      this.data.persona = before.persona;
+      throw error;
+    }
+    return this.personasView();
+  }
+  _personaId(entries) {
+    let index = 1;
+    while (entries.some(entry => entry.id === `p${index}`)) index += 1;
+    return `p${index}`;
+  }
+  createPersona({ persona: input, name, source = 'manual', provenance }) {
+    const entries = this.personaEntries();
+    if (entries.length >= PERSONA_LIMIT)
+      throw new ChannelError('PERSONA_LIMIT', `最多保留 ${PERSONA_LIMIT} 个人设，请先删掉一个`);
+    const persona = validateGlobalPersona(input);
+    const id = this._personaId(entries);
+    const entry = validatePersonaEntry({ id, name: name || persona.name || '新人设', source, createdAt: Date.now(), persona, provenance });
+    return this._writePersonas([...entries, entry], id);
+  }
+  selectPersona(id) {
+    const entries = this.personaEntries();
+    if (!entries.some(entry => entry.id === id))
+      throw new ChannelError('PERSONA_NOT_FOUND', '人设不存在，请刷新后重试');
+    return this._writePersonas(entries, id);
+  }
+  deletePersona(id) {
+    const entries = this.personaEntries();
+    const remaining = entries.filter(entry => entry.id !== id);
+    if (remaining.length === entries.length) throw new ChannelError('PERSONA_NOT_FOUND', '人设不存在，请刷新后重试');
+    if (!remaining.length) throw new ChannelError('PERSONA_REQUIRED', '至少要保留一个人设');
+    const activeId = this.activePersonaId() === id ? remaining[0].id : this.activePersonaId();
+    return this._writePersonas(remaining, activeId);
   }
   conversationPersona(accountId, chatType, peerId) {
     return this.persona();
@@ -283,7 +481,16 @@ export class StateStore {
     return clone(value);
   }
   setPersona(input) {
-    return this._setting('persona', input, validateGlobalPersona);
+    const persona = validateGlobalPersona(input);
+    // Keep writing the single legacy field until a real library exists: adding
+    // `personas` here would change persisted data for owners who never asked for it.
+    if (!Array.isArray(this.data.personas) || !this.data.personas.length)
+      return this._setting('persona', persona, validateGlobalPersona);
+    const entries = this.personaEntries(), activeId = this.activePersonaId();
+    if (!activeId) return this.createPersona({ persona, source: 'manual' });
+    return this._writePersonas(entries.map(entry => entry.id === activeId
+      ? { ...entry, persona, updatedAt: Date.now() }
+      : entry), activeId);
   }
   setModelConfig(input) {
     return this._setting('modelConfig', input, validateModelConfig);
@@ -361,6 +568,7 @@ export class StateStore {
         if (beforeArchives === undefined) delete metadata.archiveDirectories; else metadata.archiveDirectories = beforeArchives;
         if (beforeConfig === undefined) delete this.data.conversationConfigs[conversation.key];
         else this.data.conversationConfigs[conversation.key] = beforeConfig;
+        this._restoreDirectory(view);
         throw error;
       }
       return clone(config);
@@ -401,6 +609,7 @@ export class StateStore {
           if (archives === undefined) delete this.data.conversations[key].archiveDirectories;
           else this.data.conversations[key].archiveDirectories = archives;
         }
+        for (const [key, view] of this.views) if (oldDirectories.has(key)) this._restoreDirectory(view);
         throw error;
       }
       return this.storageSettings();
@@ -465,7 +674,10 @@ export class StateStore {
         if (next !== entry) changed = true;
         return next;
       });
-      if (changed) this.save();
+      if (changed) {
+        this._touch(view);
+        this.save();
+      }
     }
     this.memory?.describeImageReferences(input, image);
   }
@@ -504,16 +716,22 @@ export class StateStore {
       if (observation.message && !view.messages.some((message) => message.key === key)) {
         view.messages.push(this._observation(key, target.accountId, observation.message, at));
         if (view.messages.length > historyLimit) view.messages = view.messages.slice(-historyLimit);
+        this._touch(view);
       }
       if (observation.progress !== undefined) {
         view.progress = clone(observation.progress);
+        this._touch(view);
       }
-      if (natural !== undefined) view.natural = natural;
+      if (natural !== undefined) {
+        view.natural = natural;
+        this._touch(view);
+      }
     }
     if (record) {
       this.data.records.push(record);
       if (view) {
         view.records.push(record);
+        this._touch(view);
         if (record.contextKey) this.contextOwners.set(record.contextKey, target.key);
       }
     }
@@ -531,8 +749,12 @@ export class StateStore {
       view = target ? this._ensure(target) : undefined;
     this.data.records.push(record);
     if (view) {
-      if (natural !== undefined) view.natural = natural;
+      if (natural !== undefined) {
+        view.natural = natural;
+        this._touch(view);
+      }
       view.records.push(record);
+      this._touch(view);
       if (record.contextKey) this.contextOwners.set(record.contextKey, target.key);
       if (Object.hasOwn(this.data.seen, record.key)) this.claimOwners.set(record.key, target.key);
     }
@@ -545,6 +767,8 @@ export class StateStore {
     Object.assign(record, fields, { updatedAt: Date.now() });
     const target = recordInfo(record),
       view = target ? this.views.get(target.key) : undefined;
+    // The record is part of the archive too; the assignment above is always a change.
+    if (view) this._touch(view);
     if (view && natural !== undefined) view.natural = natural;
     let observed;
     if (view && observation.message && !view.messages.some(message => message.key === record.key)) {
@@ -555,52 +779,50 @@ export class StateStore {
       view.messages.splice(index < 0 ? view.messages.length : index, 0, observed);
       if (view.messages.length > historyLimit) view.messages = view.messages.slice(-historyLimit);
     }
-    if (
-      view &&
-      !record.toolProgress &&
-      !record.remoteQuery &&
-      !record.workRequest && !record.workJobId &&
-      !record.modeControl &&
-      record.state === 'sent' &&
-      typeof record.reply === 'string' &&
-      (record.reply || record.replyMedia) &&
-      record.acknowledgedMessageIds?.length &&
-      !view.messages.some((message) => message.sourceKey === record.key)
-    ) {
-      view.messages.push({
-        key: 'reply:' + record.key,
-        sourceKey: record.key,
-        messageId: record.acknowledgedMessageIds[0],
-        direction: 'outgoing',
-        senderId: record.accountId,
-        senderName: record.agentName || this.persona().name,
-        text:
-          record.reply || `[${record.replyMedia.kind === 'sticker' ? '表情包' : '图片'}：${record.replyMedia.name}]`,
-        ...(record.replyMedia
-          ? {
-              attachments: [
-                {
-                  assetId: record.replyMedia.id,
-                  type: record.replyMedia.kind === 'sticker' ? 'face' : 'image',
-                  description: record.replyMedia.description || record.replyMedia.name,
-                },
-              ],
-            }
-          : {}),
-        time: record.updatedAt,
-        observedAt: record.updatedAt,
-        kind: 'reply',
-        replyTo: record.senderId,
-        mode: record.mode || 'default',
-      });
+    const confirmed = [];
+    if (view && !record.toolProgress && !record.remoteQuery && !record.workRequest && !record.workJobId && !record.modeControl) {
+      const validId = id => typeof id === 'string' && !!id && id !== '0';
+      const ids = new Set((record.acknowledgedMessageIds ?? []).filter(validId));
+      let receipts = Array.isArray(record.deliveryParts) ? record.deliveryParts.filter(part =>
+        part?.state === 'acknowledged' && validId(part.serverMessageId) && ids.has(part.serverMessageId)) : [];
+      // Legacy single ACK records remain readable, but ambiguous multi-ACK
+      // records must never fabricate one aggregate bubble against ACK[0].
+      if (!record.replyPlan && !receipts.length && record.state === 'sent' && ids.size === 1 && (record.reply || record.replyMedia))
+        receipts = [{ index: 0, type: record.reply ? 'text' : record.replyMedia.kind === 'sticker' ? 'face' : 'image',
+          state: 'acknowledged', serverMessageId: [...ids][0], text: record.reply, observedAt: record.sentAt ?? record.updatedAt }];
+      for (const part of receipts) {
+        const plan = record.replyPlan?.find(plan => plan.index === part.planIndex);
+        // Native echoes can arrive BEFORE send resolves. Reconcile by reliable
+        // server id, not record sourceKey, and never append the echo twice.
+        const existing = view.messages.find(message => message.direction === 'outgoing' && message.messageId === part.serverMessageId);
+        const media = ['image', 'face'].includes(part.type) ? plan?.media ?? record.replyMedia : undefined;
+        const unambiguous = receipts.filter(receipt => receipt.planIndex === part.planIndex).length === 1;
+        const text = typeof part.text === 'string' ? part.text : part.type === 'text' && unambiguous ? plan?.text : undefined;
+        if (!existing && text === undefined && !media) continue;
+        const observedAt = Number.isFinite(part.observedAt) ? part.observedAt : record.acknowledgedAt ?? record.sentAt ?? record.updatedAt;
+        const serverTime = Number.isFinite(part.time) && part.time > 0 ? (part.time > 1e12 ? part.time : part.time * 1000) : undefined;
+        const entry = {
+          ...(existing ?? {}), key: existing?.key ?? 'reply:' + record.key + ':' + part.serverMessageId,
+          sourceKey: record.key, messageId: part.serverMessageId, direction: 'outgoing',
+          senderId: record.accountId, senderName: record.agentName || this.persona().name,
+          // An actual native echo is authoritative for prefixes and wire chunks.
+          text: existing?.text || text || `[${media?.kind === 'sticker' ? '表情包' : '图片'}：${media?.name || ''}]`,
+          ...(media ? { attachments: [{ assetId: media.id, type: part.type,
+            description: media.description || media.name, ...(media.generation ? { generation: clone(media.generation) } : {}) }] } : {}),
+          time: serverTime ?? existing?.time ?? observedAt,
+          ...(!serverTime && !existing ? { timeSource: 'ack-observed' } : {}),
+          observedAt: existing?.observedAt ?? observedAt, kind: 'reply', replyTo: record.senderId, mode: record.mode || 'default',
+        };
+        if (existing) {
+          if (JSON.stringify(existing) === JSON.stringify(entry)) continue;
+          Object.assign(existing, entry); confirmed.push(existing);
+        } else { view.messages.push(entry); confirmed.push(entry); }
+      }
       if (view.messages.length > historyLimit) view.messages = view.messages.slice(-historyLimit);
     }
     this.save();
     if (observed) this.memory?.append(target, observed);
-    if (view && record.state === 'sent') {
-      const entry = view.messages.find((message) => message.sourceKey === record.key);
-      if (entry) this.memory?.append(target, entry);
-    }
+    for (const entry of confirmed) this.memory?.append(target, entry);
   }
   session(contextKey) {
     return this.data.sessions[contextKey]?.id;
@@ -693,6 +915,7 @@ export class StateStore {
       view = this._ensure(info(accountId, chatType, peerId));
     const previous = view.natural;
     view.natural = natural;
+    this._touch(view);
     try {
       this.save();
     } catch (error) {
@@ -711,7 +934,11 @@ export class StateStore {
       )
         continue;
       view.progress = { count: 0, target: null };
-      if (resetNatural && view.natural !== undefined) view.natural = emptyNaturalState();
+      this._touch(view);
+      if (resetNatural && view.natural !== undefined) {
+        view.natural = emptyNaturalState();
+        this._touch(view);
+      }
     }
     this.save();
   }

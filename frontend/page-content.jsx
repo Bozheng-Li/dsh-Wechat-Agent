@@ -8,7 +8,7 @@ import { DigestsPage } from "./pages/digests/page.jsx";
 import { peerId, peerType, splitLines } from "./shared/conversations.mjs";
 import { same, personaDraft, modelDraft, storageDraft, configDraft, configPayload, remoteDraft } from "./shared/drafts.mjs";
 import { AdministratorSettings } from './pages/settings/administrators-page.jsx';
-import { call } from "./shared/rpc.mjs";
+import { call, withTimeout, memoryRpcTimeoutMs } from "./shared/rpc.mjs";
 import { PageHead } from "./components/page-ui.jsx";
 import { Overview } from "./pages/overview/page.jsx";
 import { Authorization } from "./pages/conversations/authorization-page.jsx";
@@ -99,7 +99,7 @@ export function PanelContent({ connection, catalog, state }) {
   else if (page === 'overview')
     content = <Overview status={status} busy={busy} blocked={blocked} onAction={action} onNavigate={navigate} />;
   else if (page === 'traces') content = <ExecutionTracesPage key={status.account?.id || 'offline'} status={status}
-    rpc={(endpoint, payload, signal) => call(connection, endpoint, payload, signal || AbortSignal.timeout(120000))} />;
+    rpc={(endpoint, payload, signal) => call(connection, endpoint, payload, withTimeout(signal, 120000))} />;
   else if (['diagnostics', 'digests', 'work', 'moments'].includes(page)) {
     const Page = { diagnostics: DiagnosticsPage, digests: DigestsPage, work: WorkPage, moments: MomentsPage }[page];
     content = (
@@ -136,11 +136,19 @@ export function PanelContent({ connection, catalog, state }) {
   else if (page === 'settings') content = <SettingsIndex status={status} onNavigate={navigate} />;
   else if (page === 'automation') content = <AutomationSettings key={status.account?.id || 'offline'} status={status} rows={recordRows}
     target={automationTarget} blocked={blocked} notice={notice} onNavigate={navigate} onBack={back} backLabel={backLabel}
-    rpc={(endpoint, payload, signal) => call(connection, endpoint, payload, signal || AbortSignal.timeout(120000))}
-    onToggle={enabled => saveSettings({ ...statusRef.current.settings, enabled }, { area: 'automation',
-      text: enabled ? '自动回复已开启，开始处理之后收到的新消息。' : '自动回复已暂停，授权与记录继续保留。' })} />;
+    rpc={(endpoint, payload, signal) => call(connection, endpoint, payload, withTimeout(signal, 120000))}
+    onToggle={(feature, enabled) => {
+      const current = statusRef.current.settings || {},
+        next = { ...current, schedules: current.schedules ?? current.enabled, moments: current.moments ?? current.enabled };
+      if (feature === 'replies') next.enabled = enabled; else next[feature] = enabled;
+      saveSettings(next, { area: 'automation', text: {
+        replies: enabled ? '自动回复已开启，开始处理之后收到的新消息。' : '自动回复已暂停，定时任务和朋友圈按各自的开关运行。',
+        schedules: enabled ? '定时任务已开启，按计划发送。' : '定时任务已暂停，已有任务和时间设置继续保留。',
+        moments: enabled ? '朋友圈自动功能已开启。' : '朋友圈自动功能已暂停，各分组设置继续保留。',
+      }[feature] });
+    }} />;
   else if (page === 'time') content = <TimeSettings key={status.account?.id || 'offline'} status={status} blocked={blocked}
-    rpc={(endpoint, payload, signal) => call(connection, endpoint, payload, AbortSignal.any([signal, AbortSignal.timeout(120000)]))} onBack={back} backLabel={backLabel} />;
+    rpc={(endpoint, payload, signal) => call(connection, endpoint, payload, withTimeout(signal, 120000))} onBack={back} backLabel={backLabel} />;
   else if (page === 'image-generation') content = <ImageGenerationSettings status={status} blocked={blocked}
     onAction={(endpoint, payload) => action(endpoint, payload, { area: 'image-generation' })} onBack={back} backLabel={backLabel} />;
   else if (page === 'identity')
@@ -186,6 +194,8 @@ export function PanelContent({ connection, catalog, state }) {
                 webSearch: draftsRef.current.model.webSearch,
                 searchProvider: draftsRef.current.model.searchProvider,
                 tavilyBaseURL: draftsRef.current.model.tavilyBaseURL,
+                deepseekBaseURL: draftsRef.current.model.deepseekBaseURL,
+                deepseekModel: draftsRef.current.model.deepseekModel,
                 maxTokens:
                   draftsRef.current.model.maxTokens.trim() === '' ? null : Number(draftsRef.current.model.maxTokens),
                 temperature:
@@ -234,6 +244,7 @@ export function PanelContent({ connection, catalog, state }) {
     content = (
       <PersonaSettings
         draft={drafts.persona}
+        personas={status.personas}
         blocked={blocked}
         busy={busyArea === 'persona' ? busy : ''}
         dirty={!same(drafts.persona, personaDraft(status.persona))}
@@ -243,8 +254,10 @@ export function PanelContent({ connection, catalog, state }) {
           action(
             'persona.save',
             {
+              id: status.personas?.activeId,
               persona: {
-                ...draftsRef.current.persona,
+                personaMode: draftsRef.current.persona.personaMode || 'standard',
+                prompt: draftsRef.current.persona.prompt,
                 name: draftsRef.current.persona.name.trim(),
                 aliases: splitLines(draftsRef.current.persona.aliases),
               },
@@ -252,12 +265,17 @@ export function PanelContent({ connection, catalog, state }) {
             { area: 'persona', force: ['persona'], text: '全局助手设定已保存，所有会话的后续回复共用。' }
           )
         }
-        onReset={() => {
-          setDraft('persona', personaDraft(status.persona));
-        }}
+        onReset={() => setDraft('persona', personaDraft(status.persona))}
         onBack={back}
         backLabel={backLabel}
         onRestoreDefault={restoreDefaultPersona}
+        rpc={(endpoint, payload, signal) => call(connection, endpoint, payload, signal)}
+        accountId={status.account?.id}
+        onSelectPersona={(id) => action('persona.select', { id }, { area: 'persona', force: ['persona'], text: '已切换人设，之后的回复使用新的人设。' })}
+        onCreatePersona={({ persona, name, source = 'distilled' }) =>
+          action('persona.create', { persona, name, source: source === 'manual' ? 'manual' : 'distilled' },
+            { area: 'persona', force: ['persona'], text: '新人设已保存并选用，之后的回复使用它。' })}
+        onDeletePersona={(id) => action('persona.delete', { id }, { area: 'persona', force: ['persona'], text: '人设已删除。' })}
       />
     );
   else if (page === 'storage')
@@ -307,7 +325,7 @@ export function PanelContent({ connection, catalog, state }) {
               chatType: peerType(detail),
               peerId: peerId(detail),
               config: configPayload({ ...draftsRef.current.conversation,
-                natural: preserveTimeValues('natural', draftsRef.current.conversation.natural, detail.config.natural) }),
+                natural: preserveTimeValues('natural', draftsRef.current.conversation.natural, detail?.config?.natural ?? {}) }),
               preserveTimeSettings: true,
             },
             { area: 'conversation', force: ['conversation'], text: '此会话的设置已保存，之后的回复使用新设置。' }
@@ -339,21 +357,7 @@ export function PanelContent({ connection, catalog, state }) {
         key={status.account?.id || 'offline'}
         tab={memoryTab}
         setTab={setMemoryTab}
-        rpc={(endpoint, payload, signal) =>
-          call(
-            connection,
-            endpoint,
-            payload,
-            signal ||
-              AbortSignal.timeout(
-                ['memory.compress', 'memory.retryImages', 'memory.global.extract', 'memory.images.import'].includes(
-                  endpoint
-                )
-                  ? 300000
-                  : 30000
-              )
-          )
-        }
+        rpc={(endpoint, payload, signal) => call(connection, endpoint, payload, withTimeout(signal, memoryRpcTimeoutMs(endpoint)))}
         status={status}
         rows={recordRows}
         initialPeer={detail}

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { ChannelError, validateNaturalSettings, workSettings } from '../../shared/contracts.mjs';
+import { ChannelError, validateNaturalSettings, workSettings, participationMode, participationTriggers } from '../../shared/contracts.mjs';
 import { TIME_FIELDS, timeSettings, timeValue, validateTimeValues, withTimeValues } from '../../shared/time-settings.mjs';
 import { roleCardSettings } from '../../shared/role-card-settings.mjs';
 import { imageGenerationSettings } from '../../shared/image-generation.mjs';
@@ -30,20 +30,20 @@ function groups(context, payload, signal) {
   add('memory', 'memory', '会话与长期记忆保存期限', '全局', store.config.section('memory'), value => commit('memory', value));
   add('image-defaults', 'images', '图片记忆默认保存期限', '全局', store.config.section('imageMemoryDefaults'), value => commit('imageMemoryDefaults', validateImageMemorySettings(value)));
   const defaults = store.config.section('conversationDefaults');
-  add('natural-defaults', 'natural', '自然陪聊默认节奏', '全局', defaults.natural, value => {
+  add('natural-defaults', 'natural', '群聊参与默认节奏', '全局', defaults.natural, value => {
     commit('conversationDefaults', { ...defaults, natural: validateNaturalSettings(value) });
     for (const peer of Object.values(store.data.conversations).filter(peer => peer.chatType === 'group' && !store.data.conversationConfigs[peer.key])) reschedule(peer);
   });
   const image = store.config.section('imageGeneration');
   for (const provider of image.providers) add('provider:' + provider.id, 'provider', '生图接口 · ' + (provider.name || provider.id), '全局', provider, async value => {
     commit('imageGeneration', imageGenerationSettings({ ...image, providers: image.providers.map(row => row.id === provider.id ? value : row) }));
-    await channel.work.imageGeneration.refreshCredential();
+    await (channel.imageGeneration ?? channel.work?.imageGeneration)?.refreshCredential();
   });
   const reschedule = scope => {
     const config = store.conversationSettings(scope.accountId, scope.chatType, scope.peerId);
-    if (config.mode === 'natural') {
+    if (participationMode(config.mode)) {
       const state = channel.natural.state(scope, config);
-      state.nextCheckAt = channel.now() + channel.natural.delay(config, state);
+      state.nextCheckAt = channel.natural.nextCheck(config, state);
       channel.natural.save(scope, state);
     }
   };
@@ -84,10 +84,10 @@ function groups(context, payload, signal) {
   if (payload.peerId) {
     const scope = conversation(payload), config = store.conversationSettings(scope.accountId, scope.chatType, scope.peerId);
     if (scope.chatType === 'group') {
-      const natural = config.mode === 'natural' ? channel.natural.summary(scope) : null;
-      add('natural', 'natural', '此群的自然陪聊节奏', '所选会话', config.natural, value => {
+      const natural = participationMode(config.mode) ? channel.natural.summary(scope) : null;
+      add('natural', 'natural', '此群的参与节奏', '所选会话', config.natural, value => {
         store.setConversationSettings(scope.accountId, scope.chatType, scope.peerId, { ...config, natural: validateNaturalSettings(value) }); reschedule(scope);
-      }, natural ? { at: natural.nextCheckAt, enabled: true, running: natural.pending, paused: natural.paused, action: '判断' } : undefined);
+      }, natural ? { at: natural.nextCheckAt, enabled: participationTriggers(config).timer, running: natural.pending, paused: natural.paused, action: '判断' } : undefined);
     }
     for (const collection of ['conversation', 'generated']) {
       const input = { ...scope, collection }, state = channel.imageMemory.load(input);

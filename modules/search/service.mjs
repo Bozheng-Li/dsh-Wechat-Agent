@@ -120,6 +120,7 @@ export class SearchService {
     return { ...this.credentials };
   }
   async configureCredential(provider, apiKey, signal) {
+    provider = provider === 'deepseek' ? 'dsh' : provider;
     if (
       !Object.hasOwn(SEARCH_CREDENTIALS, provider) ||
       typeof apiKey !== 'string' ||
@@ -139,15 +140,20 @@ export class SearchService {
     await this.refreshCredentials();
   }
   status() {
-    return { credentialStore: !!this.ctx?.credentials?.set, credentials: { ...this.credentials } };
+    return { credentialStore: !!this.ctx?.credentials?.set, credentials: { ...this.credentials, deepseek: this.credentials.dsh } };
   }
   forConfig(config = {}, { assertAllowed = () => {} } = {}) {
-    const selected = config.searchProvider ?? 'tavily',
-      baseURL = config.tavilyBaseURL ?? DEFAULT_TAVILY_URL;
+    const settings = structuredClone(config), requested = settings.searchProvider ?? 'tavily';
+    const selected = requested === 'deepseek' ? 'dsh' : requested;
+    const baseURL = settings.tavilyBaseURL ?? DEFAULT_TAVILY_URL;
     return { search: (request, signal) => searchWithFallback({ primary: selected, request, signal, timeoutMs: this.getAttemptTimeoutMs(), assertAllowed,
-      search: (provider, query, abort, options) => this.search(provider, baseURL, query, abort, options) }) };
+      search: (provider, query, abort, options) => this.search(provider, baseURL, query, abort, {
+        ...options, requireCredential: options.requireCredential || requested === 'deepseek' && provider === 'dsh',
+        deepseekBaseURL: settings.deepseekBaseURL, deepseekModel: settings.deepseekModel,
+      }) }) };
   }
-  async search(provider, baseURL, request, signal, { requireCredential = false } = {}) {
+  async search(provider, baseURL, request, signal, { requireCredential = false, deepseekBaseURL, deepseekModel } = {}) {
+    provider = provider === 'deepseek' ? 'dsh' : provider;
     signal?.throwIfAborted();
     const ref = SEARCH_CREDENTIALS[provider];
     if (!ref) throw new ChannelError('INVALID_SEARCH_CONFIG', '请选择 DeepSeek 原生搜索或 Tavily。');
@@ -185,8 +191,8 @@ export class SearchService {
       signal?.throwIfAborted();
       const nativeProvider = new native.DeepSeekSearchProvider(() => ({
         apiKey,
-        baseURL: native.DEEPSEEK_DEFAULT_BASE_URL,
-        model: native.DEEPSEEK_DEFAULT_MODEL,
+        baseURL: deepseekBaseURL ? searchBaseURL(deepseekBaseURL, 'DeepSeek') : native.DEEPSEEK_DEFAULT_BASE_URL,
+        model: deepseekModel || native.DEEPSEEK_DEFAULT_MODEL,
         apiVersion: native.DEEPSEEK_DEFAULT_API_VERSION,
         maxTokens: native.DEEPSEEK_DEFAULT_MAX_TOKENS,
         maxUses: 5,

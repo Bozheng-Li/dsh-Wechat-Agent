@@ -10,15 +10,68 @@ const TOPICS = {
   work: /工作|项目|预算|汇报|会议|客户|报告|资料|排版|进度|同事|方案|文档/u,
   schedule: /约|安排|时间|几点|几号|几月|生日|纪念日|星期|周[一二三四五六日末]|明天|下周|见面|碰面|到达|集合/u,
   location: /城市|地址|住|搬家|快递|高铁|车站|机场|出差|接站|地铁/u,
-  interests: /电影|喜剧|恐怖|运动|阅读|书|球|跑步|娱乐|爱好|放松|消遣/u,
+  interests: /电影|喜剧|恐怖|运动|阅读|书|球|跑步|娱乐|爱好|放松|消遣|音乐|吉他|乐器|钢琴|演奏/u,
   communication: /称呼|名字|昵称|回复|说话|聊天|语气|结论|细节|安慰|难受/u,
 };
 const LABELS = { food: '餐食', drink: '饮品', work: '工作', schedule: '约定', location: '地点', interests: '兴趣', communication: '称呼' };
 const topicsFor = text => Object.entries(TOPICS).filter(([, pattern]) => pattern.test(text)).map(([topic]) => topic);
-const quietTurn = query => /^(?:(?:谢谢你?|多谢你?啦?|谢啦|收到|好的|嗯嗯|早安|晚安|早|哈哈|行|先这样))+$/u.test(query.trim().replace(/[！!。.,，\s~～]/gu, ''));
+const quietTurn = query => /^(?:(?:谢谢你?|多谢你?啦?|谢啦|收到|好的|好嘞|好|嗯+|哦+|明白了?|知道了|早安|晚安|早|哈哈|行|先这样))+$/u.test(query.trim().replace(/[！!。.,，\s~～]/gu, ''));
 const impersonalTurn = query => /(?:只回数字|计算|乘以|乘\d|\d乘|翻译|这段代码|这个函数|正则表达式|写个脚本)/u.test(query) && !/我的|按我|替我|偏好|忌口|记得/u.test(query);
 const quoted = value => value.replace(/[“「『][^”」』]*[”」』]|"[^"]*"|`[^`]*`/gu, '');
 const clipped = (value, length) => [...String(value)].slice(0, length).join('');
+const historyTime = value => {
+  if (value == null || value === '') return NaN;
+  if (typeof value === 'string' && !/^\d+(?:\.\d+)?$/u.test(value)) return Date.parse(value);
+  const number = Number(value);
+  return number >= 1e9 && number < 1e12 ? number * 1000 : number;
+};
+
+/** Stored order wins over sender clocks; both directions share one near-turn window. */
+export function recentRoleHistory(data, limit = 20, maxAge = 30 * 60 * 1000) {
+  const cutoff = data.beforeTime ?? data.now ?? Infinity;
+  const rows = (data.history || []).filter(entry => entry && ['incoming', 'outgoing'].includes(entry.direction) &&
+    (!entry.accountId || entry.accountId === data.scope.accountId) &&
+    (!entry.chatType || entry.chatType === data.scope.chatType) && (!entry.peerId || entry.peerId === data.scope.peerId))
+    .map((entry, index) => ({ entry, index, time: historyTime(entry.time) }));
+  // An explicit order is reliable only when all rows have distinct ordinals.
+  const ordered = rows.length > 0 && rows.every(row => Number.isFinite(row.entry.order)) &&
+    new Set(rows.map(row => row.entry.order)).size === rows.length;
+  const usable = rows.filter(row => (Number.isFinite(row.time) ? row.time <= cutoff : ordered) &&
+    // Do not revive a person/topic from a different day's disconnected exchange.
+    (!Number.isFinite(cutoff) || !Number.isFinite(row.time) || cutoff - row.time <= maxAge));
+  usable.sort((a, b) => ordered ? a.entry.order - b.entry.order :
+    a.time - b.time || a.index - b.index);
+  return usable.slice(-limit).map(row => row.entry);
+}
+
+// Chinese pronouns have grammatical boundaries, not JS word boundaries. In
+// particular 其他/吉他/利他 and 他乡 are words, not references to a person.
+function hasPersonPronoun(text) {
+  for (const match of text.matchAll(/[他她]/gu)) {
+    const before = text.slice(0, match.index), after = text.slice(match.index + 1);
+    if (match[0] === '他' && (/(?:其|吉|利|维|伏|排)$/u.test(before) || /^(?:乡|山|日|国|方)/u.test(after))) continue;
+    if ((!before || /[^\p{L}\p{N}]$/u.test(before) ||
+        /(?:那|但|不过|然后|因为|所以|给|替|对|问|看|帮|关于|至于|和|跟|与|让|找|觉得|记得|知道|说|还有|包括|只有|不是)$/u.test(before)) &&
+        (!after || !/^[A-Za-z\d_]/u.test(after))) return true;
+  }
+  return false;
+}
+
+const asciiName = name => /^[A-Za-z][A-Za-z\d_.-]+$/u.test(name);
+const lastNameIndex = (text, name) => asciiName(name)
+  ? text.toLocaleLowerCase().lastIndexOf(name.toLocaleLowerCase()) : text.lastIndexOf(name);
+
+/** ASCII nicknames/explicit aliases are whole tokens, never guessed initials. */
+export function roleNameMentioned(text, name) {
+  if (!name || !asciiName(name)) return nameMentioned(text, name);
+  const value = text.toLocaleLowerCase(), alias = name.toLocaleLowerCase();
+  for (let at = value.indexOf(alias); at >= 0; at = value.indexOf(alias, at + alias.length)) {
+    if ((at === 0 || !/[A-Za-z\d_]/u.test(value[at - 1])) &&
+        (at + alias.length === value.length || !/[A-Za-z\d_]/u.test(value[at + alias.length]))) return true;
+  }
+  return false;
+}
+const personNames = person => [...new Set([person.name !== person.id && person.name, ...(person.aliases || [])].filter(Boolean))];
 
 function knownPeople(data) {
   return data.people.filter(person => person.accountId === data.scope.accountId);
@@ -45,41 +98,99 @@ export function availableState(data) {
   };
 }
 
-// Speaker and subject are separate. Mentioned people are considered before the
-// generic "help me" phrase. Negated/quoted names do not select another person.
-export function resolveTargets(data, query = data.query) {
-  const text = quoted(query);
-  const relatives = knownPeople(data).filter(person => ownRelativeMention(person, text, data.speaker.id));
-  const named = knownPeople(data).filter(person => [person.name, ...(person.aliases || [])].some(name => {
-    if (!nameMentioned(text, name)) return false;
-    const at = text.lastIndexOf(name), before = text.slice(Math.max(0, at - 10), at);
-    return !/(?:不是|不问|不说|别给|不要给|不用给|不替|别替|不包括|不算)(?:那个|那位)?$/u.test(before);
+function mentionedTargets(data, text, speakerId = data.speaker.id) {
+  const relatives = knownPeople(data).filter(person => ownRelativeMention(person, text, speakerId));
+  const named = knownPeople(data).filter(person => personNames(person).some(name => {
+    if (!roleNameMentioned(text, name)) return false;
+    const at = lastNameIndex(text, name), before = text.slice(Math.max(0, at - 12), at);
+    return !/(?:不是|不问|不说|别说|不要说|别给|不要给|不用给|不替|别替|不包括|不算)(?:那个|那位)?$/u.test(before);
   }));
-  const mentioned = [...new Map([...relatives, ...named.filter(person => !relatives.some(relative => relative.name === person.name && relative.id !== person.id))]
+  return [...new Map([...relatives, ...named.filter(person => !relatives.some(relative => relative.name === person.name && relative.id !== person.id))]
     .map(person => [person.id, person])).values()];
+}
+
+function topicSwitchPeople(data, text) {
+  return knownPeople(data).filter(person => personNames(person).some(name => {
+    if (!roleNameMentioned(text, name)) return false;
+    const before = text.slice(0, lastNameIndex(text, name));
+    return /(?:先说|先聊|说回|聊回|说说|聊聊|轮到|至于|先看|先问)(?:一下|那位|那个)?$/u.test(before);
+  }));
+}
+
+const uncertainTopic = text => /猜|猜测|可能|也许|大概|或许|假如|假设|假装|不确定|不知道|没确定|未确定|是不是/u.test(text);
+const nonverbalTurn = text => !text.trim() || /^[^\p{L}\p{N}]+$/u.test(text) ||
+  /^(?:\[|【)?(?:表情|图片|动画|贴纸)(?:消息)?(?:\]|】)?$/u.test(text.trim());
+
+// Speaker and subject are separate. A bot can move the conversational topic,
+// but neither that topic nor its guesses become evidence of personal facts.
+export function resolveTargets(data, query = data.query) {
+  const text = quoted(query), mentioned = mentionedTargets(data, text);
   const ids = [...new Set(mentioned.map(person => person.id))];
-  let unresolvedReference = false;
-  if (!ids.length && /他|她/u.test(text) && !/(?:说回|轮到|还是|给)我/u.test(text)) {
-    const recent = (data.history || []).filter(entry => entry.direction === 'incoming' && entry.time <= data.now).slice(-3).reverse();
-    for (const entry of recent) {
+  let unresolvedReference = false, referenceDirection, unresolvedIdentifier;
+  const identifier = text.trim().replace(/[，,。.!！?？\s]/gu, '').match(/^(?:那|关于|给|问|说说)?([A-Za-z]{2,4})(?:呢|(?:吃|喝|的|有什么|怎么样|是谁).*)?$/u)?.[1];
+  if (!ids.length && identifier && !/^(?:hi|hey|hello|ok|okay|yes|no|bye)$/iu.test(identifier)) {
+    unresolvedReference = true; unresolvedIdentifier = identifier;
+  }
+  if (!ids.length && !unresolvedIdentifier && hasPersonPronoun(text) && !/(?:说回|轮到|还是|给)我/u.test(text)) {
+    for (const entry of recentRoleHistory(data).reverse()) {
       const context = quoted(entry.text || '').slice(-1000);
-      const contextPeople = knownPeople(data).filter(person => [person.name, ...(person.aliases || [])]
-        .some(name => nameMentioned(context, name)));
-      if (!contextPeople.length) continue;
-      ids.push(...new Set(contextPeople.map(person => person.id)));
-      unresolvedReference = ids.length > 1; break;
+      const switched = topicSwitchPeople(data, context);
+      const contextPeople = switched.length ? switched : mentionedTargets(data, context, entry.senderId);
+      if (!contextPeople.length) {
+        if (quietTurn(context) || nonverbalTurn(context) || ellipticalTurn(data, context) || hasPersonPronoun(context)) continue;
+        // A substantive unrelated turn breaks the old referent chain.
+        break;
+      }
+      const candidates = [...new Set(contextPeople.map(person => person.id))];
+      if (candidates.length === 1 && !uncertainTopic(context)) {
+        ids.push(candidates[0]); referenceDirection = entry.direction;
+      }
+      break;
     }
-    if (!ids.length) unresolvedReference = true;
+    unresolvedReference = !ids.length;
   }
   const jointSelf = /我和|我跟|我与|和我|跟我|与我|还有我|包括我|我们(?:俩|两个|两人)/u.test(text);
   if (ids.length && jointSelf && !ids.includes(data.speaker.id)) ids.unshift(data.speaker.id);
   const targets = ids.length ? ids : unresolvedReference ? [] : [data.speaker.id];
   const aliases = new Map();
-  for (const person of mentioned) for (const name of [person.name, ...(person.aliases || [])]) {
-    if (nameMentioned(text, name)) aliases.set(name, [...(aliases.get(name) || []), person.id]);
+  for (const person of mentioned) for (const name of personNames(person)) {
+    if (roleNameMentioned(text, name)) {
+      const key = asciiName(name) ? name.toLocaleLowerCase() : name;
+      aliases.set(key, [...(aliases.get(key) || []), person.id]);
+    }
   }
   const ambiguousNames = [...aliases.entries()].filter(([, values]) => new Set(values).size > 1).map(([name]) => name);
-  return { targets, ambiguousNames, unresolvedReference, speakerId: data.speaker.id };
+  return { targets, ambiguousNames, unresolvedReference, speakerId: data.speaker.id,
+    ...(referenceDirection ? { referenceDirection } : {}), ...(unresolvedIdentifier ? { unresolvedIdentifier } : {}) };
+}
+
+function ellipticalTurn(data, query) {
+  let text = quoted(query).trim().replace(/[\s，,。.!！?？~～…]/gu, '');
+  // Only short continuation grammar can inherit. An arbitrary topicless new
+  // question (e.g. 买吉他有什么偏好) must not inherit yesterday's coffee.
+  if (text.length > 40 || /换个话题|另外问|另一个问题|不谈|不说|不问/u.test(text)) return false;
+  for (const person of knownPeople(data)) for (const name of personNames(person)) {
+    if (name && roleNameMentioned(text, name)) {
+      const at = lastNameIndex(text, name);
+      text = text.slice(0, at) + '他' + text.slice(at + name.length);
+    }
+  }
+  return /^(?:那|那么|然后|还有|至于|轮到|说回)?(?:我|你|他|她|我们|他们|她们)(?:的)?(?:呢|怎么样|怎么说|有什么要注意(?:的)?|要注意什么|有什么要求|怎么选|选哪种|要怎么备注|要备注什么)$/u.test(text) ||
+    /^(?:那|那么|然后)?(?:还有呢|然后呢|继续|接着说|具体呢|详细点|为什么|为啥|怎么说|要注意什么|有什么要求|怎么选|选哪种|选什么|要怎么备注|怎么备注|要备注什么)$/u.test(text);
+}
+
+function topicQuery(data) {
+  const topics = topicsFor(data.query);
+  if (topics.length || !ellipticalTurn(data, data.query)) return { topics, query: data.query };
+  for (const entry of recentRoleHistory(data).reverse()) {
+    const text = quoted(entry.text || '').slice(-1000);
+    if (/换个话题|另一个问题|另外问/u.test(text)) break;
+    const inherited = topicsFor(text);
+    if (inherited.length && !uncertainTopic(text)) return { topics: inherited, query: data.query + '\n' + text };
+    if (quietTurn(text) || nonverbalTurn(text) || ellipticalTurn(data, text) || topicSwitchPeople(data, text).length) continue;
+    break;
+  }
+  return { topics, query: data.query };
 }
 
 function importance(fact) {
@@ -123,11 +234,11 @@ export function projectMemory(data, { review = true } = {}) {
   const state = availableState(data), card = scopedCard(data), target = resolveTargets(data);
   const quiet = quietTurn(data.query) || impersonalTurn(data.query);
   const eligible = state.facts.filter(fact => target.targets.includes(fact.subjectId) || fact.subjectId === 'group');
-  const topics = new Set(topicsFor(data.query));
+  const retrieval = topicQuery(data), topics = new Set(retrieval.topics);
   const broadRecall = /记得|记不记得|来着|偏好|习惯|了解我|关于我/u.test(data.query);
   const ranked = eligible.map(fact => ({ fact, score:
     topicsFor(fact.text).filter(topic => topics.has(topic)).length * 10 +
-    relevantMemoryReference(fact.text, data.query, { maxChars: 800 }).matchedTerms.length * 3 +
+    relevantMemoryReference(fact.text, retrieval.query, { maxChars: 800 }).matchedTerms.length * 3 +
     importance(fact) / 10,
   })).sort((a, b) => b.score - a.score || b.fact.createdAt - a.fact.createdAt || a.fact.id.localeCompare(b.fact.id));
   const selected = new Set();
@@ -145,12 +256,14 @@ export function projectMemory(data, { review = true } = {}) {
   const hasReference = selected.size > 0 || target.ambiguousNames.length || target.unresolvedReference || !quiet && omitted && index.length;
   const extraPeopleInQuotes = [...core.admitted, ...recalled.admitted, ...pendingPack.admitted].some(fact =>
     knownPeople(data).some(person => !target.targets.includes(person.id) && (fact.sources || []).some(source =>
-      nameMentioned(source.quote || '', person.name) || ownRelativeMention(person, source.quote || '', source.senderId))));
+      personNames(person).some(name => roleNameMentioned(source.quote || '', name)) || ownRelativeMention(person, source.quote || '', source.senderId))));
   const header = [
     hasReference && `发言者：${personLabel(data, data.speaker.id)}。`,
     target.targets.some(id => id !== data.speaker.id) && `本句提及对象：${target.targets.slice(0, 3).map(id => personLabel(data, id)).join('、')}${target.targets.length > 3 ? '等；其余对象可查询' : ''}；按原话区分谁的那一份。`,
     target.ambiguousNames.length && `同名未确定：${target.ambiguousNames.slice(0, 3).map(name => clipped(name, 40)).join('、')}，先确认是哪位，不能合并人物。`,
-    target.unresolvedReference && '代词指向不明确，需要确认对象，不能默认成发言者。',
+    target.referenceDirection === 'outgoing' && '代词按机器人最近话题定位；机器人先前说法不是个人事实证据，只使用下列有来源的对应人物资料。',
+    target.unresolvedIdentifier && `名称或缩写未匹配：${target.unresolvedIdentifier}；只用已观察昵称或明确别名，不推测拼音首字母，不默认成当前发言者。`,
+    target.unresolvedReference && !target.unresolvedIdentifier && '本人物记忆索引未解析本句代词；这不代表近期聊天没有线索。先结合成员近期原话、机器人先前说法的 order、发言者和当前句判断指向；只有仍无法确定且影响回答时才澄清，不默认成发言者。',
     extraPeopleInQuotes && '原话同时提到多人；只回答本句所问对象，不顺带列出其他人的事实。',
     hasReference && card?.addressAs && `平时称呼：${clipped(card.addressAs, 60)}。`,
     hasReference && card?.relationship && `相处关系：${clipped(card.relationship, 120)}。`,

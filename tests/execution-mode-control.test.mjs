@@ -48,6 +48,7 @@ test('mode grammar accepts direct semantic equivalents and explicit commands, re
 });
 test('administrator mode changes commit on reception so the next message uses the new independent route', async t => {
   const f = fixture(t); const before = f.store.conversationSettings(accountId, 'group', room);
+  assert.equal(f.channel.authorization.isCleaning(accountId), false);
   f.receive('小胖切换到工作模式');
   assert.equal(f.store.conversationSettings(accountId, 'group', room).executionMode, 'work');
   assert.deepEqual(f.store.conversationSettings(accountId, 'group', room), { ...before, executionMode: 'work' });

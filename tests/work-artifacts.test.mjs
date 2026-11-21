@@ -36,21 +36,28 @@ function fixture(t, run, send) {
 
 test('DSH arbitrary binary files and generated images return exact bytes with individual server acknowledgements', async t => {
   const originals = { '报告.docx': Buffer.from([0, 255, 128, 1, 2, 3]), '数据.xlsx': Buffer.from('sheet-binary'), '结果.pdf': Buffer.from('%PDF-1.7\nexample'), '产物.zip': Buffer.from([80, 75, 3, 4, 0, 255]), '脚本.py': Buffer.from('print("你好")\n'), '图.png': png };
+  let sendIndex = 0;
   const f = fixture(t, async ({ cwd }, invoke) => {
     for (const [name, bytes] of Object.entries(originals)) fs.writeFileSync(path.join(cwd, name), bytes);
     fs.writeFileSync(path.join(cwd, 'intermediate.tmp'), 'not requested');
     assert.equal((await invoke('wechat_work_output', { paths: Object.keys(originals) })).ok, true);
     return { text: '成果已生成，等待回传。' };
+  }, payload => {
+    const id = `artifact-ack-${sendIndex++}`, part = payload.message[0], bytes = part.type === 'text' ? null : Buffer.from(part.data.base64, 'base64');
+    const receipt = { index: 0, type: part.type, state: 'acknowledged', serverMessageId: id,
+      ...(bytes ? { name: part.data.name, bytes: bytes.length, sha256: digest(bytes) } : {}) };
+    return { delivery: 'server-ack', serverMessageIds: [id], deliveryParts: [receipt] };
   });
   const job = await f.start('生成各类文件和配图并返回给我');
-  assert.equal(job.state, 'succeeded'); assert.equal(job.delivery.state, 'sent');
-  const media = f.sent[0].message.filter(part => part.type !== 'text');
+  assert.equal(job.state, 'succeeded', JSON.stringify({ job, sent: f.sent })); assert.equal(job.delivery.state, 'sent');
+  assert.equal(f.sent.length, 7, 'one text bubble and six artifact bubbles are sent independently');
+  const media = f.sent.flatMap(payload => payload.message).filter(part => part.type !== 'text');
   assert.equal(media.length, 6); assert.equal(media.at(-1).type, 'image'); assert.equal(media[0].type, 'file');
   for (const part of media) assert.deepEqual(Buffer.from(part.data.base64, 'base64'), originals[part.data.name]);
   assert.equal(job.result.files.length, 7); assert.equal(job.result.artifacts.length, 6);
   assert(job.delivery.artifacts.every(value => value.state === 'sent' && value.serverMessageId));
   const persisted = fs.readFileSync(f.channel.work.store.file, 'utf8'); assert(!persisted.includes('base64')); assert(!persisted.includes(png.toString('base64')));
-  const restored = new WorkStore(f.store); assert.deepEqual(restored.get(job.id).delivery.artifacts, job.delivery.artifacts); assert.equal(f.sent.length, 1);
+  const restored = new WorkStore(f.store); assert.deepEqual(restored.get(job.id).delivery.artifacts, job.delivery.artifacts); assert.equal(f.sent.length, 7);
 });
 
 test('registered large files pass through the complete work handoff with exact bytes and durable receipts', async t => {
@@ -59,10 +66,16 @@ test('registered large files pass through the complete work handoff with exact b
     for (const name of ['large.docx', 'large.zip']) fs.writeFileSync(path.join(cwd, name), original);
     assert.equal((await invoke('wechat_work_output', { paths: ['large.docx', 'large.zip'] })).ok, true);
     return { text: '两份大文件已生成' };
+  }, payload => {
+    const part = payload.message[0], id = `large-ack-${f.sent.length}`;
+    const receipt = { index: 0, type: part.type, state: 'acknowledged', serverMessageId: id,
+      ...(part.type === 'file' ? { name: part.data.name, bytes: original.length, sha256: digest(original) } : {}) };
+    return { delivery: 'server-ack', serverMessageIds: [id], deliveryParts: [receipt] };
   });
   const job = await f.start('返回两份大文件');
   assert.equal(job.delivery.state, 'sent'); assert.equal(job.result.artifacts.length, 2);
-  for (const part of f.sent[0].message.filter(part => part.type === 'file')) assert.deepEqual(Buffer.from(part.data.base64, 'base64'), original);
+  for (const payload of f.sent) for (const part of payload.message.filter(part => part.type === 'file'))
+    assert.deepEqual(Buffer.from(part.data.base64, 'base64'), original);
   assert(job.delivery.artifacts.every(artifact => artifact.state === 'sent' && artifact.bytes === original.length && artifact.sha256 === digest(original)));
   assert.equal(new WorkStore(f.store).get(job.id).delivery.state, 'sent');
 });
@@ -73,7 +86,7 @@ test('image can be returned as the original file and internal or escaping paths 
     assert.equal((await invoke('wechat_work_output', { paths: ['source.png'], sendAs: 'file' })).artifacts[0].kind, 'file');
     return { text: '原文件已登记' };
   });
-  const job = await f.start('把原图作为文件返回'); assert.equal(f.sent[0].message[1].type, 'file');
+  const job = await f.start('把原图作为文件返回'); assert.equal(f.sent[1].message[0].type, 'file');
   assert.throws(() => readWorkArtifact(job.cwd, '../outside.txt'), { code: 'WORK_PATH_INVALID' });
   assert.throws(() => readWorkArtifact(job.cwd, `.wechat-work/${job.id}.md`), { code: 'WORK_ARTIFACT_INVALID' });
   const outside = path.join(f.root, 'outside'); fs.mkdirSync(outside); fs.writeFileSync(path.join(outside, 'secret.txt'), 'secret');
@@ -92,17 +105,24 @@ test('changed or missing final files fail before any text or file is transmitted
 });
 
 test('partial file delivery retains confirmed, unknown and unattempted files without resend after reload', async t => {
+  let sendIndex = 0;
   const f = fixture(t, async ({ cwd }, invoke) => {
     fs.writeFileSync(path.join(cwd, 'a.txt'), 'a'); fs.writeFileSync(path.join(cwd, 'b.txt'), 'b'); fs.writeFileSync(path.join(cwd, 'c.txt'), 'c');
     await invoke('wechat_work_output', { paths: ['a.txt', 'b.txt', 'c.txt'] }); return { text: '三份成果等待回传' };
   }, payload => {
-    const parts = payload.message.map((part, index) => ({ index, type: part.type, state: index < 2 ? 'acknowledged' : index === 2 ? 'unknown' : 'not-sent', ...(index < 2 ? { serverMessageId: 'confirmed-' + index } : {}),
-      ...(part.type !== 'text' ? { name: part.data.name, sha256: digest(Buffer.from(part.data.base64, 'base64')), bytes: Buffer.from(part.data.base64, 'base64').length } : {}) }));
-    throw new ChannelError('SEND_UNKNOWN', '第二份文件回执超时', { delivery: 'partially-acknowledged', acknowledgedMessageIds: ['confirmed-0', 'confirmed-1'], deliveryParts: parts });
+    const index = sendIndex++, part = payload.message[0];
+    if (index < 2) {
+      const receipt = { index: 0, type: part.type, state: 'acknowledged', serverMessageId: `confirmed-${index}`,
+        ...(part.type !== 'text' ? { name: part.data.name, sha256: digest(Buffer.from(part.data.base64, 'base64')), bytes: Buffer.from(part.data.base64, 'base64').length } : {}) };
+      return { delivery: 'server-ack', serverMessageIds: [receipt.serverMessageId], deliveryParts: [receipt] };
+    }
+    throw new ChannelError('SEND_UNKNOWN', '第二份文件回执超时', { delivery: 'partially-acknowledged', acknowledgedMessageIds: [],
+      deliveryParts: [{ index: 0, type: part.type, state: 'unknown', ...(part.type !== 'text' ? { name: part.data.name,
+        sha256: digest(Buffer.from(part.data.base64, 'base64')), bytes: Buffer.from(part.data.base64, 'base64').length } : {}) }] });
   });
   const job = await f.start('生成两份文件并返回'); assert.equal(job.delivery.state, 'partial');
   assert.deepEqual(job.delivery.artifacts.map(value => value.state), ['sent', 'unknown', 'not-sent']);
-  assert.equal(job.delivery.artifacts[0].serverMessageId, 'confirmed-1'); new WorkStore(f.store); assert.equal(f.sent.length, 1);
+  assert.equal(job.delivery.artifacts[0].serverMessageId, 'confirmed-1'); new WorkStore(f.store); assert.equal(f.sent.length, 3);
 });
 
 const retryOptions = job => ({ expectedUpdatedAt: job.updatedAt, expectedRetryCount: job.delivery.retryAttempts?.length ?? 0, confirmedNotReceived: true });
@@ -121,8 +141,14 @@ test('owner recovery sends only existing unconfirmed artifacts and preserves ori
     executions++; fs.writeFileSync(path.join(cwd, 'a.csv'), 'score\n42'); fs.writeFileSync(path.join(cwd, 'puppy.png'), png); fs.writeFileSync(path.join(cwd, 'c.zip'), Buffer.from([80, 75, 0, 255]));
     await invoke('wechat_work_output', { paths: ['a.csv', 'puppy.png', 'c.zip'] }); return { text: '原始结果数字 42 保留。' };
   }, payload => {
-    if (++sends === 1) throw unconfirmed(payload, { confirmed: 2 });
-    const parts = deliveryParts(payload, 'retry'); return { delivery: 'server-ack', serverMessageIds: parts.map(part => part.serverMessageId), deliveryParts: parts };
+    const index = sends++, part = payload.message[0];
+    if (index === 2) throw new ChannelError('SEND_UNKNOWN', '第二份文件回执超时', { delivery: 'unknown', acknowledgedMessageIds: [],
+      deliveryParts: [{ index: 0, type: part.type, state: 'unknown', name: part.data.name,
+        bytes: Buffer.from(part.data.base64, 'base64').length, sha256: digest(Buffer.from(part.data.base64, 'base64')) }] });
+    const id = `delivery-${index}`;
+    const receipt = { index: 0, type: part.type, state: 'acknowledged', serverMessageId: id,
+      ...(part.type === 'text' ? {} : { name: part.data.name, bytes: Buffer.from(part.data.base64, 'base64').length, sha256: digest(Buffer.from(part.data.base64, 'base64')) }) };
+    return { delivery: 'server-ack', serverMessageIds: [id], deliveryParts: [receipt] };
   });
   const original = await f.start('生成三个文件并返回');
   assert.deepEqual(original.delivery.artifacts.map(value => value.state), ['sent', 'unknown', 'not-sent']);
@@ -130,12 +156,12 @@ test('owner recovery sends only existing unconfirmed artifacts and preserves ori
   const accepted = f.channel.work.retryDelivery(original.id, scope, retryOptions(original));
   assert.equal(accepted.delivery.state, 'pending'); await f.channel.work.whenIdle();
   const job = f.channel.work.get(original.id, scope);
-  assert.equal(executions, 1); assert.equal(sends, 2); assert.equal(job.state, original.state); assert.equal(job.sessionId, original.sessionId);
+  assert.equal(executions, 1); assert.equal(sends, 5); assert.equal(job.state, original.state); assert.equal(job.sessionId, original.sessionId);
   assert.deepEqual(job.result, original.result); assert.deepEqual(job.operations, original.operations);
-  assert.deepEqual(f.sent[1].message.map(part => [part.type, part.data.name]), [['image', 'puppy.png'], ['file', 'c.zip']]);
-  assert.deepEqual(Buffer.from(f.sent[1].message[0].data.base64, 'base64'), png);
+  assert.deepEqual(f.sent.slice(3).map(payload => [payload.message[0].type, payload.message[0].data.name]), [['image', 'puppy.png'], ['file', 'c.zip']]);
+  assert.deepEqual(Buffer.from(f.sent[3].message[0].data.base64, 'base64'), png);
   assert.equal(job.delivery.state, 'sent'); assert(job.delivery.artifacts.every(value => value.state === 'sent'));
-  assert.deepEqual(job.delivery.acknowledgedMessageIds, ['original-0', 'original-1', 'retry-0', 'retry-1']);
+  assert.deepEqual(job.delivery.acknowledgedMessageIds, ['delivery-0', 'delivery-1', 'delivery-3', 'delivery-4']);
   assert.deepEqual(job.delivery.deliveryParts[0], original.delivery.deliveryParts[0]);
   assert.equal(job.delivery.retryAttempts.length, 1); assert.equal(job.delivery.retryAttempts[0].source, 'owner');
   assert.deepEqual(job.delivery.retryAttempts[0].previousDelivery.deliveryParts, original.delivery.deliveryParts);
@@ -143,7 +169,7 @@ test('owner recovery sends only existing unconfirmed artifacts and preserves ori
   assert.equal(records.find(record => record.key === original.delivery.recordKey).state, 'partial');
   assert.equal(records.find(record => record.key === job.delivery.lastRetryRecordKey).state, 'sent');
   const persisted = fs.readFileSync(f.channel.work.store.file, 'utf8'); assert(!persisted.includes('base64')); assert(!persisted.includes(png.toString('base64')));
-  assert.deepEqual(new WorkStore(f.store).get(job.id).delivery, JSON.parse(JSON.stringify(job.delivery))); assert.equal(sends, 2);
+  assert.deepEqual(new WorkStore(f.store).get(job.id).delivery, JSON.parse(JSON.stringify(job.delivery))); assert.equal(sends, 5);
   assert.throws(() => f.channel.work.retryDelivery(job.id, scope, retryOptions(job)), { code: 'WORK_ALREADY_DELIVERED' });
 });
 
@@ -201,26 +227,31 @@ test('artifact recovery is an owner-only RPC and verifies the currently logged-i
 });
 
 test('a general ACK cannot stand in for individual file confirmations', async t => {
-  const f = fixture(t, async ({ cwd }, invoke) => { fs.writeFileSync(path.join(cwd, 'a.txt'), 'a'); await invoke('wechat_work_output', { paths: ['a.txt'] }); return { text: '等待回传' }; }, () => ({ delivery: 'server-ack', serverMessageIds: ['text-ack'] }));
-  const job = await f.start('生成文件并返回'); assert.equal(job.delivery.state, 'partial'); assert.equal(job.delivery.artifacts[0].state, 'unknown'); assert.equal(f.sent.length, 1);
+  const f = fixture(t, async ({ cwd }, invoke) => { fs.writeFileSync(path.join(cwd, 'a.txt'), 'a'); await invoke('wechat_work_output', { paths: ['a.txt'] }); return { text: '等待回传' }; }, payload => ({
+    delivery: 'server-ack', serverMessageIds: [f.sent.length === 0 ? 'text-ack' : 'file-general-ack'],
+  }));
+  const job = await f.start('生成文件并返回'); assert.equal(job.delivery.state, 'partial');
+  assert.equal(job.delivery.artifacts[0].state, 'unknown'); assert.equal(f.sent.length, 2);
 });
 
 for (const invalid of ['size', 'message ID', 'duplicate message ID']) test(`an invalid file ${invalid} receipt never appears as delivered`, async t => {
+  let sendIndex = 0;
   const f = fixture(t, async ({ cwd }, invoke) => {
     fs.writeFileSync(path.join(cwd, 'a.txt'), 'a'); fs.writeFileSync(path.join(cwd, 'b.txt'), 'b');
     await invoke('wechat_work_output', { paths: ['a.txt', 'b.txt'] }); return { text: '成果等待回传' };
   }, payload => {
-    const parts = payload.message.map((part, index) => ({ index, type: part.type, state: 'acknowledged', serverMessageId: 'confirmed-' + index,
-      ...(part.type !== 'text' ? { name: part.data.name, sha256: digest(Buffer.from(part.data.base64, 'base64')), bytes: Buffer.from(part.data.base64, 'base64').length } : {}) }));
-    if (invalid === 'size') parts[2].bytes++;
-    else parts[2].serverMessageId = invalid === 'message ID' ? 'unlisted-message' : parts[1].serverMessageId;
-    return { delivery: 'server-ack', serverMessageIds: ['confirmed-0', 'confirmed-1', 'confirmed-2'], deliveryParts: parts };
+    const index = sendIndex++, part = payload.message[0], bytes = part.type === 'text' ? 0 : Buffer.from(part.data.base64, 'base64').length,
+      id = index === 2 && invalid === 'message ID' ? 'unlisted-message' : index === 2 && invalid === 'duplicate message ID' ? 'confirmed-1' : `confirmed-${index}`;
+    const receipt = { index: 0, type: part.type, state: 'acknowledged', serverMessageId: id,
+      ...(part.type !== 'text' ? { name: part.data.name, sha256: digest(Buffer.from(part.data.base64, 'base64')), bytes: bytes + (index === 2 && invalid === 'size' ? 1 : 0) } : {}) };
+    const listedId = index === 2 && invalid === 'message ID' ? 'different-listed-id' : id;
+    return { delivery: 'server-ack', serverMessageIds: [listedId], deliveryParts: [receipt] };
   });
   const job = await f.start('生成两份文件并返回');
   assert.equal(job.delivery.state, 'partial'); assert.equal(job.delivery.artifacts[1].state, 'unknown');
   assert.equal(job.delivery.artifacts[1].serverMessageId, undefined);
-  if (invalid === 'duplicate message ID') assert.equal(job.delivery.artifacts[0].state, 'unknown');
-  new WorkStore(f.store); assert.equal(f.sent.length, 1);
+  assert.equal(job.delivery.artifacts[0].state, invalid === 'duplicate message ID' ? 'unknown' : 'sent');
+  new WorkStore(f.store); assert.equal(f.sent.length, 3);
 });
 
 test('result selection deduplicates latest versions and rejects excessive total outputs', () => {

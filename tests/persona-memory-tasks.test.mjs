@@ -20,7 +20,9 @@ function fixture(t) {
   store.rememberConversationNames(owner, { groups: [{ id: room, name: '产品讨论组' }, { id: other, name: '产品讨论组' }] });
   let now = Date.now(), sequence = 0;
   const calls = [], sent = [], state = { online: true, account: { id: owner, nickname: '测试微信名' } };
-  const runner = { run: async input => { calls.push(input); return { text: '好，就按这个来。', sessionId: 'fixture-session-' + calls.length }; },
+  const runner = { run: async input => { calls.push(input); return { text: input.naturalDecision
+      ? JSON.stringify({ action: 'reply', text: '好，就按这个来。' })
+      : '好，就按这个来。', sessionId: 'fixture-session-' + calls.length }; },
     summarize: async () => '阿禾喜欢猫，群里约定周五讨论产品。' };
   const transport = { status: () => structuredClone(state), send: async input => { sent.push(input); return { delivery: 'server-ack', serverMessageIds: ['fixture-ack-' + sent.length] }; } };
   transport.call = async (operation, input) => { assert.equal(operation, 'members'); return { accountId: input.accountId, peerId: input.peerId, members: [{ id: 'alice', name: '阿禾' }, { id: 'bob', name: '阿青' }] }; };

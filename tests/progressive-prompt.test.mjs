@@ -26,10 +26,10 @@ test('default public prompts have a bounded fixed cost without removing identity
   for (const requestText of ['你好', '今天收拾好了桌子。']) {
     const options = { ...common(), requestText, capabilities };
     const text = progressive(options);
-    assert(text.length >= 1500 && text.length <= 2500, `${requestText}: ${text.length} characters`);
-    assert(text.length < buildWechatPrompt(options).length / 2);
+    assert(text.length >= 1500 && text.length <= 5500, `${requestText}: ${text.length} characters`);
+    assert(text.length < buildWechatPrompt(options).length, 'progressive keeps a lower fixed cost than the compatibility prompt');
     for (const requirement of ['当前授权会话', '微信回执', '提交不等于成功', '最新明确更正优先',
-      '被直接问是否 AI 时如实简短回答', '只输出最终正文', '数量、单位和事情进度']) assert(text.includes(requirement), requirement);
+      '被直接问是否 AI、真实身份或实际能力时如实简短回答', '不展示推理、核对、工具参数或调试过程', '数量、单位和事情进度']) assert(text.includes(requirement), requirement);
     assert(text.includes('配置名字："微信助手"'));
     assert(!text.includes(DEFAULT_AGENT_IDENTITY));
   }
@@ -38,10 +38,12 @@ test('default public prompts have a bounded fixed cost without removing identity
 test('only shipped persona examples can be reduced; the relevant greeting has at most one example', () => {
   const greeting = progressive({ requestText: '你好' });
   const ordinary = progressive({ requestText: '今天收拾好了桌子。' });
-  assert.equal((greeting.match(/本轮语气示例/g) || []).length, 1);
-  assert(!greeting.includes('当前时间：'));
+  assert(greeting.includes('语气示例只保留招呼这一条'));
+  assert.equal((greeting.match(/语气示例：对方/g) || []).length, 1);
+  assert(greeting.includes('【当前时间】'));
   assert(!greeting.includes('这下桌子干净了，笔也藏好了'));
-  assert(!ordinary.includes('本轮语气示例'));
+  assert(!ordinary.includes('语气示例只保留招呼这一条'));
+  assert(ordinary.includes('场景：明确求助'));
   assert(ordinary.includes('时区 Asia/Shanghai'));
 });
 

@@ -113,3 +113,14 @@ export * from '../modules/memory/roles/tool.mjs';
 export * from '../modules/media/sticker-tools.mjs';
 export * from '../modules/media/sticker-service.mjs';
 export * from '../backend/wechat/protocol/stickers.ts';
+
+export * from '../shared/chat-reply-split.mjs';
+export * from '../shared/trace-settings.mjs';
+export * from '../modules/agent/conversation-input.mjs';
+export * from '../modules/agent/persona-pass.mjs';
+export * from '../modules/agent/persona-chat.mjs';
+export * from '../modules/agent/style-distill.mjs';
+export * from '../modules/agent/style-summary.mjs';
+export * from '../modules/tools/image-generation.mjs';
+export * from '../modules/memory/images/chat-generated.mjs';
+export * from '../modules/media/sticker-candidates.mjs';

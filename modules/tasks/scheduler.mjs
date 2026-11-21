@@ -2,8 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { atomicJson } from "../../backend/storage/atomic-json.ts";
-import { ChannelError } from "../../shared/contracts.mjs";
-import { assertConversationAuthorized, assertPersonAuthorized, conversationEligible } from '../../shared/authorization.mjs';
+import { ChannelError, schedulesEnabled } from "../../shared/contracts.mjs";
+import { assertConversationAuthorized, assertPersonAuthorized, conversationAuthorized } from '../../shared/authorization.mjs';
 
 const clone = (value) => structuredClone(value);
 const active = new Set(['pending', 'running']);
@@ -22,6 +22,10 @@ const RETRY_STEPS = [60000, 120000, 240000, 480000, 900000];
 const MAX_ATTEMPTS = 4;
 const RUNS_PER_TASK = 50;
 const RUNS_TOTAL = 2000;
+const MAX_SCHEDULER_FAILURES = 5;
+const MAX_FINISHED_TASKS = 500;
+const FINISHED_TASK_AGE_MS = 30 * 86400000;
+const FINISHED_TASK_STATES = new Set(['completed', 'cancelled', 'expired']);
 const timeLabel = (ms, timeZone = 'Asia/Shanghai') =>
   new Date(ms).toLocaleString('zh-CN', {
     timeZone,
@@ -188,7 +192,7 @@ export class TaskScheduler {
             ? 'paused'
             : 'pending';
         if (sent && task.schedule.kind !== 'once') task.nextRunAt = scheduleNext(task.schedule, now());
-        task.lastState = sent ? 'sent' : uncertain ? 'unknown' : 'cancelled';
+        task.lastState = sent ? 'sent' : uncertain ? 'unknown' : 'failed';
         task.lastError = sent
           ? null
           : uncertain
@@ -219,7 +223,6 @@ export class TaskScheduler {
    * task (and the attempt in flight) so schedules.json cannot grow without
    * bound on a long-lived recurring plan. */
   pruneRuns() {
-    if (!this.data.runs.length) return;
     const tasks = new Map(this.data.tasks.map((task) => [task.id, task]));
     const kept = new Set(),
       counted = new Map();
@@ -231,7 +234,16 @@ export class TaskScheduler {
       kept.add(run);
     }
     const runs = this.data.runs.filter((run) => kept.has(run));
-    this.data.runs = runs.length > RUNS_TOTAL ? runs.slice(-RUNS_TOTAL) : runs;
+    const referenced = new Set(this.data.tasks.map(task => task.runId).filter(Boolean));
+    const latest = new Set(runs.slice(-RUNS_TOTAL).map(run => run.id));
+    this.data.runs = runs.filter(run => latest.has(run.id) || referenced.has(run.id));
+    const cutoff = this.now() - FINISHED_TASK_AGE_MS;
+    const finished = this.data.tasks.filter(task => FINISHED_TASK_STATES.has(task.state))
+      .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
+    const runIds = new Set(this.data.runs.map(run => run.id));
+    const dropped = new Set(finished.filter((task, index) => index >= MAX_FINISHED_TASKS ||
+      (task.updatedAt || task.createdAt || 0) < cutoff && !(task.runId && runIds.has(task.runId))).map(task => task.id));
+    if (dropped.size) this.data.tasks = this.data.tasks.filter(task => !dropped.has(task.id));
   }
   /** A definite failure is worth another try, but only a few and with growing
    * gaps. Running out of attempts pauses the task and says so, so a permanently
@@ -297,8 +309,10 @@ export class TaskScheduler {
   authorized(selector, fromChat = false) {
     assertConversationAuthorized(this.store, selector);
     for (const target of selector.targets || []) assertPersonAuthorized(this.store, selector.accountId, target.id);
-    if (!conversationEligible(this.store, selector))
-      throw new ChannelError('TASK_NOT_AUTHORIZED', '该会话未授权或自动回复已暂停，未执行定时任务');
+    if (!schedulesEnabled(this.store.settings(selector.accountId)))
+      throw new ChannelError('TASK_NOT_AUTHORIZED', '定时任务已在自动功能中关闭，未执行本次任务');
+    if (!conversationAuthorized(this.store, selector))
+      throw new ChannelError('TASK_NOT_AUTHORIZED', '该会话未授权，未执行定时任务');
     if (
       fromChat &&
       this.store.conversationSettings(selector.accountId, selector.chatType, selector.peerId).allowChatTasks === false
@@ -430,6 +444,7 @@ export class TaskScheduler {
       const previous = this.data.tasks.find((task) => task.requestKey === requestKey);
       if (previous) return clone(previous);
     }
+    if (this.failed) throw new ChannelError('TASKS_STOPPED', '定时任务已暂停，请重新启用插件后重新创建');
     const schedule = validateSchedule(input.schedule, this.now());
     if (this.data.tasks.filter((task) => task.accountId === scope.accountId && active.has(task.state)).length >= 100)
       throw new ChannelError('TASK_LIMIT', '当前账号最多保留 100 个活动任务，请先取消不再需要的任务');
@@ -501,7 +516,12 @@ export class TaskScheduler {
       Object.assign(task, previous);
       throw error;
     }
-    if (this.current?.task.id === id) this.current.controller.abort(new ChannelError('CANCELLED', '定时任务已取消'));
+    if (this.current?.task.id === id) {
+      const run = this.data.runs.find(value => value.id === this.current.task.runId);
+      const record = this.store.data.records.find(value => value.key === this.current.task.recordKey);
+      if (run && !run.finishedAt && record?.sendAttempted && !['rejected', 'not-sent'].includes(record.delivery)) run.state = 'unknown';
+      this.current.controller.abort(new ChannelError('CANCELLED', '定时任务已取消'));
+    }
     return clone(task);
   }
   pause(id, scope) {
@@ -545,15 +565,13 @@ export class TaskScheduler {
         (task.peerId === selector.peerId &&
           task.chatType === selector.chatType &&
           (!selector.senderId || task.senderId === selector.senderId)));
+    const names = new Map(this.store.conversations(accountId).map(peer => [`${peer.chatType}\u0000${peer.peerId}`, peer.name]));
     const tasks = this.data.tasks
       .filter(match)
       .map((task) => ({
         ...clone(task),
         overdue: task.state === 'pending' && task.nextRunAt <= this.now(),
-        name:
-          this.store
-            .conversations(accountId)
-            .find((peer) => peer.peerId === task.peerId && peer.chatType === task.chatType)?.name || task.peerId,
+        name: names.get(`${task.chatType}\u0000${task.peerId}`) || task.peerId,
       }));
     const ids = new Set(tasks.map((task) => task.id));
     return {
@@ -568,10 +586,28 @@ export class TaskScheduler {
   }
   start() {
     this.stopped = false;
+    this.failed = false;
+    this.failures = 0;
+    // A run that stopped on an error left its interval alive: installing another
+    // one points this.timer at the new handle and leaks the old 1 Hz timer.
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
     this.timer = setInterval(() => {
       void this.tick().catch((error) => {
-        this.error = error instanceof ChannelError ? error.message : '任务调度异常，已停止自动执行';
-        this.stopped = true;
+        // One failed save — a transient disk error on Windows — must not stop
+        // the scheduler for ever: keep retrying, and only give up once every
+        // round keeps failing.
+        this.failures = (this.failures || 0) + 1;
+        this.stopped = this.failures >= MAX_SCHEDULER_FAILURES;
+        if (this.stopped) this.failed = true;
+        this.error =
+          error instanceof ChannelError
+            ? error.message
+            : this.stopped
+              ? '任务调度异常，已停止自动执行'
+              : '任务调度异常，稍后自动重试';
       });
     }, 1000);
     this.timer.unref?.();
@@ -581,6 +617,12 @@ export class TaskScheduler {
     this.running = this.drain();
     try {
       await this.running;
+      // A clean round means the failure streak is over. Only clear a message
+      // this counter owns: other components also write to this.error.
+      if (this.failures) {
+        this.failures = 0;
+        this.error = null;
+      }
     } finally {
       this.running = null;
     }
@@ -604,7 +646,9 @@ export class TaskScheduler {
         continue;
       try {
         this.authorized(task, task.source === 'chat');
-      } catch {
+      } catch (error) {
+        const message = error instanceof ChannelError ? error.message : '任务目标未通过授权检查';
+        if (task.lastError !== message) { task.lastError = message; this.save(); }
         continue;
       }
       // The moment has passed while the machine slept, the account was offline
@@ -660,7 +704,12 @@ export class TaskScheduler {
           } else if (task.schedule.kind === 'once') task.state = 'completed';
           else {
             task.state = 'pending';
-            task.nextRunAt = scheduleNext(task.schedule, this.now());
+            let next = scheduleNext(task.schedule, task.nextRunAt ?? this.now());
+            if (task.schedule.kind === 'interval') {
+              const interval = task.schedule.minutes * 60000;
+              if (next <= this.now()) next += (Math.floor((this.now() - next) / interval) + 1) * interval;
+            } else for (let guard = 0; next <= this.now() && guard < 512; guard++) next = scheduleNext(task.schedule, next);
+            task.nextRunAt = next;
           }
           if (record.state === 'sent') {
             task.attempts = 0;
@@ -670,15 +719,16 @@ export class TaskScheduler {
           }
         }
       } catch (error) {
+        const record = this.store.data.records.find(value => value.key === task.recordKey);
+        const uncertain = !!record?.sendAttempted && !['rejected', 'not-sent'].includes(error?.details?.delivery ?? record?.delivery);
         Object.assign(run, {
-          state: 'failed',
-          reason: error instanceof ChannelError ? error.message : '任务执行失败，请检查处理记录',
+          state: uncertain ? 'unknown' : 'failed',
+          reason: uncertain ? '上次发送结果不明，请先在微信核对' : error instanceof ChannelError ? error.message : '任务执行失败，请检查处理记录',
           finishedAt: this.now(),
         });
-        task.lastState = 'failed';
+        task.lastState = run.state;
         task.lastError = run.reason;
         if (task.state === 'running') {
-          const record = this.store.data.records.find((value) => value.key === task.recordKey);
           if (record?.sendAttempted) task.state = 'paused';
           else this.reschedule(task, null);
         }

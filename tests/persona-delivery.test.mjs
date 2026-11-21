@@ -77,7 +77,7 @@ function fixture(t, answers, { caption = '此刻歇一歇，也无妨。', after
   };
   const transport = {
     status: () => ({ online: true, account: { id: accountId, nickname: '隔离测试账号' } }),
-    send: async input => { sent.push(input); if (sendFailure) throw sendFailure; return { delivery: 'server-ack', serverMessageIds: ['persona-delivery-ack'] }; },
+    send: async input => { sent.push(input); if (sendFailure) throw sendFailure; return { delivery: 'server-ack', serverMessageIds: [`persona-delivery-ack-${sent.length}`] }; },
   };
   channel = new WechatChannel({ store, runner, transport, random: () => 0 });
   channel.library.configure(accountId, { ...channel.library.account(accountId).settings, autoDescribe: false });
@@ -105,9 +105,11 @@ test('a valid selected caption is delivered without rewriting the unused assista
   await f.receive();
   assert.equal(f.record().state, 'sent', f.record().reason);
   assert.equal(f.messages.length, 1);
-  assert.deepEqual(f.sent[0].message.map(value => value.type), ['text', 'face']);
+  assert.equal(f.sent.length, 2);
+  assert.deepEqual(f.sent.flatMap(payload => payload.message.map(value => value.type)), ['text', 'face']);
   assert.equal(f.sent[0].message[0].data.text, caption);
   assert.equal(f.record().reply, caption);
+  assert.deepEqual(f.record().acknowledgedMessageIds, ['persona-delivery-ack-1', 'persona-delivery-ack-2']);
   assert.equal(f.record().replyStyleWarning, undefined, 'unused assistant boilerplate must not flag a clean caption');
 });
 
@@ -120,9 +122,10 @@ test('a boilerplate caption is sent unchanged and marked for review with the cap
   await f.receive();
   assert.equal(f.record().state, 'sent', f.record().reason);
   assert.equal(f.messages.length, 1);
+  assert.equal(f.sent.length, 2);
   assert.equal(f.sent[0].message[0].data.text, caption);
   assert.equal(f.record().replyStyleWarning, REPLY_STYLE_REVIEW_NOTE);
-  assert.deepEqual(f.record().acknowledgedMessageIds, ['persona-delivery-ack']);
+  assert.deepEqual(f.record().acknowledgedMessageIds, ['persona-delivery-ack-1', 'persona-delivery-ack-2']);
   assert(f.requests.every(request => request.model === 'first' && request.maxTokens === 1536 && request.temperature === 0.2));
   for (const scope of f.scopes) {
     for (const value of ['PERSONA_CAPTURED', 'GLOBAL_CAPTURED', 'ACCOUNT_CAPTURED']) assert(scope.prompt.includes(value), value);
@@ -142,7 +145,7 @@ test('the reported conic-section reply sends once with real ACK and its review m
   assert.equal(record.reply, answer); assert.equal(record.replyStyleWarning, REPLY_STYLE_REVIEW_NOTE);
   const restored = new StateStore(f.store.root).data.records.find(value => value.key === record.key);
   assert.equal(restored.state, 'sent'); assert.equal(restored.replyStyleWarning, REPLY_STYLE_REVIEW_NOTE);
-  assert.deepEqual(restored.acknowledgedMessageIds, ['persona-delivery-ack']);
+  assert.deepEqual(restored.acknowledgedMessageIds, ['persona-delivery-ack-1']);
 });
 
 test('a review note never turns a genuine sending failure into success', async t => {
@@ -151,7 +154,7 @@ test('a review note never turns a genuine sending failure into success', async t
   await f.receive('写出双曲线方程');
   assert.equal(f.sent.length, 1); assert.equal(f.record().state, 'failed');
   assert.equal(f.record().replyStyleWarning, REPLY_STYLE_REVIEW_NOTE);
-  assert.equal(f.record().acknowledgedMessageIds, undefined); assert.match(f.record().reason, /微信拒绝/);
+  assert.deepEqual(f.record().acknowledgedMessageIds, []); assert.match(f.record().reason, /微信拒绝/);
 });
 
 test('image-only selection does not invent text or rewrite the unused assistant body', async t => {
@@ -176,14 +179,16 @@ test('legacy runners that do not select reply text still preserve tool captions'
   const f = fixture(t, [], { caption: '原样配文。', legacy: true });
   await f.receive();
   assert.equal(f.record().state, 'sent', f.record().reason);
+  assert.equal(f.sent.length, 2);
   assert.equal(f.sent[0].message[0].data.text, '原样配文。');
-  assert.deepEqual(f.sent[0].message.map(value => value.type), ['text', 'face']);
+  assert.deepEqual(f.sent.map(payload => payload.message[0].type), ['text', 'face']);
 });
 
 test('legacy caption review propagates its note and still sends the selected caption once', async t => {
   const caption = '收到你的问题，原样配文。', f = fixture(t, [], { caption, legacy: true });
   await f.receive(); assert.equal(f.record().state, 'sent', f.record().reason);
-  assert.equal(f.sent.length, 1); assert.equal(f.sent[0].message[0].data.text, caption);
+  assert.equal(f.sent.length, 2); assert.equal(f.sent[0].message[0].data.text, caption);
+  assert.deepEqual(f.record().acknowledgedMessageIds, ['persona-delivery-ack-1', 'persona-delivery-ack-2']);
   assert.equal(f.record().replyStyleWarning, REPLY_STYLE_REVIEW_NOTE);
 });
 

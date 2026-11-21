@@ -28,7 +28,13 @@ export const loginLabels = {
   online: '微信已连接',
 };
 
-export const modeLabels = { default: '默认回复', nickname: '昵称唤醒', participate: '主动参与', natural: '自然陪聊' };
+export const modeLabels = { default: '默认回复', nickname: '昵称唤醒', participate: '参与群聊（旧版按消息）', natural: '参与群聊' };
+
+export const groupReplyModes = [
+  ['default', '默认回复', '群内 @ 当前微信账号，或以 /agent 开头提问时回复。'],
+  ['nickname', '昵称唤醒', '在默认回复基础上，增加 Agent 名字与昵称唤醒。'],
+  ['natural', '参与群聊', '保留全部直接唤醒；下方明确选择新消息、冷场和接续机会，由模型判断是否值得参与。'],
+];
 
 export const pageLabels = {
   traces: '任务执行轨迹',
@@ -36,7 +42,7 @@ export const pageLabels = {
   recovery: '发送恢复',
   'memory-review': '记忆维护',
   digests: '群聊简报',
-  overview: '工作台',
+  overview: '概览',
   authorization: '会话授权',
   records: '处理记录',
   settings: '设置',
@@ -47,7 +53,7 @@ export const pageLabels = {
   'image-generation': '图片生成',
   identity: '全局身份',
   persona: '默认助手',
-  storage: '全局工作目录',
+  storage: '数据目录',
   conversation: '会话设置',
   changelog: '更新日志',
   memory: '记忆库',

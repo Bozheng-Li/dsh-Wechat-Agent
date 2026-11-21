@@ -13,7 +13,7 @@ const groupOf = name => {
   if (name.startsWith('wechat_moments_')) return 'moments-write';
   if (['wechat_work_start', 'wechat_work_continue', 'wechat_work_cancel', 'wechat_work_task', 'wechat_work_tasks', 'wechat_work_history', 'wechat_work_parallel'].includes(name)) return 'work-sessions';
   if (['wechat_work_status', 'wechat_work_ssh_connect', 'wechat_work_ssh_exec', 'wechat_work_vscode_connect'].includes(name)) return 'connections';
-  if (name === 'wechat_work_generate_image') return 'image-generation';
+  if (['wechat_work_generate_image', 'wechat_generate_image'].includes(name)) return 'image-generation';
   return null;
 };
 

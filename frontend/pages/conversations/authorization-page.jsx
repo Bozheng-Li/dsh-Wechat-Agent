@@ -1,8 +1,88 @@
-import { useEffect, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { conversationKey, initials, matchesSearch, peerId, peerName, peerType } from "../../shared/conversations.mjs";
 import { modeLabels } from "../../shared/labels.mjs";
 import { Button } from "../../components/button.jsx";
 import { PageHead, Empty, Notice, Search, TypeFilters } from "../../components/page-ui.jsx";
+
+// One session row, memoized: the panel polls the status every 2 s, and rebuilding
+// the row closures re-rendered the whole (unvirtualized) list on every poll. Rows
+// only receive primitives plus callbacks that are created once, so a poll now
+// re-renders just the rows whose visible fields or selection changed.
+const SessionRow = memo(function SessionRow({
+  sessionKey,
+  id,
+  type,
+  name,
+  secondary,
+  mode,
+  authorized,
+  selected,
+  disabled,
+  onSelect,
+  onOpen,
+  onToggleGrant,
+}) {
+  return (
+    <div
+      className="wa-session-row has-selection"
+      data-peer-id={id}
+      data-chat-type={type}
+      data-selected={selected ? 'true' : undefined}
+    >
+      <label className="wa-session-select" title="选择此会话以批量授权或取消授权">
+        <input
+          type="checkbox"
+          aria-label={'选择' + (type === 'group' ? '群聊 ' : '私聊 ') + name + '（' + id + '）'}
+          checked={selected}
+          disabled={disabled}
+          onChange={(event) => onSelect(sessionKey, event.target.checked)}
+        />
+      </label>
+      <div className={'wa-session-avatar ' + (type === 'group' ? 'is-group' : '')}>
+        {initials(name)}
+      </div>
+      <div className="wa-session-info">
+        <div className="wa-session-title" title={name}>
+          {name}
+        </div>
+        <div className="wa-session-meta">
+          <span>{type === 'group' ? '群聊' : '私聊'}</span>
+          {secondary && <span>{secondary}</span>}
+          <span className="wa-mono" title={id}>
+            …{id.slice(-8)}
+          </span>
+        </div>
+      </div>
+      <div className="wa-session-actions">
+        {authorized && (
+          <span className="wa-badge">
+            {type === 'group' ? modeLabels[mode] : '私聊回复'}
+          </span>
+        )}
+        {authorized ? (
+          <>
+            <Button disabled={disabled} onClick={() => onOpen(sessionKey)}>
+              设置
+            </Button>
+            <Button
+              quiet
+              className="wa-icon-button"
+              icon="close"
+              disabled={disabled}
+              title={'撤销 ' + name + ' 的授权'}
+              aria-label={'撤销 ' + name + ' 的授权'}
+              onClick={() => onToggleGrant(sessionKey, false)}
+            />
+          </>
+        ) : (
+          <Button icon="plus" disabled={disabled} onClick={() => onToggleGrant(sessionKey, true)}>
+            授权
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+});
 
 export function Authorization({
   status,
@@ -39,6 +119,10 @@ export function Authorization({
     grantable = selected.filter((item) => !item.authorized),
     revocable = selected.filter((item) => item.authorized),
     disabled = blocked || !!pending;
+  // Memoized rows resolve the current row data and handlers through this ref, so
+  // their callbacks stay stable while every status poll replaces `rows`.
+  const latest = useRef(null);
+  latest.current = { rows, disabled, onDetail, onGrant, accountId: status.account?.id };
   useEffect(() => {
     const allowed = new Set(rows.map(conversationKey));
     setSelectedKeys((previous) => {
@@ -66,11 +150,25 @@ export function Authorization({
       setPending('');
     }
   };
-  const applyOne = async (item, enabled) => {
-    if (disabled) return;
-    const result = await onGrant(item, enabled);
-    if (result?.account?.id === status.account?.id) select([item], false);
-  };
+  const selectKey = useCallback((key, checked) => setSelectedKeys((previous) => {
+    if (previous.has(key) === checked) return previous;
+    const next = new Set(previous);
+    if (checked) next.add(key);
+    else next.delete(key);
+    return next;
+  }), []);
+  const openRow = useCallback((key) => {
+    const item = latest.current.rows.find((entry) => conversationKey(entry) === key);
+    if (item) latest.current.onDetail(item);
+  }, []);
+  const toggleGrant = useCallback(async (key, enabled) => {
+    const { rows: items, disabled: blocked, onGrant: grant, accountId } = latest.current;
+    if (blocked) return;
+    const item = items.find((entry) => conversationKey(entry) === key);
+    if (!item) return;
+    const result = await grant(item, enabled);
+    if (result?.account?.id === accountId) selectKey(key, false);
+  }, [selectKey]);
   const suggestions = nameQuery.trim()
     ? rows.filter((item) => (nameType === 'all' || peerType(item) === nameType) && matchesSearch(item, nameQuery))
     : [];
@@ -117,73 +215,32 @@ export function Authorization({
       </div>
     );
   };
-  const row = (item) => {
-    const secondaryName = [item.remark, item.nickname].find(name => name && name !== peerName(item));
+  const sessionRow = (item) => {
+    const key = conversationKey(item),
+      id = peerId(item),
+      type = peerType(item),
+      name = peerName(item);
     return (
-    <div
-      className="wa-session-row has-selection"
-      data-peer-id={peerId(item)}
-      data-chat-type={peerType(item)}
-      data-selected={selectedKeys.has(conversationKey(item)) ? 'true' : undefined}
-      key={conversationKey(item)}
-    >
-        <label className="wa-session-select" title="选择此会话以批量授权或取消授权">
-          <input
-            type="checkbox"
-            aria-label={'选择' + (peerType(item) === 'group' ? '群聊 ' : '私聊 ') + peerName(item) + '（' + peerId(item) + '）'}
-            checked={selectedKeys.has(conversationKey(item))}
-            disabled={disabled}
-            onChange={(event) => select([item], event.target.checked)}
-          />
-        </label>
-      <div className={'wa-session-avatar ' + (peerType(item) === 'group' ? 'is-group' : '')}>
-        {initials(peerName(item))}
-      </div>
-      <div className="wa-session-info">
-        <div className="wa-session-title" title={peerName(item)}>
-          {peerName(item)}
-        </div>
-        <div className="wa-session-meta">
-          <span>{peerType(item) === 'group' ? '群聊' : '私聊'}</span>
-          {secondaryName && <span>{secondaryName}</span>}
-          <span className="wa-mono" title={peerId(item)}>
-            …{peerId(item).slice(-8)}
-          </span>
-        </div>
-      </div>
-      <div className="wa-session-actions">
-        {item.authorized && (
-          <span className="wa-badge">
-            {peerType(item) === 'group' ? modeLabels[item.config?.mode || 'default'] : '私聊回复'}
-          </span>
-        )}
-        {item.authorized ? (
-          <>
-            <Button disabled={disabled} onClick={() => onDetail(item)}>
-              设置
-            </Button>
-            <Button
-              quiet
-              className="wa-icon-button"
-              icon="close"
-              disabled={disabled}
-              title={'撤销 ' + peerName(item) + ' 的授权'}
-              aria-label={'撤销 ' + peerName(item) + ' 的授权'}
-              onClick={() => applyOne(item, false)}
-            />
-          </>
-        ) : (
-          <Button icon="plus" disabled={disabled} onClick={() => applyOne(item, true)}>
-            授权
-          </Button>
-        )}
-      </div>
-    </div>
+      <SessionRow
+        key={key}
+        sessionKey={key}
+        id={id}
+        type={type}
+        name={name}
+        secondary={[item.remark, item.nickname].find((value) => value && value !== name) || ''}
+        mode={item.config?.mode || 'default'}
+        authorized={!!item.authorized}
+        selected={selectedKeys.has(key)}
+        disabled={disabled}
+        onSelect={selectKey}
+        onOpen={openRow}
+        onToggleGrant={toggleGrant}
+      />
     );
   };
   return (
     <>
-      <PageHead icon="people" title="会话授权" description="授权限定回复、自动操作和资料整理的对象。已授权群聊的成员默认全部授权：整理其人物资料、看其朋友圈并互动、在群里 @ 他，以及和他私聊，都不必再单独授权。">
+      <PageHead icon="people" title="会话授权" description="授权限定回复、自动操作和资料整理的对象。已授权群聊的成员默认全部授权：整理资料、朋友圈互动、群内 @ 和私聊都不必再单独授权。">
         <Button icon="refresh" disabled={disabled || !status.online} onClick={() => onAction('contacts')}>
           {busy === 'contacts' ? '正在同步…' : '同步已发现会话'}
         </Button>
@@ -262,7 +319,7 @@ export function Authorization({
           <div className="wa-session-list">
             {!!filtered.length && <div className="wa-session-columns" aria-hidden="true"><span>会话</span><span>回复方式与权限</span></div>}
             {filtered.length ? (
-              filtered.map(row)
+              filtered.map(sessionRow)
             ) : (
               <Empty icon="search" title="没有匹配的会话" description="调整筛选，或在下方按名字补充授权。" />
             )}
@@ -304,7 +361,7 @@ export function Authorization({
                   找到 {suggestions.length} 个匹配会话
                 </p>
                 {selectionBar(suggestions, 'suggestions', '全选搜索结果')}
-                <div className="wa-name-suggestions">{suggestions.map(row)}</div>
+                <div className="wa-name-suggestions">{suggestions.map(sessionRow)}</div>
                 {!suggestions.length && (
                   <p className="wa-help">暂未找到。可以换个字、试试备注或同步已发现会话；新会话需要先被微信同步到。</p>
                 )}

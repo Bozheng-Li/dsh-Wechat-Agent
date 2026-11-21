@@ -236,7 +236,9 @@ test('model, persona and per-conversation resets persist without clearing other 
   assert.deepEqual(store.progress(account, 'group', groupB), { count: 1, target: 5 });
   const restored = new StateStore(store.root);
   assert.equal(restored.persona().name, 'Companion');
-  assert.deepEqual(restored.modelConfig(), { maxTokens: 2048, temperature: 0.4, promptStrategy: 'legacy', vision: true, visionModel: null, webSearch: false, searchProvider: 'tavily', tavilyBaseURL: 'https://api.tavily.com' });
+  assert.deepEqual(restored.modelConfig(), { maxTokens: 2048, temperature: 0.4, promptStrategy: 'legacy', vision: true, visionModel: null,
+    webSearch: false, searchProvider: 'tavily', tavilyBaseURL: 'https://api.tavily.com',
+    deepseekBaseURL: 'https://api.deepseek.com/anthropic/v1', deepseekModel: 'deepseek-v4-flash' });
   assert.equal(restored.history(account, 'group', groupA).length, 1);
   assert.equal(restored.recordsPage(account, { chatType: 'group', peerId: groupA }).total, 1);
 });

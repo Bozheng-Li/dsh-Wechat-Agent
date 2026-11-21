@@ -10,6 +10,9 @@ export const recordVersion = (record) =>
     record.reply,
     record.replyDraft,
     record.replyMedia,
+    record.replyPlan,
+    record.deliveryParts,
+    record.recoveryPartIndexes,
     record.acknowledgedMessageIds,
   ]);
 export const modes = ['retry', 'text', 'image', 'regenerate'];

@@ -34,6 +34,44 @@ export const settingsCss = `
 .wa-panel .wa-data-details code{font:11px/1.7 var(--wa-font-mono);color:var(--wa-ink);background:var(--wa-subtle);padding:2px 5px;border-radius:4px;overflow-wrap:anywhere}
 .wa-panel :is(.wa-settings-document,.wa-settings-block) .wa-path-value{font:12px/1.9 var(--wa-font-mono);color:var(--wa-muted);background:var(--wa-subtle);padding:12px 14px;border:0;border-radius:5px;overflow-wrap:anywhere;white-space:pre-wrap}
 
+/* Independent personas remain a compact list; preview is a focused conversation tool. */
+.wa-panel .wa-persona-library{margin-bottom:26px}
+.wa-panel .wa-persona-distill{margin-bottom:26px;padding:18px 20px;border:1px solid var(--wa-border-soft);border-radius:var(--wa-radius-sm);background:var(--wa-subtle)}
+.wa-panel .wa-persona-distill .wa-card-heading{margin-bottom:14px}
+.wa-panel .wa-persona-distill .wa-form-grid{margin-bottom:12px}
+.wa-panel .wa-persona-distill .wa-field{margin-top:12px}
+.wa-panel .wa-persona-list{list-style:none;margin:4px 0 0;padding:0;border-top:1px solid var(--wa-border-soft)}
+.wa-panel .wa-persona-list>li{display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--wa-border-soft)}
+.wa-panel .wa-persona-pick{flex:1;min-width:0;display:flex;align-items:center;gap:10px;padding:12px 4px;border:0;background:transparent;color:var(--wa-ink);font:inherit;text-align:left;cursor:pointer;border-radius:4px}
+.wa-panel .wa-persona-pick:hover:not(:disabled) .wa-persona-name{color:var(--wa-accent)}
+.wa-panel .wa-persona-mark{width:6px;height:6px;flex-shrink:0;border-radius:50%;border:1px solid var(--wa-border)}
+.wa-panel .wa-persona-list>li[data-active] .wa-persona-mark{background:var(--wa-accent);border-color:var(--wa-accent)}
+.wa-panel .wa-persona-copy{display:flex;flex-direction:column;gap:1px;min-width:0}
+.wa-panel .wa-persona-name{font-size:13px;line-height:1.5;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wa-panel .wa-persona-meta{font-size:11px;color:var(--wa-muted)}
+.wa-panel .wa-persona-badge{margin-left:auto;flex-shrink:0;font-size:10px;line-height:1.7;padding:0 7px;border-radius:999px;border:1px solid var(--wa-border);color:var(--wa-muted)}
+.wa-panel .wa-persona-remove{flex-shrink:0;border:0;background:transparent;font:inherit;font-size:11px;color:var(--wa-faint);padding:5px 8px;border-radius:4px;cursor:pointer;opacity:.6}
+.wa-panel .wa-persona-remove:hover:not(:disabled){opacity:1;color:var(--wa-danger);background:var(--wa-danger-soft)}
+.wa-panel .wa-persona-pane{max-width:860px;min-width:0}.wa-panel .wa-persona-chat-pane{max-width:760px}
+.wa-panel .wa-persona-precision{margin-bottom:8px;font-weight:550}.wa-panel .wa-persona-precision+.wa-help{margin-bottom:24px;line-height:1.8}
+.wa-panel .wa-persona-chat{min-width:0;border:1px solid var(--wa-border);border-radius:7px;overflow:hidden;background:var(--wa-surface)}
+.wa-panel .wa-persona-chat>header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:18px 20px;border-bottom:1px solid var(--wa-border-soft)}
+.wa-panel .wa-persona-chat h2{font-size:14px;margin:0}.wa-panel .wa-persona-chat>header p{font-size:11px;color:var(--wa-muted);margin:5px 0 0}
+.wa-panel .wa-persona-chat-log{height:380px;overflow:auto;padding:18px;display:flex;flex-direction:column;gap:16px;overscroll-behavior:contain}
+.wa-panel .wa-persona-chat-message{max-width:91%;align-self:flex-start;min-width:0}.wa-panel .wa-persona-chat-message[data-role=user]{align-self:flex-end;text-align:right}
+.wa-panel .wa-persona-chat-message>small{display:block;font-size:10px;color:var(--wa-muted);margin:0 4px 5px}
+.wa-panel .wa-persona-chat-message>p{margin:0 0 5px;padding:11px 14px;border-radius:7px;background:var(--wa-subtle);font-size:13px;line-height:1.85;white-space:pre-wrap;overflow-wrap:anywhere;text-align:left}
+.wa-panel .wa-persona-chat-message[data-role=user]>p{background:var(--wa-hover);border:1px solid var(--wa-border-soft)}
+.wa-panel .wa-persona-chat-compose{padding:14px 18px;border-top:1px solid var(--wa-border-soft)}.wa-panel .wa-persona-chat-compose>textarea{resize:vertical;min-height:78px;font-size:13px;line-height:1.8}
+.wa-panel .wa-persona-chat-compose>div{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-top:10px}.wa-panel .wa-persona-chat-compose small{font-size:10px;color:var(--wa-muted)}
+.wa-panel .wa-persona-chat>.wa-alert{margin:8px 18px}
+.wa-panel .wa-automation-master{display:block;padding:0;border:0;border-top:1px solid var(--wa-border-soft);border-radius:0;background:transparent}
+.wa-panel .wa-automation-switch{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:18px 12px;min-width:0}
+.wa-panel .wa-automation-switch+.wa-automation-switch{border-top:1px solid var(--wa-border-soft)}
+.wa-panel .wa-automation-switch>div{min-width:0;flex:1}.wa-panel .wa-automation-switch h2{margin:0 0 8px;font-size:13px;font-weight:550}
+.wa-panel .wa-automation-switch .wa-help{margin:0}.wa-panel .wa-automation-switch>.wa-toggle{flex-shrink:0}
+@media(max-width:600px){.wa-panel .wa-persona-distill{padding:16px}.wa-panel .wa-persona-chat-log{height:320px}.wa-panel .wa-automation-switch{flex-wrap:wrap;padding:16px}.wa-panel .wa-automation-switch>div{flex-basis:100%}}
+
 /* A profile row and a full-width writing surface, with tools on its own edge. */
 .wa-panel .wa-persona-studio{max-width:1080px}
 .wa-panel .wa-editor-identity{padding:0 0 21px;border-bottom:1px solid var(--wa-border-soft);margin-bottom:24px}
@@ -285,6 +323,19 @@ export const settingsCss = `
 .wa-panel .wa-recovery-sheet .wa-wb-paper>small{display:block;font-size:11px;color:var(--wa-muted);margin-bottom:10px}
 .wa-panel .wa-recovery-sheet .wa-wb-parts{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 20px;font-size:11px;color:var(--wa-muted)}
 .wa-panel .wa-recovery-sheet .wa-wb-parts>span{padding:4px 8px;border:1px solid var(--wa-border-soft);border-radius:4px;background:transparent}
+.wa-panel .wa-recovery-bubbles{margin:18px 0;padding:14px 16px;border:1px solid var(--wa-border-soft);border-radius:var(--wa-radius-sm);min-width:0}
+.wa-panel .wa-recovery-bubbles>h3{font-size:12px;font-weight:600;margin:0 0 8px}
+.wa-panel .wa-recovery-bubble{display:grid;grid-template-columns:16px minmax(0,1fr);gap:10px;padding:11px 4px;border-top:1px solid var(--wa-border-soft);cursor:pointer;min-width:0}
+.wa-panel .wa-recovery-bubble>input{margin:3px 0 0}
+.wa-panel .wa-recovery-bubble>span{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:3px 12px;min-width:0}
+.wa-panel .wa-recovery-bubble strong{font-size:12px;font-weight:550}
+.wa-panel .wa-recovery-bubble small{font-size:10px;color:var(--wa-muted);text-align:right}
+.wa-panel .wa-recovery-bubble-text{grid-column:1/-1;font-size:11px;color:var(--wa-muted);white-space:pre-wrap;overflow-wrap:anywhere;max-height:96px;overflow:auto}
+.wa-panel .wa-recovery-bubble:has(input:disabled){cursor:not-allowed;opacity:.7}
+.wa-panel .wa-recovery-preview-part{display:grid;gap:5px;padding:10px 0;border-top:1px solid var(--wa-border-soft)}
+.wa-panel .wa-recovery-preview-part:first-child{border-top:0;padding-top:0}
+.wa-panel .wa-recovery-preview-part>small{font-size:10px;color:var(--wa-muted)}
+.wa-panel .wa-recovery-preview-part>p{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
 .wa-panel .wa-recovery-prepare{padding-top:18px;margin-top:18px;border-top:1px solid var(--wa-border-soft)}
 .wa-panel .wa-recovery-options{font-size:12px;color:var(--wa-muted)}
 .wa-panel .wa-recovery-options>summary{cursor:pointer;line-height:1.8}

@@ -12,19 +12,23 @@ import { workArtifacts } from '../work/artifacts.mjs';
 import { stateBackupScopes, purgeStateBackups } from './backups.mjs';
 import { personAuthorized } from '../../shared/authorization.mjs';
 
+const LOCAL_MENTION_ID = /^mentioned-[a-f0-9]{32}$/;
+
 /** Discover existing scopes without exposing unauthorised content to a model.
  * This also covers authorisations removed while the application was stopped. */
 export function storedObjectScopes(channel) {
   const scopes = new Map(), accounts = new Set(Object.keys(channel.store.data.accounts));
   const add = scope => {
     if (!scope?.accountId || !['private', 'group'].includes(scope.chatType) || !scope.peerId) return;
+    if (LOCAL_MENTION_ID.test(scope.peerId)) return;
     if (scope.peerId === scope.accountId || scope.peerId.endsWith('@chatroom') !== (scope.chatType === 'group')) return;
     accounts.add(scope.accountId); scopes.set(identity([scope.accountId, scope.chatType, scope.peerId]), {
       accountId: scope.accountId, chatType: scope.chatType, peerId: scope.peerId });
   };
   const person = (accountId, peerId) => add({ accountId, chatType: 'private', peerId });
-  for (const scope of [...stateBackupScopes(channel.store), ...Object.values(channel.store.data.conversations), ...Object.values(channel.memory.index.conversations),
-    ...channel.imageMemory.storedScopes()]) add(scope);
+  for (const scope of [...stateBackupScopes(channel.store), ...Object.values(channel.store.data.conversations),
+    ...Object.values(channel.memory.index.conversations), ...channel.imageMemory.storedScopes(),
+    ...(channel.store.data.authorizationRevocations || [])]) add(scope);
   for (const job of channel.work.store.data.jobs) add(job);
   for (const task of channel.scheduler?.data.tasks || []) add(task);
   const automation = channel.momentsAutomation;
@@ -41,6 +45,9 @@ export function storedObjectScopes(channel) {
   for (const [accountId, record] of Object.entries(channel.library.data.accounts))
     for (const asset of record.assets) if (asset.sourceMessage) add({ ...asset.sourceMessage, accountId });
   for (const accountId of accounts) {
+    // Remote administrator IDs grant scoped control but are not evidence of a
+    // private data scope. Any stored data for them is discovered below from its
+    // actual role-card, memory, conversation, or task source.
     for (const scope of channel.store.roleCards.storedScopes(accountId)) person(accountId, scope.personId);
     for (const source of channel.store.roleCards.storedSourceScopes(accountId)) add(source);
     const files = channel.longMemory.paths(accountId);

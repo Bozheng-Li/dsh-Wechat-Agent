@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { timeOperationTimeoutMs } from '../../shared/time-settings.mjs';
+import { pollDelay, stopPoll } from './use-poll.mjs';
 
 export function useWorkbench(rpc, accountId, endpoint, refreshKey = '', pollMs = 0, timeSettings) {
   const [data, setData] = useState(null),
@@ -57,11 +58,11 @@ export function useWorkbench(rpc, accountId, endpoint, refreshKey = '', pollMs =
       } catch {
         if (!controller.signal.aborted && epoch === generation.current) setRefreshError('状态自动刷新暂不可用，当前显示可能不是最新结果。');
       } finally {
-        if (!controller.signal.aborted) timer = setTimeout(poll, pollMs);
+        if (!controller.signal.aborted) timer = pollDelay(poll, pollMs);
       }
     };
-    timer = setTimeout(poll, pollMs);
-    return () => { controller.abort(); clearTimeout(timer); };
+    timer = pollDelay(poll, pollMs);
+    return () => { controller.abort(); stopPoll(timer); };
   }, [accountId, endpoint, refreshKey, pollMs]);
   const execute = async (method, payload = {}, reload = true) => {
     if (!accountId || current.current) return null;

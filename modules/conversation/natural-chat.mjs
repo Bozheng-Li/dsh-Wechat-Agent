@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { ChannelError, MAX_TEXT, emptyNaturalState } from "../../shared/contracts.mjs";
+import { ChannelError, MAX_TEXT, emptyNaturalState, participationMode, participationTriggers } from "../../shared/contracts.mjs";
 import { conversationEligible } from '../../shared/authorization.mjs';
 import { publicText } from "../../backend/wechat/ai/public-output.ts";
 
@@ -33,7 +33,7 @@ export function naturalConfigKey(config) {
     .digest('hex');
 }
 
-export function parseNaturalDecision(raw) {
+export function parseNaturalDecision(raw, { allowEmptyReply = false } = {}) {
   let value;
   try {
     value = JSON.parse(
@@ -48,12 +48,12 @@ export function parseNaturalDecision(raw) {
     Array.isArray(value) ||
     !['reply', 'skip'].includes(value.action) ||
     typeof value.text !== 'string' ||
-    (value.action === 'reply' && !value.text.trim()) ||
+    (value.action === 'reply' && !value.text.trim() && !allowEmptyReply) ||
     (value.action === 'skip' &&
       (!['no_topic', 'unrelated', 'repeated', 'busy', 'closed', 'no_followup'].includes(value.reason) ||
         value.text.trim()))
   )
-    throw new ChannelError('NATURAL_DECISION_INVALID', '模型没有返回有效的陪聊判断，本轮未发送，请在处理记录中核对');
+    throw new ChannelError('NATURAL_DECISION_INVALID', '模型没有返回有效的参与判断，本轮未发送，请在处理记录中核对');
   return { action: value.action, reason: value.action === 'skip' ? value.reason : null, text: value.text.trim() };
 }
 
@@ -109,6 +109,7 @@ export class NaturalChat {
     this.initialized.clear();
   }
   delay(config, state) {
+    if (!participationTriggers(config).timer) return 0;
     const value = config.natural;
     const draw = Math.max(0, Math.min(0.999999999, this.random()));
     const minutes =
@@ -117,6 +118,9 @@ export class NaturalChat {
         : value.minMinutes + Math.floor(draw * (value.maxMinutes - value.minMinutes + 1));
     return minutes * 60000 * Math.min(4, Math.max(1 + state.unanswered, 2 ** state.backoff));
   }
+  nextCheck(config, state) {
+    return participationTriggers(config).timer ? this.now() + this.delay(config, state) : 0;
+  }
   state(selector, config) {
     let state = this.store.naturalState(selector.accountId, selector.chatType, selector.peerId);
     const key = naturalConfigKey(config);
@@ -124,6 +128,7 @@ export class NaturalChat {
     const scheduleKey = createHash('sha256')
       .update(
         JSON.stringify([
+          participationTriggers(config).timer,
           interval.intervalMode,
           interval.intervalMode === 'fixed' ? interval.fixedMinutes : [interval.minMinutes, interval.maxMinutes],
         ])
@@ -145,7 +150,8 @@ export class NaturalChat {
       }
     }
     if (!state.nextCheckAt || (state.scheduleKey && state.scheduleKey !== scheduleKey))
-      state.nextCheckAt = this.now() + this.delay(config, state);
+      state.nextCheckAt = this.nextCheck(config, state);
+    if (!participationTriggers(config).timer) state.nextCheckAt = 0;
     state.scheduleKey = scheduleKey;
     const room = JSON.stringify([selector.accountId, selector.chatType, selector.peerId]);
     if (!this.initialized.has(room)) {
@@ -158,7 +164,7 @@ export class NaturalChat {
         state.pendingKey = null;
       }
       // A resumed instance starts a fresh opportunity, never replays downtime.
-      if (state.nextCheckAt <= this.now()) state.nextCheckAt = this.now() + this.delay(config, state);
+      if (state.nextCheckAt <= this.now()) state.nextCheckAt = this.nextCheck(config, state);
     }
     return state;
   }
@@ -172,8 +178,9 @@ export class NaturalChat {
     if (state.unanswered || state.backoff) {
       state.unanswered = 0;
       state.backoff = 0;
-      state.nextCheckAt = Math.min(state.nextCheckAt, this.now() + this.delay(config, state));
     }
+    // Cold-opening time measures silence, not a second periodic message trigger.
+    state.nextCheckAt = this.nextCheck(config, state);
     state.lastReason = null;
     if (parsed.trigger || state.followup.until < this.now()) state.followup = emptyNaturalState().followup;
     return state;
@@ -197,16 +204,19 @@ export class NaturalChat {
     const state = this.state(selector, config);
     state.lastManualAt = this.now();
     state.followup = emptyNaturalState().followup;
-    state.nextCheckAt = Math.max(state.nextCheckAt, this.now() + config.natural.minGapMinutes * 60000);
+    if (participationTriggers(config).timer)
+      state.nextCheckAt = Math.max(state.nextCheckAt, this.now() + config.natural.minGapMinutes * 60000);
     state.lastReason = 'manual';
     return state;
   }
   gate(selector, config, state, ignoreKey) {
     if (state.deliveryBlockedKey) return 'delivery';
-    if (!withinNaturalHours(config.natural, this.now())) return 'rest';
-    if (state.lastManualAt && this.now() < state.lastManualAt + config.natural.minGapMinutes * 60000) return 'manual';
-    if (state.lastSentAt && this.now() < state.lastSentAt + config.natural.minGapMinutes * 60000) return 'cooldown';
-    if (state.unanswered >= config.natural.maxUnanswered) return 'unanswered';
+    if (config.mode !== 'participate') {
+      if (!withinNaturalHours(config.natural, this.now())) return 'rest';
+      if (state.lastManualAt && this.now() < state.lastManualAt + config.natural.minGapMinutes * 60000) return 'manual';
+      if (state.lastSentAt && this.now() < state.lastSentAt + config.natural.minGapMinutes * 60000) return 'cooldown';
+      if (state.unanswered >= config.natural.maxUnanswered) return 'unanswered';
+    }
     if (
       (this.channel.active &&
         this.channel.active.record.key !== ignoreKey &&
@@ -222,11 +232,11 @@ export class NaturalChat {
       pendingKey: reason ? state.pendingKey : key,
       lastCheckAt: this.now(),
       lastReason: reason,
-      // A blocked count check or an unrelated followup must not keep pushing
-      // the independent timer into the future.
+      // Human messages already restart the silence clock. A blocked count
+      // check or followup judgment must not add a second scheduling delay.
       nextCheckAt:
         trigger === 'timer' || (trigger === 'count' && !reason)
-          ? this.now() + this.delay(config, state)
+          ? this.nextCheck(config, state)
           : state.nextCheckAt,
     };
   }
@@ -235,7 +245,8 @@ export class NaturalChat {
       config = this.store.conversationSettings(selector.accountId, selector.chatType, selector.peerId);
     if (
       selector.chatType !== 'group' ||
-      config.mode !== 'natural' ||
+      config.executionMode === 'work' ||
+      !participationMode(config.mode) ||
       (!item.scheduled && naturalConfigKey(config) !== naturalConfigKey(item.config))
     )
       return undefined;
@@ -249,7 +260,7 @@ export class NaturalChat {
       if (item.ambient && item.naturalDecision)
         state.unanswered = state.humanRevision > item.naturalRevision ? 0 : state.unanswered + 1;
       else state.unanswered = 0;
-      if (item.naturalDirect || (item.ambient && item.naturalDecision))
+      if (participationTriggers(config).followup && (item.naturalDirect || (item.ambient && item.naturalDecision)))
         state.followup = {
           senderId: item.naturalDirect ? selector.senderId : '',
           until: this.now() + config.natural.followupSeconds * 1000,
@@ -266,7 +277,7 @@ export class NaturalChat {
           question: selector.question,
           reply: reply.slice(0, MAX_TEXT),
         };
-      state.nextCheckAt = this.now() + this.delay(config, state);
+      state.nextCheckAt = this.nextCheck(config, state);
     } else if (['unknown', 'partial'].includes(outcome)) {
       state.deliveryBlockedKey = selector.key;
       state.lastReason = 'delivery';
@@ -275,7 +286,7 @@ export class NaturalChat {
       state.lastReason = selector.naturalReason || null;
       if (item.ambient) {
         state.backoff = Math.min(3, state.backoff + 1);
-        state.nextCheckAt = this.now() + this.delay(config, state);
+        state.nextCheckAt = this.nextCheck(config, state);
       }
     }
     return state;
@@ -295,7 +306,7 @@ export class NaturalChat {
         const selector = { accountId, chatType: 'group', peerId },
           config = this.store.conversationSettings(accountId, 'group', peerId);
         if (
-          config.mode !== 'natural' || config.executionMode === 'work' ||
+          config.executionMode === 'work' || !participationTriggers(config).timer ||
           [...this.channel.pauses.values()].some(
             (pause) =>
               !pause.selector ||
@@ -323,10 +334,10 @@ export class NaturalChat {
       state = this.state(selector, config);
     if (
       selector.chatType !== 'group' ||
-      config.mode !== 'natural' ||
+      !participationMode(config.mode) ||
       !conversationEligible(this.store, selector)
     )
-      throw new ChannelError('AUTH_CHANGED', '本群当前未启用自然陪聊或自动回复，请重新读取设置');
+      throw new ChannelError('AUTH_CHANGED', '本群当前未启用群聊参与或自动回复，请重新读取设置');
     if (!state.deliveryBlockedKey || input.blockedKey !== state.deliveryBlockedKey)
       throw new ChannelError('NATURAL_CHANGED', '待核对的发送记录已变化，请重新读取后再恢复');
     if ([this.channel.active, ...this.channel.queue].some((item) => item && sameRoom(item.record, selector)))
@@ -337,12 +348,12 @@ export class NaturalChat {
     state.unanswered = 0;
     state.backoff = 0;
     state.followup = emptyNaturalState().followup;
-    state.nextCheckAt = this.now() + this.delay(config, state);
+    state.nextCheckAt = this.nextCheck(config, state);
     this.save(selector, state);
   }
   summary(selector) {
     const config = this.store.conversationSettings(selector.accountId, selector.chatType, selector.peerId);
-    if (selector.chatType !== 'group' || config.mode !== 'natural') return null;
+    if (selector.chatType !== 'group' || config.executionMode === 'work' || !participationMode(config.mode)) return null;
     const state = this.store.naturalState(selector.accountId, selector.chatType, selector.peerId),
       status = this.channel.transport.status();
     const reason = !conversationEligible(this.store, selector)
@@ -351,7 +362,8 @@ export class NaturalChat {
         ? '微信离线，恢复后重新安排机会'
         : NATURAL_REASONS[this.gate(selector, config, state)] || NATURAL_REASONS[state.lastReason] || null;
     return {
-      nextCheckAt: state.nextCheckAt || null,
+      nextCheckAt: participationTriggers(config).timer ? state.nextCheckAt || null : null,
+      triggers: participationTriggers(config),
       lastSentAt: state.lastSentAt || null,
       unanswered: state.unanswered,
       deliveryBlockedKey: state.deliveryBlockedKey,
@@ -362,7 +374,7 @@ export class NaturalChat {
         !status.online ||
         status.account?.id !== selector.accountId ||
         !!state.deliveryBlockedKey ||
-        state.unanswered >= config.natural.maxUnanswered,
+        (config.mode !== 'participate' && state.unanswered >= config.natural.maxUnanswered),
       reason,
       followupUntil: state.followup.remaining && state.followup.until > this.now() ? state.followup.until : null,
     };

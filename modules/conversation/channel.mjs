@@ -8,7 +8,7 @@ import { processReply } from "./reply.mjs";
 import { scheduleMemoryMaintenance } from "./memory-maintenance.mjs";
 import { checkMemoryPressure } from "./memory-maintenance.mjs";
 import { maintainConversationMemory } from "./memory-maintenance.mjs";
-import { ChannelError, messageText, nicknameMentioned, publicError } from "../../shared/contracts.mjs";
+import { ChannelError, messageText, nicknameMentioned, publicError, schedulesEnabled, participationMode } from "../../shared/contracts.mjs";
 import { identity } from "../../backend/storage/keys.mjs";
 import { ConversationMemory } from "../memory/conversation/store.mjs";
 
@@ -30,7 +30,7 @@ import { MomentsAutomation } from '../moments/automation.mjs';
 import { PersonMemoryMaintenance } from '../memory/roles/maintenance.mjs';
 import { attachExecutionTraces } from '../traces/instrument.mjs';
 import { ObjectAuthorization } from '../authorization/service.mjs';
-import { conversationEligible } from '../../shared/authorization.mjs';
+import { conversationAuthorized, conversationEligible } from '../../shared/authorization.mjs';
 import { GroupMemberIndex } from '../authorization/members.mjs';
 
 export class WechatChannel {
@@ -66,6 +66,7 @@ export class WechatChannel {
     this.stickers = new WechatStickerService(this);
     this.workbench = new AgentWorkbench(this);
     this.work = new WorkService(this, workRunner);
+    this.imageGeneration = this.work.imageGeneration;
     this.remote = new RemoteService(this, remoteProviders);
     this.moments = new MomentsService(this);
     this.momentsAutomation = new MomentsAutomation(this);
@@ -197,19 +198,24 @@ export class WechatChannel {
       });
   }
   assertAllowed(item) {
-    const status = this.transport.status();
+    const status = this.transport.status(), settings = this.store.settings(item.record.accountId);
+    const scope = { ...item.message, accountId: item.record.accountId };
+    // Work results use their native work/reply permissions; reminders use schedules.
+    const permitted = item.scheduled && !item.scheduled.recovery && !item.scheduled.workJobId
+      ? conversationAuthorized(this.store, scope) && schedulesEnabled(settings)
+      : conversationEligible(this.store, scope);
     if (
       this.closed ||
       this.fault ||
       !status.online ||
       status.account?.id !== item.record.accountId ||
-      !conversationEligible(this.store, { ...item.message, accountId: item.record.accountId })
+      !permitted
     )
       throw new ChannelError('AUTH_CHANGED', '微信连接或会话授权已变更，未继续回复');
     if ([...this.pauses.values()].some((pause) => matches(item.record, pause.selector)))
       throw new ChannelError('AUTH_CHANGED', '当前会话正在应用设置，未继续发送');
     const current = this.store.conversationSettings(item.record.accountId, item.message.chatType, item.message.peerId);
-    if (!item.scheduled && !item.chatInWorkMode && current.executionMode === 'work' &&
+    if (!item.scheduled && !item.unavailableNotice && !item.chatInWorkMode && current.executionMode === 'work' &&
         item.message.chatType === 'group' && current.mode === 'nickname') {
       const persona = this.store.conversationPersona(item.record.accountId, item.message.chatType, item.message.peerId);
       const parsed = messageText(item.message, status.account, { mode: 'nickname', persona });
@@ -224,8 +230,8 @@ export class WechatChannel {
     }
     if (item.workForAdministrator && !workAdministrator(this.store, item.record))
       throw new ChannelError('AUTH_CHANGED', '发起人的管理员工作权限已撤销，未继续工作回复');
-    if (current.executionMode === 'work' && !item.workRouting && !item.chatInWorkMode && !item.modeControl && !item.workCommand && !item.remoteCommand &&
-        !item.scheduled?.workJobId && item.scheduled?.kind !== 'message' && !item.scheduled?.retryText)
+    if (current.executionMode === 'work' && !item.unavailableNotice && !item.workRouting && !item.chatInWorkMode && !item.modeControl && !item.workCommand && !item.remoteCommand &&
+        !item.scheduled?.workJobId && item.scheduled?.kind !== 'message' && !item.scheduled?.retryText && !item.workRoutingResolved)
       throw new ChannelError('AUTH_CHANGED', '当前是工作模式，未继续生成聊天回复');
     if (item.remoteQueryAuthorized) this.remote.assertAllowed(item.record, item.externalSignal);
     if (item.modeControlAuthorized) this.modes.assertAllowed(item.record, item.externalSignal);
@@ -246,11 +252,11 @@ export class WechatChannel {
     )
       throw new ChannelError('AUTH_CHANGED', '该会话的回复模式已变更，旧任务未继续回复');
     if (
-      item.config.mode === 'natural' &&
+      participationMode(item.config.mode) &&
       !item.scheduled &&
       naturalConfigKey(current) !== naturalConfigKey(item.config)
     )
-      throw new ChannelError('AUTH_CHANGED', '自然陪聊设置已变更，旧任务未继续回复');
+      throw new ChannelError('AUTH_CHANGED', '群聊参与设置已变更，旧任务未继续回复');
     if (item.naturalDecision) {
       const state = this.store.naturalState(item.record.accountId, item.record.chatType, item.record.peerId);
       if (item.ambient) {
@@ -318,7 +324,8 @@ export class WechatChannel {
         ...(task.workJobId ? { workJobId: task.workJobId } : {}),
         ...(task.workProgress ? { workProgress: true } : {}),
         ...(task.workRetryId ? { workDeliveryRetryId: task.workRetryId } : {}),
-        ...(task.recovery ? { recoveryOf: task.recovery.sourceKey, recoveryKinds: task.recovery.kinds } : {}),
+        ...(task.recovery ? { recoveryOf: task.recovery.sourceKey, recoveryKinds: task.recovery.kinds,
+          ...(Array.isArray(task.recovery.partIndexes) ? { recoveryPartIndexes: [...task.recovery.partIndexes] } : {}) } : {}),
         createdAt: this.now(),
         updatedAt: this.now(),
       };
@@ -370,7 +377,7 @@ export class WechatChannel {
       item.complete?.resolve(item.record);
     }
   }
-  cancel(reason = '自动回复已暂停，任务已取消', selector, { resetProgress = true, resetNatural = false } = {}) {
+  cancel(reason = '自动回复已暂停，任务已取消', selector, { resetProgress = true, resetNatural = false, keepScheduled = false } = {}) {
     if (this.memoryScan) {
       this.memoryScan.cancelled = true;
       this.memoryScan.nextAccountId = null;
@@ -380,10 +387,11 @@ export class WechatChannel {
     this.cancelWorkReplies(reason, selector);
     if (this.maintenanceActive && matches(this.maintenanceActive.selector, selector))
       this.maintenanceActive.controller.abort(new ChannelError('CANCELLED', reason));
-    if (this.active && matches(this.active.record, selector))
+    const outdated = item => matches(item.record, selector) && !(keepScheduled && item.scheduled && !item.scheduled.workJobId);
+    if (this.active && outdated(this.active))
       this.active.controller.abort(new ChannelError('CANCELLED', reason));
-    const cancelled = this.queue.filter((item) => matches(item.record, selector));
-    this.queue = this.queue.filter((item) => !matches(item.record, selector));
+    const cancelled = this.queue.filter(outdated);
+    this.queue = this.queue.filter(item => !outdated(item));
     for (const item of cancelled) {
       this.store.update(item.record, { state: 'cancelled', reason });
       item.complete?.resolve(item.record);

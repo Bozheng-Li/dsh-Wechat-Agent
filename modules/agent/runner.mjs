@@ -9,6 +9,7 @@ import { memoryCompressionPrompt } from "../../shared/memory-policy.mjs";
 import {
   INTERNAL_OUTPUT_MODES,
   buildWechatPrompt,
+  buildPersonaPassPrompt,
   messageWithHistory,
   memoryContext,
   identityData,
@@ -30,6 +31,11 @@ import { stickerDescriptions } from '../media/description.mjs';
 import { observeExecutionSession } from '../traces/model.mjs';
 import { currentTrace } from '../traces/context.mjs';
 import { TIME_DEFAULTS } from '../../shared/time-settings.mjs';
+import { publicText } from '../../backend/wechat/ai/public-output.ts';
+import { conversationInputMessages } from './conversation-input.mjs';
+import { replyClock } from '../../prompts/shared/time.mjs';
+import { PERSONA_PLANNING_PROMPT, PERSONA_NATURAL_PLANNING_PROMPT, parsePersonaOutput, personaPassInput, personaModeOf } from './persona-pass.mjs';
+import { naturalDecisionInstructions } from '../../prompts/conversation/decision.mjs';
 
 export class DshAgentRunner {
   constructor(ctx, getModelChoice = () => null, getRuntimeSettings = () => ({})) {
@@ -169,13 +175,25 @@ export class DshAgentRunner {
     executionSnapshot,
     selectReplyText,
     naturalDecision,
+    naturalOutputInstructions,
     scheduledTask,
     workContext,
+    personaModeOverride,
+    selectedReply,
+    now = Date.now,
+    messageTime,
+    timeZone,
+    clock: suppliedClock,
     onRequestMetrics,
     onBeforeTool,
     assertAllowed = () => {},
   }) {
-    signal.throwIfAborted();
+    signal.throwIfAborted(); assertAllowed();
+    // Freeze attribution and evidence before asynchronous model lookup or tool work.
+    history = structuredClone(history);
+    speaker = speaker && structuredClone(speaker);
+    account = account && structuredClone(account);
+    memory = typeof memory === 'string' ? memory : memory == null ? memory : structuredClone(memory);
     if (images.some((image) => image.type === 'face' || image.kind === 'sticker'))
       throw new ChannelError('STICKER_VISION_SKIPPED', '表情包不调用图像理解');
     // Capture once: picker/default changes apply to the next queued task,
@@ -192,6 +210,18 @@ export class DshAgentRunner {
     const memoryData = memoryContext(memory);
     const workDialogue = mode === 'work-dialogue';
     const workSnapshot = workDialogue ? structuredClone(workContext) : undefined;
+    const internalOutput = INTERNAL_OUTPUT_MODES.has(mode);
+    const personaMode = mode === 'persona-expression' || !internalOutput && !workDialogue && !systemOverride
+      ? personaModeOf(runtime.persona, personaModeOverride) : null;
+    const highPrecision = !internalOutput && personaMode === 'high-precision';
+    const replyNow = typeof now === 'function' ? now() : now;
+    const clock = structuredClone(suppliedClock ?? replyClock({ now: replyNow, messageTime, timeZone: timeZone ?? runtime.timeZone }));
+    const dialogue = !internalOutput && !workDialogue && !systemOverride
+      ? conversationInputMessages({ reference: [scheduledData(scheduledTask, mode), memoryData].filter(Boolean).join('\n\n'),
+          history, speaker, timeZone: clock.timeZone, clock,
+          currentIdentity: identityData(speaker, account, highPrecision ? null : runtime.persona),
+          current: messageWithHistory(text, [], mode, undefined) })
+      : null;
     const inputText = workDialogue || mode === 'work-routing' ? text : [identityData(speaker, account, runtime.persona), scheduledData(scheduledTask, mode), memoryData,
       messageWithHistory(text, history, mode, sessionId)]
       .filter(Boolean)
@@ -205,12 +235,12 @@ export class DshAgentRunner {
     const temperature = runtime.modelConfig?.temperature;
     // These modes and their output contracts are supplied by backend helpers,
     // never parsed from chat text. Internal isolation also applies without an override.
-    const internalOutput = INTERNAL_OUTPUT_MODES.has(mode);
     const materialTools = ['moments-materials', 'moments-publish'].includes(mode);
-    const natural = mode === 'natural' && naturalDecision;
-    const personTools = natural || ['moments-reply', 'moments-interaction'].includes(mode);
+    const natural = ['natural', 'participate'].includes(mode) && naturalDecision;
+    const personTools = ['moments-reply', 'moments-interaction'].includes(mode);
     const definitions =
       workDialogue ? [...tools] : materialTools ? tools.filter(tool => ['wechat_moments_material_search', 'wechat_moments_material_download', 'wechat_moments_material_generate'].includes(tool.name)) :
+        natural ? tools.filter(tool => ['wechat_role_card', 'wechat_sticker_read', 'wechat_sticker_send'].includes(tool.name)) :
         personTools ? tools.filter(tool => tool.name === 'wechat_role_card') : internalOutput || systemOverride
         ? []
         : [
@@ -221,24 +251,35 @@ export class DshAgentRunner {
                 ]
               : []),
           ];
+    const toolResults = [];
     const capabilities = definitions.map((definition) => ({
       ...definition,
-      execute: (args, execution) =>
-        definition.execute(args, {
+      execute: async (args, execution) => {
+        const result = await definition.execute(args, {
           ...execution,
           executionSnapshot: structuredClone({ runtime, selection: selected }),
-        }),
+        });
+        // Actual completed results, never merely proposed tool arguments, feed expression.
+        toolResults.push({ name: definition.name, callId: execution?.id,
+          content: typeof result === 'string' ? result : JSON.stringify(result ?? null) });
+        return result;
+      },
     }));
     const userMessageId = randomUUID();
     let resumedContextPending = !!sessionId;
+    let durableModelSelection = false;
     const setup = (ctx, agent) => {
+      durableModelSelection = typeof agent?.model?.select === 'function';
       // Do not load the desktop/coding preset or grant host tools to WeChat.
       const plan = promptStrategy === 'progressive-v1' ? planProgressiveTools(capabilities, text) : { initial: capabilities, deferredGroups: [] };
       const visibleCapabilities = registerModelTools(ctx, plan.initial, { deferredGroups: plan.deferredGroups, assertAllowed, agent,
         quiet: !internalOutput || workDialogue,
         onBeforeTool: internalOutput && !workDialogue ? undefined : onBeforeTool,
         native: promptStrategy === 'progressive-v1' || workDialogue || materialTools || ['work-result','work-progress','work-routing'].includes(mode), denied: '微信会话只能使用管理员开放的会话工具' });
-      observeModelRequests(ctx, { strategy: promptStrategy, mode, sessionId: id, rows: requestMetrics, onUpdate: onRequestMetrics });
+      observeModelRequests(ctx, { strategy: promptStrategy, mode, sessionId: id, rows: requestMetrics, onUpdate: rows => {
+        for (const row of requestMetrics) { row.personaMode = personaMode; row.personaPass = highPrecision ? 'planning' : mode === 'persona-expression' ? 'expression' : 'single'; }
+        onRequestMetrics?.(structuredClone(requestMetrics));
+      } });
       observeExecutionSession(ctx, { sessionId: id, agent, selection: selected, mode, context: executionTrace });
       ctx.systemPrompt.suppressRuntimeContext();
       // The host's working-directory fact is otherwise marked required and
@@ -256,10 +297,12 @@ export class DshAgentRunner {
           resumedContextPending = false;
         }
         const request = { ...(await next()) };
-        // A same-model resume otherwise retains the previous explicit effort.
-        // Reapply this turn's frozen selection; omission uses the model default.
-        if (selected.reasoningEffort !== undefined) request.reasoningEffort = selected.reasoningEffort;
-        else if (sessionId) delete request.reasoningEffort;
+        // Older hosts have no durable model selector. Newer hosts fix route and
+        // effort during preparation, before this hook, so never rewrite them here.
+        if (!durableModelSelection) {
+          if (selected.reasoningEffort !== undefined) request.reasoningEffort = selected.reasoningEffort;
+          else if (sessionId) delete request.reasoningEffort;
+        }
         // AgentOptions omits temperature in rc.5; this scoped waterfall reaches
         // the actual provider controls without changing the Host's settings.
         if (temperature !== null && temperature !== undefined) request.temperature = temperature;
@@ -284,11 +327,15 @@ export class DshAgentRunner {
           memoryAvailable: capabilities.some(tool => tool.name === 'wechat_memory'),
           systemOverride,
           naturalDecision,
+          naturalOutputInstructions: highPrecision && natural
+            ? naturalDecisionInstructions(naturalDecision).split('只输出一个 JSON 对象')[0] + '\n' + PERSONA_NATURAL_PLANNING_PROMPT
+            : naturalOutputInstructions,
           requestText: text,
           history,
           speaker,
           workContext: workSnapshot,
-        }),
+          now: new Date(replyNow), clock, includePersona: !highPrecision,
+        }) + (highPrecision && !natural ? '\n\n' + PERSONA_PLANNING_PROMPT : ''),
       });
     };
     signal.throwIfAborted();
@@ -307,6 +354,13 @@ export class DshAgentRunner {
             ...(runtime.workspacePath ? { meta: { cwd: runtime.workspacePath } } : {}),
           });
       signal.throwIfAborted();
+      // Public Agent.model selection is applied after construction, before any
+      // followup can prepare a step. Omitted effort explicitly returns to Auto.
+      if (typeof handle.agent.model?.select === 'function') {
+        durableModelSelection = true;
+        await handle.agent.model.select(structuredClone(selected));
+        signal.throwIfAborted();
+      }
       if (!sessionId) await workspace?.attachSession(id);
       if (!sessionId) {
         let titles;
@@ -316,7 +370,9 @@ export class DshAgentRunner {
       signal.throwIfAborted();
       await onSession?.(id);
       const agent = handle.agent;
-      let content = [{ type: 'text', text: inputText }];
+      // DSH accepts one native user message per followup. Preserve the ordered,
+      // author-labelled reference turns inside its single text block, with current last.
+      let content = [{ type: 'text', text: dialogue ? dialogue.map(message => message.content).join('\n\n') : inputText }];
       if (images.length) {
         if (!this.ctx.attachments?.admitPromptContent)
           throw new ChannelError('VISION_UNAVAILABLE', 'DSH 未提供图像输入组件，请检查宿主的图像功能');
@@ -341,7 +397,7 @@ export class DshAgentRunner {
         signal.throwIfAborted();
         // Same wire contract as dsh-llm.createUserMessage; no private DSH SDK
         // dependency is bundled, so the host owns every Cordis service.
-        let reply, emptyResponseRetries = 0;
+        let reply, emptyResponseRetries = 0, partialPlanning = false;
         for (;;) {
           const from = agent.session.seq;
           agent.followup(
@@ -357,13 +413,49 @@ export class DshAgentRunner {
           const events = agent.session.snapshotEvents(from);
           try {
             reply = completedText(events,
-              typeof allowEmptyReply === 'function' ? allowEmptyReply() : allowEmptyReply, selectReplyText);
+              typeof allowEmptyReply === 'function' ? allowEmptyReply() : allowEmptyReply, highPrecision ? undefined : selectReplyText);
             break;
           } catch (error) {
+            // A clipped planning note is internal evidence, never a sendable answer.
+            // Only a real text-only max-token terminal may continue to expression.
+            const end = events.findLast(event => event.type === 'turn/end');
+            const blocks = events.findLast(event => event.type === 'assistant/message' && event.data?.turn === end?.data?.turn)?.data?.message?.content;
+            if (highPrecision && !natural && end?.data?.reason?.kind === 'max-tokens' && Array.isArray(blocks) &&
+                !blocks.some(block => block.type === 'tool-call')) {
+              const notes = publicText(blocks.filter(block => block.type === 'text').map(block => block.text ?? '').join(''));
+              if (notes) { reply = notes; partialPlanning = true; break; }
+            }
             if (error.code === 'MODEL_EMPTY' && emptyResponseRetries)
               throw new ChannelError('MODEL_EMPTY', '同一模型重试一次后仍没有返回可用的最终正文；未发送回复，请检查所选模型服务');
-            if (error.code !== 'MODEL_EMPTY' || emptyResponseRetries || !retryableEmptyResponse(events)) throw error;
+            if (error.code !== 'MODEL_EMPTY' || emptyResponseRetries || toolResults.length || !retryableEmptyResponse(events)) throw error;
             emptyResponseRetries++;
+          }
+        }
+        let personaApplied = false;
+        if (highPrecision) {
+          signal.throwIfAborted(); assertAllowed();
+          const media = typeof selectedReply === 'function' ? structuredClone(selectedReply()) : null;
+          const decisionText = natural && typeof selectReplyText === 'function' ? publicText(selectReplyText(reply)) : null;
+          if (media && !(media.text ?? media.caption)?.trim() || natural && !decisionText) {
+            reply = '';
+          } else {
+            if (!reply?.trim()) throw new ChannelError('MODEL_EMPTY', '信息整理阶段没有返回内容，未发送内部资料。');
+            const packet = parsePersonaOutput(reply, { natural: !!natural });
+            if (partialPlanning) packet.incomplete = true;
+            const planningMetrics = structuredClone(requestMetrics);
+            // A fresh, internal native session cannot recurse into planning or inherit tools.
+            const expression = await this.run({ mode: 'persona-expression',
+              text: personaPassInput(text, packet, { history, speaker, account, selectedReply: media, memory: memoryData, toolResults, clock }),
+              systemOverride: buildPersonaPassPrompt({ group, persona: runtime.persona, prompt, adminNotes,
+                identityMarkdown: runtime.identityMarkdown, requestText: text, clock }),
+              tools: [], signal, assertAllowed, executionSnapshot: structuredClone({ runtime, selection: selected }), clock,
+              onRequestMetrics: rows => onRequestMetrics?.([...planningMetrics, ...rows]),
+            });
+            signal.throwIfAborted(); assertAllowed();
+            if (!expression.text?.trim()) throw new ChannelError('MODEL_EMPTY', '人设表达阶段未返回正文，未发送内部资料。');
+            requestMetrics.push(...expression.requestMetrics);
+            reply = media || natural ? expression.text : publicText(typeof selectReplyText === 'function' ? selectReplyText(expression.text) : expression.text);
+            personaApplied = true;
           }
         }
         let replyStyleWarning;
@@ -375,7 +467,8 @@ export class DshAgentRunner {
               replyStyleWarning = note;
             },
           });
-        return { text: reply, sessionId: id, requestMetrics, ...(emptyResponseRetries ? { emptyResponseRetries } : {}),
+        return { text: reply, sessionId: id, requestMetrics, personaMode, personaPasses: personaApplied ? 2 : 1, personaApplied,
+          ...(partialPlanning ? { planningIncomplete: true } : {}), ...(emptyResponseRetries ? { emptyResponseRetries } : {}),
           ...(replyStyleWarning ? { replyStyleWarning } : {}) };
       } finally {
         signal.removeEventListener('abort', cancel);

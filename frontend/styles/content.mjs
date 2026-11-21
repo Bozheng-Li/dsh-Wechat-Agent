@@ -302,6 +302,12 @@ export const contentCss = `
 .wa-panel .wa-record-state{grid-column:2;grid-row:1/3;align-self:center;max-width:150px}.wa-panel .wa-record-state .wa-badge{font-size:10px;white-space:normal;text-align:center}
 .wa-panel .wa-record-content{padding:0 23px 20px 0;min-width:0}.wa-panel .wa-record-content>.wa-help{font-size:11px}
 .wa-panel .wa-record-answer{margin:0 0 18px;padding:18px 20px;border-left:2px solid var(--wa-border);background:var(--wa-subtle)}
+.wa-panel .wa-record-bubbles{margin:16px 0;padding:14px 16px;border:1px solid var(--wa-border-soft);border-radius:5px;min-width:0}
+.wa-panel .wa-record-bubbles>h3{font-size:11px;font-weight:600;margin:0 0 8px}
+.wa-panel .wa-record-bubble{display:grid;gap:4px;padding:9px 0;border-top:1px solid var(--wa-border-soft);min-width:0}
+.wa-panel .wa-record-bubble>div{display:flex;justify-content:space-between;gap:12px;font-size:10px}
+.wa-panel .wa-record-bubble>div span{color:var(--wa-muted);text-align:right}
+.wa-panel .wa-record-bubble>p{font-size:11px;color:var(--wa-muted);white-space:pre-wrap;overflow-wrap:anywhere;max-height:120px;overflow:auto}
 .wa-panel .wa-record-answer h3{font-size:10px;font-weight:550;line-height:1.6;color:var(--wa-muted);margin-bottom:8px}
 .wa-panel .wa-record-reply{font-size:13px;line-height:1.95;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--wa-ink)}
 .wa-panel .wa-record-memory{padding:12px 0;border-top:1px solid var(--wa-border-soft);font-size:11px;color:var(--wa-muted);line-height:1.8}

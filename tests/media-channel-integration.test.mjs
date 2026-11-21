@@ -99,7 +99,11 @@ test('partial text confirmation never promotes its unconfirmed image into memory
   f.receive(); await f.channel.whenIdle();
   assert.equal(f.record().state, 'partial'); assert.deepEqual(f.record().acknowledgedMessageIds, ['9007199254740901']);
   assert.match(f.record().reason, /fixture reject/);
-  assert.equal(f.outgoing().length, 0); assert.equal(f.sent[0].message.length, 2);
+  assert.equal(f.outgoing().length, 0);
+  assert.equal(f.sent.length, 1, 'the first bubble stops delivery when its partial receipt cannot identify a confirmed part');
+  assert.equal(f.sent[0].message.length, 1);
+  assert.equal(f.sent[0].message[0].type, 'text');
+  assert(f.record().replyPlan.some(part => part.type === 'face'), 'the later image bubble remains in the persisted plan, not memory');
 });
 
 test('unknown or malformed completion does not claim an image in memory', async t => {

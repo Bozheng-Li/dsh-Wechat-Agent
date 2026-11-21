@@ -59,7 +59,7 @@ test('ordinary chat and due agent tasks still inherit global identity and the co
     assert(prompt.includes('ROOM_PRESENTATION'));
     assert(!prompt.includes('PERSONA_PRESENTATION'));
     assert(prompt.indexOf('GLOBAL_PRESENTATION') < prompt.indexOf('ROOM_PRESENTATION'), 'the current role follows global defaults while explicit fixed requirements remain effective');
-    assert(prompt.includes('管理员明确要求的语言、署名、固定开头和结尾仍保留'));
+    assert(prompt.includes('管理员全局身份'));
     assert.equal(prompt.split('GLOBAL_PRESENTATION').length, 2, 'the current global contract is included exactly once');
   }
 });

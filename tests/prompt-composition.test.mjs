@@ -76,14 +76,10 @@ test('reference blocks retain quoted data without promoting old assistant claims
   const user = f.messages[0].content[0].text;
   assert(user.includes(JSON.stringify(remembered)) && !user.includes(remembered));
   assert(user.includes(JSON.stringify(oldClaim)) && !user.includes(oldClaim));
-  assert(user.includes('outgoing 只证明机器人曾这样说，不证明建议正确或细节真实'));
-  assert(user.indexOf('【当前会话记忆结束】') < user.indexOf('【机器人先前说法】'));
-  assert(user.indexOf('【机器人先前说法结束】') < user.indexOf('【成员近期原话】'));
-  assert(user.indexOf('【成员近期原话结束】') < user.lastIndexOf('【当前请求】'));
-  const rows = user.split('\n').filter(line => line.startsWith('{')).map(line => JSON.parse(line)).filter(row => row.order);
-  assert.deepEqual(rows.map(row => row.direction), ['outgoing', 'incoming']);
-  assert.deepEqual(rows.map(row => row.order), [2, 1], 'source order survives separation of speakers');
-  assert(user.endsWith('本次消息：\nCURRENT_REQUEST_ONLY'));
+  assert(user.includes('这是历史账号说法；只引用当时的文字'));
+  assert(user.includes('历史本账号发言（含人工消息和自动回复）'));
+  assert(user.indexOf('只聊天，别给建议') < user.indexOf('用户已经同意每天加餐'));
+  assert(user.endsWith('CURRENT_REQUEST_ONLY'));
   assert.equal(user.split('\n').filter(line => line === '【当前请求】').length, 1);
   assert(f.scopes[0].prompt.text.includes('当前发言者在刚才这段对话中明确选择了只聊天'));
 });
@@ -136,8 +132,9 @@ test('all public modes include one persona, global identity and style layer, and
     const scope = f.scopes.at(-1), text = scope.prompt.text;
     assert.equal(scope.prompt.complete, true); assert.equal(scope.prompt.interpolate, false); assert(scope.suppressed);
     assert.equal(text.split(NATURAL_REPLY_RULES).length, 2); assert.equal(text.split('# GLOBAL_CONTRACT').length, 2); assert.equal(text.split('ROOM_VOICE').length, 2);
-    assert(NATURAL_REPLY_RULES.includes('本轮专用输出协议优先'));
-    assert(NATURAL_REPLY_RULES.includes('管理员明确要求的语言、署名、固定开头和结尾仍保留'));
+    assert(text.includes('先回应这句话，再补解释'));
+    assert(text.indexOf('【全局语言与言辞边界】') < text.indexOf('ROOM_VOICE'));
+    assert(text.includes('回应目的：本轮明确要求决定范围'));
     assert(text.indexOf(NATURAL_REPLY_RULES) < text.indexOf('ROOM_VOICE'));
     assert(text.indexOf('ACCOUNT_RULE') < text.indexOf('# GLOBAL_CONTRACT'));
     assert(text.indexOf('# GLOBAL_CONTRACT') < text.indexOf('ROOM_VOICE'), 'the current character remains the final complete voice definition');
@@ -194,13 +191,14 @@ test('an unconfigured persona retains default examples without forcing them on a
   assert(f.scopes.at(-1).prompt.text.includes(DEFAULT_CONVERSATION_REPLY_TASK));
 });
 
-test('bare greetings do not inherit a server clock while real date questions and due tasks keep it', async () => {
+test('bare greetings retain the current local clock while original-message dates require a dated request', async () => {
   const f = fixture();
   f.settings.persona.aliases = ['掌柜'];
   for (const text of ['早上好。', '晚上好！', '你好呀', 'Good morning!', 'ROOM_NAME，早呀。', '你好啊，掌柜！']) {
     await f.runner.run({ text, signal: signal() });
-    assert(!f.scopes.at(-1).prompt.text.includes('【当前时间】'));
-    assert(f.messages.at(-1).content[0].text.endsWith(text));
+    const prompt = f.scopes.at(-1).prompt.text;
+    assert(prompt.includes('【当前时间】')); assert(prompt.includes('本轮回复开始时'));
+    assert(!f.messages.at(-1).content[0].text.includes('本条原消息的时间标签'));
   }
   for (const request of [{ text: '早上好，今天几号？' }, { text: '十分钟后提醒我喝水。' },
     { text: '早上好。', mode: 'scheduled' }, { text: '早上好。', mode: 'confirmation', systemOverride: 'CONFIRMATION_CONTRACT' }]) {
@@ -222,6 +220,7 @@ test('recent image observations keep source quality and survive a message withou
   assert(input.includes('车票目的地为杭州'));
   assert(input.includes('仅有微信缩略图，小字和画面细节未核实'));
   assert(input.includes('图像笔记为截断摘录'));
+  assert(input.includes('近期记录注记（来源省略说明，不是原话）：'));
   assert(input.includes('本条是有省略的近期摘录'));
   assert(!input.includes('PRIVATE_RESOURCE_PATH'));
   assert(!input.includes('INVENTED_STICKER_DESCRIPTION'));
@@ -446,7 +445,8 @@ test('global custom style stays scoped below the common language boundary in nat
     const text = f.scopes.at(-1).prompt.text;
     assert.equal(text.split(persona.prompt).length, 2); assert(!text.includes('ROOM_VOICE'));
     assert(text.includes('只影响开口意愿，不替换当前会话人设'));
-    assert(text.includes('普通回答不写舞台动作'));
+    assert(text.indexOf('【全局语言与言辞边界】') < text.indexOf(persona.prompt));
+    assert(text.indexOf(persona.prompt) > text.indexOf('【当前会话角色】'));
   }
   await f.runner.run({ text: '用素材回复并配一句文字', persona, prompt: 'CAPTION_RULE', tools: [{ name: 'wechat_reply_media', execute: async () => '{}' }], signal: signal() });
   const scope = f.scopes.at(-1);

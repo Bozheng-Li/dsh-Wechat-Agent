@@ -135,6 +135,16 @@ export class MomentsService {
     }
     return this.performWrite(query, scope, requestId, signal, assertAllowed, operationKey);
   }
+  /** Stored automatic rounds retain the original administrator scope and receipt ID. */
+  async writeAutomatic(query, scope, requestId, signal, assertAllowed = () => {}) {
+    if (!['like', 'comment'].includes(query?.action))
+      throw new ChannelError('MOMENTS_WRITE_INVALID', '自动互动仅允许对已选动态点赞或评论');
+    const check = () => { assertAllowed(); assertRemoteAuthorized(this.channel, scope, signal, { feature: 'moments' }); };
+    check();
+    // performWrite's scoped authorization, target checks, ledger and epoch guard
+    // still run. This bypasses only the unrelated replies-switch admission.
+    return this.performWrite(query, scope, requestId, signal, check, undefined, true);
+  }
   async writeOwner(query, accountId, requestId, signal, assertOwner = () => {}) {
     return this.performWrite(query, { accountId, chatType: 'owner', peerId: accountId, senderId: accountId }, requestId, signal, assertOwner, undefined, true);
   }

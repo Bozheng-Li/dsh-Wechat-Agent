@@ -9,6 +9,7 @@ import {
 } from "../../shared/conversations.mjs";
 import { Glyph } from "../../components/glyph.jsx";
 import { MessageReferences } from './references.jsx';
+import { UNAVAILABLE_MESSAGE_TITLE, UNAVAILABLE_MESSAGE_REASON } from '../../../shared/message-content.mjs';
 import { Button } from "../../components/button.jsx";
 import { PageHead, Empty, Notice, Search, TypeFilters, StateBadge } from "../../components/page-ui.jsx";
 
@@ -154,7 +155,7 @@ export function Records({
                   records.map((record) => (
                     <details
                       className="wa-record"
-                      data-state={record.state}
+                      data-state={record.contentUnavailable && record.state === 'skipped' ? 'failed' : record.state}
                       key={record.key}
                       data-record-key={record.key}
                       onToggle={(event) => {
@@ -170,13 +171,13 @@ export function Records({
                         </div>
                         <div className="wa-record-headline">
                           <span className="wa-record-question">
-                            {record.question || record.reason || '这条消息没有可显示的正文'}
+                            {record.contentUnavailable ? UNAVAILABLE_MESSAGE_TITLE : record.question || record.reason || '这条消息没有可显示的正文'}
                           </span>
                         </div>
                         <span className="wa-record-state">
                           <StateBadge
-                            state={record.state}
-                            label={record.toolProgress && record.state === 'sent' ? '提示已送达' : record.mode === 'natural' && record.state === 'skipped' ? '本轮保持安静' : undefined}
+                            state={record.contentUnavailable && record.state === 'skipped' ? 'failed' : record.state}
+                            label={record.unavailableNotice && record.state === 'sent' ? '已告知读不到' : record.contentUnavailable && record.state === 'skipped' ? '正文未读到' : record.toolProgress && record.state === 'sent' ? '提示已送达' : record.mode === 'natural' && record.state === 'skipped' ? '本轮保持安静' : undefined}
                           />
                         </span>
                       </summary>
@@ -188,6 +189,23 @@ export function Records({
                             发送结果以本条回执状态为准
                           </p>
                         )}
+                        {record.replyPlan?.length > 0 && (
+                          <section className="wa-record-bubbles" aria-label="发送气泡与回执">
+                            <h3>发送分段与回执</h3>
+                            {record.replyPlan.map(plan => {
+                              const receipts = record.deliveryParts?.filter(part => part.planIndex === plan.index) || [];
+                              const acknowledged = receipts.filter(part => part.state === 'acknowledged').length,
+                                unknown = receipts.some(part => part.state === 'unknown'),
+                                notSent = receipts.some(part => part.state === 'not-sent');
+                              return <div className="wa-record-bubble" key={plan.index}>
+                                <div><strong>{plan.type === 'text' ? '文字' : plan.type === 'face' ? '表情' : plan.type === 'file' ? '文件' : '图片'} {plan.index + 1}</strong>
+                                  <span>{unknown ? '结果待核对' : acknowledged ? `已确认 ${acknowledged} 条协议消息` : notSent ? '未发送' : '等待回执'}</span></div>
+                                {plan.type === 'text' ? <p>{plan.text}</p> : <p>{plan.media?.name || plan.artifact?.name || '媒体内容'}</p>}
+                              </div>;
+                            })}
+                          </section>
+                        )}
+                        {record.personaMode && <p className="wa-help">人设模式：{record.personaMode === 'high-precision' ? `高精度 · ${record.personaPasses || 2} 次调用` : '标准'}</p>}
                         {record.reply && <section className="wa-record-answer"><h3>回复内容</h3><p className="wa-record-reply">{record.reply}</p></section>}
                         {record.memoryContext && (
                           <details className="wa-record-memory" data-testid="record-memory-context">
@@ -216,7 +234,14 @@ export function Records({
                             </p>)}
                           </details>
                         )}
-                        {record.reason && <p className="wa-alert">{record.reason}</p>}
+                        {record.contentUnavailable ? <>
+                          <p className="wa-alert is-error" role="alert" data-testid="receive-content-unavailable">{UNAVAILABLE_MESSAGE_REASON}</p>
+                          <p className="wa-help">{record.unavailableNotice
+                            ? record.state === 'sent' ? '已向对方发送上面的读取提示，微信服务端已确认。' : '读取提示的发送状态以本条回执为准，未确认时不自动重发。'
+                            : '本条未向对方发送读取提示；不会自动补发旧记录。'}</p>
+                          {record.unavailableNotice && record.reason && record.reason !== UNAVAILABLE_MESSAGE_REASON &&
+                            <p className="wa-alert is-error" role="alert">读取提示未确认送达：{record.reason}</p>}
+                        </> : record.reason && <p className="wa-alert">{record.reason}</p>}
                         {record.replyStyleWarning && (
                           <p className="wa-note-box" data-testid="reply-style-review">
                             {record.replyStyleWarning}
@@ -268,7 +293,7 @@ export function Records({
         </section>
       </div>
       <p className="wa-help wa-section-space">
-        这里显示插件观察和处理的消息，微信客户端中的完整历史不会自动导入。展开或翻页时保留浏览位置，可刷新查看最新记录。
+        这里显示应用观察和处理的消息，微信客户端中的完整历史不会自动导入。展开或翻页时保留浏览位置，可刷新查看最新记录。
       </p>
     </>
   );

@@ -5,6 +5,7 @@ import { conversationKey, mergeConversations, peerId, peerType, splitLines } fro
 import { pageLabels } from "../shared/labels.mjs";
 import { same, personaDraft, modelDraft, storageDraft, configDraft, remoteDraft } from "../shared/drafts.mjs";
 import { call } from "../shared/rpc.mjs";
+import { pollDelay, stopPoll } from './use-poll.mjs';
 
 export function usePanel(connection) {
   const motion = useVisualMotion();
@@ -15,6 +16,7 @@ export function usePanel(connection) {
   const [automationTarget, setAutomationTarget] = useState({});
   const [error, setError] = useState(''),
     [connectionError, setConnectionError] = useState(''),
+    [failedEndpoint, setFailedEndpoint] = useState(''),
     [busy, setBusy] = useState(''),
     [busyArea, setBusyArea] = useState(''),
     [notice, setNotice] = useState(null);
@@ -125,13 +127,13 @@ export function usePanel(connection) {
           if (!controller.signal.aborted && epoch === statusEpoch.current) setConnectionError(failure.message);
         }
       }
-      if (!controller.signal.aborted) timer = setTimeout(poll, 2000);
+      if (!controller.signal.aborted) timer = pollDelay(poll, 2000);
     };
     void poll();
     return () => {
       mounted.current = false;
       controller.abort();
-      clearTimeout(timer);
+      stopPoll(timer);
       statusEpoch.current++;
     };
   }, [connection]);
@@ -150,6 +152,7 @@ export function usePanel(connection) {
         : 30000;
       const value = await call(connection, endpoint, payload, AbortSignal.timeout(timeout));
       if (!mounted.current || epoch !== statusEpoch.current) return null;
+      setFailedEndpoint('');
       if (endpoint === 'contacts') {
         if (accountId === statusRef.current?.account?.id) setContacts(value);
       } else {
@@ -162,7 +165,10 @@ export function usePanel(connection) {
         setRecordEpoch((value) => value + 1);
       return value;
     } catch (failure) {
-      if (mounted.current && epoch === statusEpoch.current) setError(failure.message || '操作未完成，请核对当前状态。');
+      if (mounted.current && epoch === statusEpoch.current) {
+        setError(failure.message || '操作未完成，请核对当前状态。');
+        setFailedEndpoint(endpoint);
+      }
       return null;
     } finally {
       busyRef.current = false;
@@ -171,7 +177,9 @@ export function usePanel(connection) {
   };
   useEffect(() => {
     if (page === 'authorization' && status?.online && !contacts && !busyRef.current) void action('contacts');
-  }, [page, authTab, status?.online, status?.account?.id]);
+    // Re-run after a failed contact load, but not when merely changing tabs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, status?.online, status?.account?.id, contacts]);
   const navigate = (next, from, target) => {
     if (next === 'automation') setAutomationTarget(target || {});
     if (next === 'memory-review') {
@@ -185,7 +193,8 @@ export function usePanel(connection) {
     if (busyRef.current) return;
     const previous = draftsRef.current.persona;
     if (!previous) return;
-    setDraft('persona', personaDraft(emptyPersona({ name: previous.name, aliases: splitLines(previous.aliases) })));
+    setDraft('persona', personaDraft(emptyPersona({ name: previous.name, aliases: splitLines(previous.aliases),
+      personaMode: previous.personaMode })));
   };
   const backPage = returnPages[page] || 'settings',
     back = () => setPage(backPage),
@@ -292,12 +301,12 @@ export function usePanel(connection) {
         if (!controller.signal.aborted && queryEpoch === recordRequestEpoch.current) setRecordLoading(false);
       }
       first = false;
-      if (!controller.signal.aborted) timer = setTimeout(poll, 2000);
+      if (!controller.signal.aborted) timer = pollDelay(poll, 2000);
     };
     void poll();
     return () => {
       controller.abort();
-      clearTimeout(timer);
+      stopPoll(timer);
     };
   }, [
     connection,
@@ -344,7 +353,9 @@ export function usePanel(connection) {
       : page === 'recovery'
         ? 'records'
         : page;
-  const warning = error || connectionError || status?.startupError?.message || status?.processing?.fault?.message;
+  const warning = error || connectionError || status?.startupError?.message;
+  const processingFault = status?.processing?.fault?.message || '';
+  const retryWarning = () => action(failedEndpoint || 'status');
 
   return {
     motion,
@@ -399,5 +410,7 @@ export function usePanel(connection) {
     blocked,
     navPage,
     warning,
+    processingFault,
+    retryWarning,
   };
 }

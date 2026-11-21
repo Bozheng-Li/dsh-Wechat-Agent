@@ -341,8 +341,13 @@ export class WorkService {
           else if (record.state === 'cancelled') state = 'suppressed';
           return { ...value, state, ...(state === 'sent' ? { serverMessageId: part.serverMessageId, sentAt: record.sentAt ?? record.acknowledgedAt ?? record.updatedAt ?? this.channel.now() } : {}) };
         });
-        this.store.update(job.id, { delivery: { state: record.state === 'sent' ? 'sent' : record.state === 'partial' ? 'partial' :
-          record.state === 'unknown' ? 'unknown' : record.state === 'cancelled' ? 'suppressed' : 'failed', recordKey: record.key,
+        const confirmedArtifacts = deliveries.filter(value => value.state === 'sent').length,
+          uncertainArtifacts = deliveries.some(value => value.state === 'unknown'),
+          deliveryState = record.state === 'sent' && deliveries.every(value => value.state === 'sent') ? 'sent' :
+            record.state === 'partial' || confirmedArtifacts > 0 ? 'partial' :
+              record.state === 'unknown' || uncertainArtifacts ? 'unknown' :
+                record.state === 'cancelled' ? 'suppressed' : 'failed';
+        this.store.update(job.id, { delivery: { state: deliveryState, recordKey: record.key,
           acknowledgedMessageIds: record.acknowledgedMessageIds ?? [], deliveryParts: record.deliveryParts ?? [], artifacts: deliveries, reason: record.reason ?? '' } });
         await this.generatedImages.captureJob(this.store.get(job.id));
       } catch (error) {

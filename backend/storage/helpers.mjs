@@ -1,4 +1,4 @@
-import { emptyPersona, validateConversationSettings } from "../../shared/contracts.mjs";
+import { emptyPersona, validateConversationSettings, DEFAULT_DEEPSEEK_MODEL, DEFAULT_DEEPSEEK_URL } from "../../shared/contracts.mjs";
 
 export const defaults = {
   persona: emptyPersona,
@@ -10,6 +10,8 @@ export const defaults = {
     webSearch: false,
     searchProvider: 'tavily',
     tavilyBaseURL: 'https://api.tavily.com',
+    deepseekBaseURL: DEFAULT_DEEPSEEK_URL,
+    deepseekModel: DEFAULT_DEEPSEEK_MODEL,
   }),
   conversation: () =>
     validateConversationSettings({ mode: 'default', minMessages: 5, maxMessages: 20, recordsPath: '' }),

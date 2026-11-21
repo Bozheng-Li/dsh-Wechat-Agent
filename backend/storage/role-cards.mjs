@@ -13,6 +13,17 @@ const hash = value => createHash('sha256').update(JSON.stringify(value)).digest(
 const validId = value => typeof value === 'string' && value.length > 0 && value.length <= 200 && !/[\s\u0000-\u001f]/u.test(value);
 const revisionOf = doc => doc.updatedAt == null ? 'empty' : hash([doc.card, doc.evidence, doc.conflicts, doc.updatedAt]);
 const changed = () => new ChannelError('ROLE_CARD_CHANGED', '人物资料已更新，请重新读取后保存；当前草稿保留');
+const CHANGE_LIMIT = 96;
+
+function rememberCardChange(doc, { field, before, after, beforeEvidence, beforeConflicts, at, origin }) {
+  // A deliberate clearing is a privacy barrier, not a recoverable old value.
+  if (!after) doc.changes = doc.changes.filter(change => change.field !== field);
+  doc.changes.push({ field, before: after ? before : '', after, at, origin,
+    beforeEvidence: after ? structuredClone(beforeEvidence ?? null) : null,
+    beforeConflicts: after ? structuredClone(beforeConflicts ?? []) : [],
+    afterEvidence: structuredClone(doc.evidence[field] ?? null) });
+  doc.changes = doc.changes.slice(-CHANGE_LIMIT);
+}
 
 /** One person per WeChat account, independent of the conversation they appear in. */
 export class RoleCards {
@@ -131,13 +142,18 @@ export class RoleCards {
     const next = validateRoleCard(card);
     this.mutate(input, doc => {
       if (revisionOf(doc) !== revision) throw changed();
-      for (const [field, value] of Object.entries(next)) if (doc.card[field] !== value) {
-        doc.changes.push({ field, before: doc.card[field], after: value, at: now, origin: 'owner' });
+      let updated = false;
+      for (const [field, value] of Object.entries(next)) {
+        const beforeConflicts = doc.conflicts.filter(conflict => conflict.field === field);
+        if (doc.card[field] === value && !beforeConflicts.length) continue;
+        const before = doc.card[field], beforeEvidence = structuredClone(doc.evidence[field] ?? null);
         doc.evidence[field] = { origin: 'owner', updatedAt: now, sources: [] };
         doc.conflicts = doc.conflicts.filter(conflict => conflict.field !== field);
+        rememberCardChange(doc, { field, before, after: value, beforeEvidence, beforeConflicts, at: now, origin: 'owner' });
+        updated = true;
       }
-      if (JSON.stringify(doc.card) !== JSON.stringify(next)) doc.updatedAt = now;
-      doc.card = next; doc.changes = doc.changes.slice(-24);
+      if (updated) doc.updatedAt = now;
+      doc.card = next; doc.changes = doc.changes.slice(-CHANGE_LIMIT);
     });
     return this.view(input);
   }
@@ -178,26 +194,34 @@ export class RoleCards {
         const priorAt = doc.evidence[update.field]?.sourceAt ?? doc.evidence[update.field]?.updatedAt ?? 0;
         if (sourceAt < priorAt) continue;
         const before = doc.card[update.field];
+        const beforeEvidence = structuredClone(doc.evidence[update.field] ?? null);
+        const beforeConflicts = doc.conflicts.filter(conflict => conflict.field === update.field);
         doc.card[update.field] = update.value;
         const retained = before && update.value.includes(before) ? doc.evidence[update.field]?.sources || [] : [];
         doc.evidence[update.field] = { origin: 'agent', updatedAt: now, sourceAt,
           sources: [...new Map([...retained, ...update.evidence].map(source => [source.sourceId + ':' + source.quote, source])).values()].slice(-12) };
         doc.conflicts = doc.conflicts.filter(conflict => conflict.field !== update.field);
-        if (before !== update.value) doc.changes.push({ field: update.field, before, after: update.value, at: now, origin: 'agent' });
+        if (before !== update.value || JSON.stringify(beforeEvidence) !== JSON.stringify(doc.evidence[update.field]) || beforeConflicts.length)
+          rememberCardChange(doc, { field: update.field, before, after: update.value, beforeEvidence, beforeConflicts, at: now, origin: 'agent' });
         doc.updatedAt = now;
       }
       for (const conflict of proposal.conflicts) {
         if (Math.max(...conflict.evidence.map(source => source.time)) <
             (doc.evidence[conflict.field]?.sourceAt ?? doc.evidence[conflict.field]?.updatedAt ?? 0)) continue;
+        const beforeEvidence = structuredClone(doc.evidence[conflict.field] ?? null);
+        const beforeConflicts = doc.conflicts.filter(row => row.field === conflict.field);
         doc.conflicts = doc.conflicts.filter(row => row.field !== conflict.field);
-        doc.conflicts.push(conflict); doc.updatedAt = now;
+        doc.conflicts.push({ ...conflict, at: now });
+        if (doc.card[conflict.field]) rememberCardChange(doc, { field: conflict.field, before: doc.card[conflict.field],
+          after: doc.card[conflict.field], beforeEvidence, beforeConflicts, at: now, origin: 'agent' });
+        doc.updatedAt = now;
       }
       const completed = new Map(batch.map(source => [source.id, sourceFingerprint(source)]));
       for (const [id, digest] of completed) doc.seen[id] = digest;
       doc.pending = doc.pending.filter(source => completed.get(source.id) !== sourceFingerprint(source));
       doc.sources = [...new Map([...doc.sources, ...batch].map(source => [source.id, source])).values()].sort((a, b) => a.time - b.time).slice(-64);
       doc.seen = Object.fromEntries(Object.entries(doc.seen).slice(-4096));
-      doc.changes = doc.changes.slice(-24); doc.reviewedAt = now; doc.error = null; doc.attempts = 0;
+      doc.changes = doc.changes.slice(-CHANGE_LIMIT); doc.reviewedAt = now; doc.error = null; doc.attempts = 0;
       if (doc.refreshToken === refreshToken) { doc.refreshRequested = false; doc.refreshManual = false; }
       if (doc.reviewBatch && doc.reviewBatch.refreshToken === refreshToken) doc.reviewBatch.refresh = false;
       doc.retryAt = null;

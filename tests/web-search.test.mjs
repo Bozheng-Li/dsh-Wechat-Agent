@@ -121,7 +121,7 @@ test('search keys are stored through DSH, return only presence, and failed saves
   const store = credentials(), service = new SearchService({ credentials: store });
   await service.configureCredential('tavily', 'fixture-tavily-key');
   assert.equal(store.stored.get(SEARCH_CREDENTIALS.tavily), 'fixture-tavily-key');
-  assert.deepEqual(service.status(), { credentialStore: true, credentials: { dsh: false, tavily: true } });
+  assert.deepEqual(service.status(), { credentialStore: true, credentials: { dsh: false, tavily: true, deepseek: false } });
   assert(!JSON.stringify(service.status()).includes('fixture-tavily-key'));
   store.set = async () => { throw new Error('fixture-tavily-key private error'); };
   await assert.rejects(service.configureCredential('tavily', 'fixture-replacement'), error => error.code === 'WEB_SEARCH_CREDENTIAL_SAVE_FAILED' && !error.message.includes('fixture-tavily-key'));

@@ -99,23 +99,30 @@ test('scheduled Agent reads durable facts and scoped memory, selects an image, a
     assert.equal(selection.ok, true); assert.equal(selection.sent, false); assert.equal(f.sent.length, 0);
     return { text: '这一段最终正文不应重复发送。' };
   };
-  const reached = Promise.withResolvers(), ack = Promise.withResolvers();
-  f.transport.send = async input => { f.sent.push(input); reached.resolve(); await ack.promise; return { delivery: 'server-ack', serverMessageIds: ['image-caption-ack'] }; };
+  const reached = [Promise.withResolvers(), Promise.withResolvers()], acknowledgements = [Promise.withResolvers(), Promise.withResolvers()];
+  let sendIndex = 0;
+  f.transport.send = async input => {
+    const index = sendIndex++; f.sent.push(input); reached[index].resolve(input); await acknowledgements[index].promise;
+    return { delivery: 'server-ack', serverMessageIds: [`image-caption-ack-${index}`] };
+  };
   const task = f.create('agent', '根据饮食偏好提醒阿禾吃饭，配图'); f.advance(1000);
   const running = f.scheduler.tick();
   try {
-    await Promise.race([reached.promise, running.then(() => { throw new Error('Scheduled reply ended before reaching the transport'); })]);
+    await Promise.race([reached[0].promise, running.then(() => { throw new Error('Scheduled reply ended before reaching the text bubble'); })]);
     assert.equal(f.task(task.id).state, 'running'); assert.equal(f.record(task.id).state, 'sending');
+    assert.deepEqual(f.sent[0].message, [{ type: 'text', data: { text: '阿禾，该吃饭啦，记得避开花生。' } }]);
     assert.equal(f.store.history(owner, 'group', room).filter(entry => entry.direction === 'outgoing').length, 0);
-  } finally { ack.resolve(); await running; }
-  assert.equal(f.calls.length, 1); assert.equal(f.sent.length, 1);
-  assert.deepEqual(f.sent[0], { accountId: owner, chatType: 'group', peerId: room, message: [
-    { type: 'text', data: { text: '阿禾，该吃饭啦，记得避开花生。' } },
-    { type: 'image', data: { base64: png, mediaType: 'image/png' } },
-  ] });
+    acknowledgements[0].resolve();
+    await reached[1].promise;
+    assert.equal(f.task(task.id).state, 'running', 'first bubble ACK does not complete the scheduled task');
+    assert.deepEqual(f.sent[1].message, [{ type: 'image', data: { base64: png, mediaType: 'image/png' } }]);
+    assert.deepEqual(f.store.history(owner, 'group', room).filter(entry => entry.direction === 'outgoing').map(entry => entry.text), ['阿禾，该吃饭啦，记得避开花生。']);
+  } finally { acknowledgements.forEach(gate => gate.resolve()); await running; }
+  assert.equal(f.calls.length, 1); assert.equal(f.sent.length, 2);
+  assert.deepEqual(f.record(task.id).acknowledgedMessageIds, ['image-caption-ack-0', 'image-caption-ack-1']);
   assert.equal(f.task(task.id).state, 'completed'); assert.equal(f.record(task.id).state, 'sent');
-  assert.deepEqual(f.scheduler.list(owner).runs[0].acknowledgedMessageIds, ['image-caption-ack']);
-  await f.scheduler.tick(); assert.equal(f.sent.length, 1);
+  assert.deepEqual(f.scheduler.list(owner).runs[0].acknowledgedMessageIds, ['image-caption-ack-0', 'image-caption-ack-1']);
+  await f.scheduler.tick(); assert.equal(f.sent.length, 2);
 });
 
 test('cancelling generation prevents delivery and keeps local and pending durable memory sources', async t => {

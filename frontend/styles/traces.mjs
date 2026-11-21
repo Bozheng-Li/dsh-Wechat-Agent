@@ -1,6 +1,10 @@
 export const traceCss = `
 .wa-panel .wa-traces-page{min-width:0}
 .wa-panel .wa-traces-page{--trace-glass:light-dark(#fffffff2,#252b29ee);--trace-shadow:0 6px 18px light-dark(#234f3f0b,#00000028);--trace-line:color-mix(in srgb,var(--wa-border) 78%,var(--wa-accent))}
+.wa-panel .wa-trace-retention{display:grid;grid-template-columns:minmax(0,1fr) minmax(150px,220px) auto;gap:10px 16px;align-items:center;margin:12px 0;padding:12px 14px;border:1px solid var(--wa-border-soft);border-radius:9px;background:var(--wa-subtle)}
+.wa-panel .wa-trace-retention>div{min-width:0}.wa-panel .wa-trace-retention>div>strong{font-size:12px}.wa-panel .wa-trace-retention>div>p{margin:4px 0 0}.wa-panel .wa-trace-retention>p{grid-column:1/-1;margin:0}
+.wa-panel .wa-trace-retention>label{min-width:0}.wa-panel .wa-trace-retention .wa-select{min-height:34px}
+.wa-panel .wa-trace-retention>.wa-button{white-space:nowrap}
 .wa-panel .wa-trace-network-mark{width:36px;height:36px;flex-shrink:0;color:var(--wa-accent)}
 .wa-panel .wa-trace-capture-mark{display:flex;align-items:center;gap:12px;padding:7px 13px;border:1px solid var(--wa-border-soft);border-radius:11px;background:linear-gradient(115deg,var(--wa-accent-soft),var(--wa-surface));box-shadow:inset 0 1px var(--wa-glint)}
 .wa-panel .wa-trace-capture-mark>span{display:grid;gap:2px}
@@ -239,6 +243,8 @@ export const traceCss = `
 }
 @media(max-width:800px){
  .wa-panel .wa-trace-capture-mark{display:none}
+  .wa-panel .wa-trace-retention{grid-template-columns:minmax(0,1fr);gap:9px;padding:12px}
+  .wa-panel .wa-trace-retention>label,.wa-panel .wa-trace-retention>.wa-button{width:100%}
  .wa-panel .wa-traces-page>.wa-page-head{margin-bottom:16px}
  .wa-panel .wa-trace-type-tabs{margin-bottom:12px;padding:4px}
  .wa-panel .wa-trace-type-tabs>button{flex:0 0 auto;padding:7px 10px}

@@ -5,12 +5,12 @@ import { parseDocument } from 'yaml';
 import { resourcePath } from '../platform/resources.mjs';
 import { atomicBytes } from '../storage/atomic-text.mjs';
 import { commitConfigurationFiles } from './transaction.mjs';
-import { ChannelError, validateSettings, validatePersona, validateGlobalPersona, validateModelChoice, validateModelConfig, validateConversationSettings, workSettings, remoteSettings } from '../../shared/contracts.mjs';
+import { ChannelError, validateSettings, validatePersona, validateGlobalPersona, validatePersonaList, validateModelChoice, validateModelConfig, validateConversationSettings, workSettings, remoteSettings } from '../../shared/contracts.mjs';
 import { imageGenerationSettings } from '../../shared/image-generation.mjs';
 import { roleCardSettings } from '../../shared/role-card-settings.mjs';
 import { timeSettings } from '../../shared/time-settings.mjs';
 
-export const CONFIG_FIELDS = ['connectionWanted', 'accounts', 'modelChoice', 'modelConfig', 'persona', 'storageSettings', 'roleCardSettings', 'conversationConfigs', 'modelConfigVersion', 'personaTemplatesVersion'];
+export const CONFIG_FIELDS = ['connectionWanted', 'accounts', 'modelChoice', 'modelConfig', 'persona', 'personas', 'activePersonaId', 'storageSettings', 'roleCardSettings', 'conversationConfigs', 'modelConfigVersion', 'personaTemplatesVersion'];
 const allowed = new Set(['version', 'ownerStoreId', ...CONFIG_FIELDS, 'conversationDefaults', 'memory', 'imageMemoryDefaults', 'imageMemory', 'mediaDefaults', 'media', 'prompts', 'work', 'remote', 'imageGeneration', 'timeSettings']);
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const clone = value => structuredClone(value);
@@ -95,6 +95,20 @@ export class ConfigurationRepository {
     next.roleCardSettings = roleCardSettings(next.roleCardSettings);
     next.timeSettings = timeSettings(next.timeSettings);
     next.persona = validateGlobalPersona(this.persona(next.persona));
+    if (Array.isArray(next.personas) && next.personas.length) {
+      const list = validatePersonaList(next.personas.map(entry => {
+        if (!object(entry)) throw Error('invalid persona entry');
+        return { ...entry, persona: this.persona(entry.persona) };
+      }));
+      const active = list.some(entry => entry.id === next.activePersonaId) ? next.activePersonaId : list[0].id;
+      next.personas = list;
+      next.activePersonaId = active;
+      // The legacy single-persona field always mirrors the active entry.
+      next.persona = list.find(entry => entry.id === active).persona;
+    } else {
+      delete next.personas;
+      delete next.activePersonaId;
+    }
     if (!Number.isSafeInteger(next.personaTemplatesVersion) || next.personaTemplatesVersion < 1) throw Error('invalid persona version');
     next.modelChoice = validateModelChoice(next.modelChoice);
     next.modelConfig = validateModelConfig(next.modelConfig);
@@ -145,7 +159,8 @@ export class ConfigurationRepository {
     this.pendingPromptSignatures = new Map();
     const next = clone(data);
     const persona = (value, folder) => {
-      const result = { name: value.name, aliases: value.aliases };
+      const result = { name: value.name, aliases: value.aliases,
+        ...(Object.hasOwn(value, 'personaMode') ? { personaMode: value.personaMode } : {}) };
       for (const field of ['prompt', 'background', 'personality', 'style']) if (Object.hasOwn(value, field)) {
         if (value[field]) result[field + 'File'] = this.writePrompt(value[field], folder + '/' + field);
         else result[field] = '';
@@ -153,6 +168,21 @@ export class ConfigurationRepository {
       return result;
     };
     next.persona = persona(next.persona, 'personas/default');
+    if (Array.isArray(next.personas) && next.personas.length) {
+      next.personas = next.personas.map(entry => ({
+        id: entry.id, name: entry.name, source: entry.source, createdAt: entry.createdAt,
+        ...(Number.isSafeInteger(entry.updatedAt) ? { updatedAt: entry.updatedAt } : {}),
+        ...(entry.provenance ? { provenance: clone(entry.provenance) } : {}),
+        persona: persona(entry.persona, 'personas/entries/' + entry.id),
+      }));
+      const active = next.personas.find(entry => entry.id === next.activePersonaId) || next.personas[0];
+      next.activePersonaId = active.id;
+      // Reuse the active entry's encoded block so both fields share one prompt file.
+      next.persona = active.persona;
+    } else {
+      delete next.personas;
+      delete next.activePersonaId;
+    }
     next.accounts = Object.fromEntries(Object.entries(next.accounts).map(([id, settings]) => {
       const { prompt, ...rest } = settings;
       return [id, { ...rest, ...(prompt ? { promptFile: this.writePrompt(prompt, 'accounts/' + createHash('sha256').update(id).digest('hex').slice(0, 16)) } : { prompt: '' }) }];
@@ -165,9 +195,17 @@ export class ConfigurationRepository {
     for (const key of Object.keys(this.doc.toJS({ maxAliasCount: 20 }))) if (!Object.hasOwn(next, key)) doc.delete(key);
     return { doc, bytes: Buffer.from(doc.toString({ lineWidth: 0 })) };
   }
+  /**
+   * Write `related` files and, when the configuration changed, config.yaml itself.
+   * The freshness check reads config.yaml and every referenced prompt file, so it is
+   * only meaningful for a commit that replaces configuration content. `related`
+   * carries state that lives next to the configuration, and an owner's manual YAML
+   * edit used to abort those writes: it must stop the next configuration write, not
+   * the message state that shares this transaction.
+   */
   commit(data, related = []) {
-    this.assertCurrent();
     const changed = this.written !== JSON.stringify(data) || this.needsMigration;
+    if (changed) this.assertCurrent();
     let encoded;
     try {
       encoded = changed ? this.encode(data) : null;

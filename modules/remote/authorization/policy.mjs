@@ -1,9 +1,9 @@
-import { ChannelError } from '../../../shared/contracts.mjs';
-import { conversationEligible } from '../../../shared/authorization.mjs';
+import { ChannelError, momentsEnabled, schedulesEnabled } from '../../../shared/contracts.mjs';
+import { conversationAuthorized } from '../../../shared/authorization.mjs';
 import { promptText } from '../../../prompts/loader.mjs';
 
 /** Sender identity always comes from the current protocol message, never from its text. */
-export function remoteAccessReason(channel, scope) {
+export function remoteAccessReason(channel, scope, { feature = 'replies' } = {}) {
   if (!scope || typeof scope.peerId !== 'string' || typeof scope.senderId !== 'string' || typeof scope.accountId !== 'string') return 'scope';
   const status = channel.transport.status();
   if (channel.closed || channel.fault || !status.online) return 'unavailable';
@@ -12,7 +12,9 @@ export function remoteAccessReason(channel, scope) {
       scope.peerId.endsWith('@chatroom') !== (scope.chatType === 'group') ||
       scope.senderId === scope.accountId || scope.senderId.endsWith('@chatroom') ||
       (scope.chatType === 'private' && scope.senderId !== scope.peerId)) return 'scope';
-  if (!conversationEligible(channel.store, scope)) return 'conversation';
+  const settings = channel.store.settings(scope.accountId);
+  const enabled = feature === 'moments' ? momentsEnabled(settings) : feature === 'schedules' ? schedulesEnabled(settings) : settings.enabled === true;
+  if (!enabled || !conversationAuthorized(channel.store, scope)) return 'conversation';
   const config = channel.store.conversationSettings(scope.accountId, scope.chatType, scope.peerId);
   const global = channel.store.config.section('remote')?.globalAdminIds ?? [];
   if (config.remoteEnabled !== true) return 'disabled';
@@ -21,9 +23,9 @@ export function remoteAccessReason(channel, scope) {
 
 export const remoteAuthorized = (channel, scope) => remoteAccessReason(channel, scope) === null;
 
-export function assertRemoteAuthorized(channel, scope, signal) {
+export function assertRemoteAuthorized(channel, scope, signal, options) {
   signal?.throwIfAborted();
-  const reason = remoteAccessReason(channel, scope);
+  const reason = remoteAccessReason(channel, scope, options);
   if (reason) throw new ChannelError('REMOTE_NOT_AUTHORIZED', promptText('remote/messages.json', 'denied-' + reason, [scope?.senderId ?? '']), { reason });
   channel.store.config.assertCurrent();
 }

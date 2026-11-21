@@ -96,7 +96,7 @@ export class MomentsInteractions {
     if (this.channel.closed || this.channel.fault || !status.online || status.account?.id !== context.accountId)
       failure('ACCOUNT_CHANGED', '微信连接或账号已变化，未继续互动');
     if (context.scope.accountId !== context.accountId) failure('ACCOUNT_CHANGED', '互动请求的账号不一致');
-    if (context.scope.chatType !== 'owner') assertRemoteAuthorized(this.channel, context.scope, signal);
+    if (context.scope.chatType !== 'owner') assertRemoteAuthorized(this.channel, context.scope, signal, { feature: 'moments' });
     if (status.momentsReadReady !== true || typeof this.channel.transport.readMoments !== 'function')
       failure('MOMENTS_UNAVAILABLE', '朋友圈读取组件尚未就绪');
     this.channel.store.config?.assertCurrent();
@@ -291,7 +291,7 @@ export class MomentsInteractions {
   start(accountId, id, revision, signal, assertAllowed = () => {}, scope) {
     const context = this.context(accountId, scope); this.check(context, signal, assertAllowed);
     const existing = this.record(context, id);
-    if (existing.state !== 'draft' && existing.state !== 'generating') return this.view(existing);
+    if (existing.state !== 'draft') return this.view(existing);
     const record = this.draft(context, id, revision), rows = record.rows.filter(row => row.selected);
     if (!rows.length || rows.length > 20) failure('MOMENTS_INTERACTION_INVALID', '请先选择本轮要互动的 1–20 条动态');
     if (interactionHasComment(record.options.action) && rows.some(row => row.comment.state === 'pending' && !row.commentText && !row.commentSkipReason))
@@ -356,7 +356,9 @@ export class MomentsInteractions {
     try {
       const result = context.scope.chatType === 'owner'
         ? await this.channel.moments.writeOwner(query, context.accountId, 'interaction:' + record.id, signal, check)
-        : await this.channel.moments.write(query, context.scope, 'interaction:' + record.id, signal, check);
+        : record.automatic
+          ? await this.channel.moments.writeAutomatic(query, context.scope, 'interaction:' + record.id, signal, check)
+          : await this.channel.moments.write(query, context.scope, 'interaction:' + record.id, signal, check);
       row[action] = { state: result.alreadyLiked ? 'existing' : 'succeeded', message: '微信已确认', result }; this.save(); check();
     } catch (error) {
       if (row[action].state === 'sending') {

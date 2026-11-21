@@ -1,6 +1,6 @@
+import { ChannelError } from './errors.mjs';
 import { personaText } from '../prompts/personas/text.mjs';
 import { personaFromPreset } from '../prompts/personas/catalog.mjs';
-import { ChannelError } from './errors.mjs';
 import { validateDefaultAudience } from './moments-audience.mjs';
 import manifest from "../package.json" with { type: 'json' };
 
@@ -9,16 +9,17 @@ export const VERSION = manifest.version;
 export const AGENT_WORKSPACE_NAME = '微信agent';
 export const MAX_TEXT = 12000;
 export const DEFAULT_TAVILY_URL = 'https://api.tavily.com';
+export const DEFAULT_DEEPSEEK_URL = 'https://api.deepseek.com/anthropic/v1';
+export const DEFAULT_DEEPSEEK_MODEL = 'deepseek-v4-flash';
 
-// 错误类型来自叶子模块，避免校验器与合约互相引用。
 export { ChannelError };
 
-export function searchBaseURL(input = DEFAULT_TAVILY_URL) {
+export function searchBaseURL(input = DEFAULT_TAVILY_URL, label = 'Tavily') {
   let url;
   try {
     url = new URL(input);
   } catch {
-    throw new ChannelError('INVALID_SEARCH_CONFIG', '请输入 Tavily 服务的 HTTPS 地址。');
+    throw new ChannelError('INVALID_SEARCH_CONFIG', `请输入 ${label} 服务的 HTTPS 地址。`);
   }
   if (
     typeof input !== 'string' ||
@@ -31,7 +32,7 @@ export function searchBaseURL(input = DEFAULT_TAVILY_URL) {
   )
     throw new ChannelError(
       'INVALID_SEARCH_CONFIG',
-      'Tavily 地址必须使用 HTTPS，且不能包含账号、密码、查询参数或片段。'
+      `${label} 地址必须使用 HTTPS，且不能包含账号、密码、查询参数或片段。`
     );
   return url.href.replace(/\/+$/, '');
 }
@@ -86,13 +87,20 @@ export function validatePersona(input) {
   )
     throw new ChannelError('INVALID_PERSONA', '昵称别名最多 12 个，每个 1–80 字，不能包含换行');
   const aliases = [...new Set(input.aliases.map((alias) => alias.trim()))];
-  if (Object.hasOwn(input, 'prompt')) return { name, aliases, prompt: field('prompt', 16000) };
+  const extras = {};
+  if (Object.hasOwn(input, 'personaMode')) {
+    if (!['standard', 'high-precision'].includes(input.personaMode))
+      throw new ChannelError('INVALID_PERSONA', '人设调用模式只能是标准模式或高精度模式');
+    extras.personaMode = input.personaMode;
+  }
+  if (Object.hasOwn(input, 'prompt')) return { name, aliases, ...extras, prompt: field('prompt', 16000) };
   return {
     name,
     aliases,
-    background: field('background', 2000),
-    personality: field('personality', 6000),
-    style: field('style', 2000),
+    ...extras,
+    background: field('background', 4000),
+    personality: field('personality', 8000),
+    style: field('style', 12000),
   };
 }
 
@@ -100,6 +108,38 @@ export function validateGlobalPersona(input) {
   const persona = validatePersona(input);
   return personaText(persona).trim() ? persona : emptyPersona(persona);
 }
+
+/** Named personas: the owner can keep several and switch the active one. */
+export const PERSONA_LIMIT = 12;
+export const PERSONA_SOURCES = ['manual', 'distilled'];
+
+export function validatePersonaEntry(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input))
+    throw new ChannelError('INVALID_PERSONA', '人设条目格式不正确');
+  if (typeof input.id !== 'string' || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(input.id))
+    throw new ChannelError('INVALID_PERSONA', '人设编号无效');
+  if (typeof input.name !== 'string' || !input.name.trim() || input.name.length > 80)
+    throw new ChannelError('INVALID_PERSONA', '请填写人设名称，最多 80 字');
+  const source = PERSONA_SOURCES.includes(input.source) ? input.source : 'manual';
+  const createdAt = Number.isSafeInteger(input.createdAt) && input.createdAt >= 0 ? input.createdAt : 0;
+  // Earlier builds stored source metadata; retain it as notes, never as approval.
+  const provenance = input.provenance && typeof input.provenance === 'object' ? structuredClone(input.provenance) : undefined;
+  return { id: input.id, name: input.name.trim(), source, createdAt,
+    ...(Number.isSafeInteger(input.updatedAt) && input.updatedAt >= 0 ? { updatedAt: input.updatedAt } : {}),
+    ...(provenance ? { provenance } : {}),
+    persona: validateGlobalPersona(input.persona) };
+}
+
+export function validatePersonaList(input) {
+  if (!Array.isArray(input) || input.length > PERSONA_LIMIT)
+    throw new ChannelError('INVALID_PERSONA', `最多保留 ${PERSONA_LIMIT} 个人设`);
+  const list = input.map(validatePersonaEntry);
+  if (!list.length) throw new ChannelError('INVALID_PERSONA', '至少需要一个人设');
+  if (new Set(list.map(entry => entry.id)).size !== list.length)
+    throw new ChannelError('INVALID_PERSONA', '人设编号重复');
+  return list;
+}
+
 
 export function validateModelConfig(input) {
   if (
@@ -124,8 +164,11 @@ export function validateModelConfig(input) {
   const promptStrategy = input.promptStrategy ?? 'legacy';
   if (!['legacy', 'progressive-v1'].includes(promptStrategy))
     throw new ChannelError('INVALID_MODEL_CONFIG', '请选择完整上下文或按需加载模式');
-  if (!['dsh', 'tavily'].includes(searchProvider))
-    throw new ChannelError('INVALID_SEARCH_CONFIG', '请选择 DeepSeek 原生搜索或 Tavily。');
+  if (!['dsh', 'deepseek', 'tavily'].includes(searchProvider))
+    throw new ChannelError('INVALID_SEARCH_CONFIG', '请选择 DeepSeek 搜索或 Tavily。');
+  const deepseekModel = String(input.deepseekModel ?? DEFAULT_DEEPSEEK_MODEL).trim();
+  if (!deepseekModel || deepseekModel.length > 120 || /\s/.test(deepseekModel))
+    throw new ChannelError('INVALID_SEARCH_CONFIG', 'DeepSeek 搜索模型名称最多 120 字，不能包含空格');
   return {
     maxTokens: input.maxTokens ?? null,
     temperature: input.temperature,
@@ -135,11 +178,18 @@ export function validateModelConfig(input) {
     webSearch: input.webSearch ?? false,
     searchProvider,
     tavilyBaseURL: searchBaseURL(input.tavilyBaseURL),
+    deepseekBaseURL: searchBaseURL(input.deepseekBaseURL ?? DEFAULT_DEEPSEEK_URL, 'DeepSeek'),
+    deepseekModel,
   };
 }
 
 export function emptyNaturalSettings() {
   return {
+    // New participation starts with message opportunities only. Legacy mode
+    // permissions are restored by conversationNaturalSettings, never by the UI.
+    messageEnabled: true,
+    timerEnabled: false,
+    followupEnabled: false,
     temperament: 'balanced',
     intervalMode: 'random',
     minMinutes: 30,
@@ -157,7 +207,7 @@ export function emptyNaturalSettings() {
 
 export function validateNaturalSettings(input = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input))
-    throw new ChannelError('INVALID_NATURAL_SETTINGS', '自然陪聊设置格式不正确');
+    throw new ChannelError('INVALID_NATURAL_SETTINGS', '群聊参与设置格式不正确');
   const value = { ...emptyNaturalSettings(), ...input };
   if (!['quiet', 'balanced', 'lively'].includes(value.temperament) || !['random', 'fixed'].includes(value.intervalMode))
     throw new ChannelError('INVALID_NATURAL_SETTINGS', '请选择参与性格和主动开话题的间隔方式');
@@ -168,8 +218,8 @@ export function validateNaturalSettings(input = {}) {
     value.minMinutes > value.maxMinutes
   )
     throw new ChannelError('INVALID_NATURAL_SETTINGS', '主动间隔应为 1–1440 分钟的整数，最少分钟不能超过最多分钟');
-  if (typeof value.smartSkip !== 'boolean' || typeof value.activeHours !== 'boolean')
-    throw new ChannelError('INVALID_NATURAL_SETTINGS', '请选择智能跳过和活跃时段是否开启');
+  if (['messageEnabled', 'timerEnabled', 'followupEnabled', 'smartSkip', 'activeHours'].some(key => typeof value[key] !== 'boolean'))
+    throw new ChannelError('INVALID_NATURAL_SETTINGS', '请选择参与触发、智能跳过和活跃时段是否开启');
   for (const [key, min, max, label] of [
     ['followupSeconds', 0, 600, '连续对话窗口（秒）'],
     ['maxUnanswered', 1, 5, '无人接话次数'],
@@ -185,6 +235,31 @@ export function validateNaturalSettings(input = {}) {
   )
     throw new ChannelError('INVALID_NATURAL_SETTINGS', '活跃时段请填写不同的开始和结束时间；全天运行可关闭时段限制');
   return Object.fromEntries(Object.keys(emptyNaturalSettings()).map((key) => [key, value[key]]));
+}
+
+/** Preserve saved mode permissions before filling newly introduced defaults. */
+export function conversationNaturalSettings(config = {}) {
+  const input = config.natural;
+  if (input !== undefined && (!input || typeof input !== 'object' || Array.isArray(input)))
+    return validateNaturalSettings(input);
+  const legacyNatural = config.mode === 'natural' &&
+    !['messageEnabled', 'timerEnabled', 'followupEnabled'].some(key => Object.hasOwn(input ?? {}, key));
+  return validateNaturalSettings({
+    messageEnabled: true,
+    timerEnabled: legacyNatural,
+    followupEnabled: legacyNatural,
+    ...input,
+  });
+}
+
+export const participationMode = mode => ['participate', 'natural'].includes(mode);
+
+/** Legacy participate is strictly count-only, even with latent natural settings. */
+export function participationTriggers(config) {
+  if (config.mode === 'participate') return { message: true, timer: false, followup: false };
+  if (config.mode !== 'natural') return { message: false, timer: false, followup: false };
+  const settings = conversationNaturalSettings(config);
+  return { message: settings.messageEnabled, timer: settings.timerEnabled, followup: settings.followupEnabled };
 }
 
 export function emptyNaturalState() {
@@ -312,7 +387,7 @@ export function validateConversationSettings(input) {
     workSenderIds: [...new Set(workSenderIds)].sort(),
     remoteEnabled: input.remoteEnabled ?? false,
     adminIds,
-    natural: validateNaturalSettings(input.natural),
+    natural: conversationNaturalSettings(input),
   };
 }
 
@@ -389,7 +464,10 @@ export function validateSettings(input) {
   };
   if (typeof input.prompt !== 'string' || input.prompt.length > 4000)
     throw new ChannelError('INVALID_PROMPT', '回复要求最多 4000 字');
-  return {
+  for (const key of ['schedules', 'moments'])
+    if (input[key] !== undefined && typeof input[key] !== 'boolean')
+      throw new ChannelError('INVALID_SETTINGS', '自动功能开关格式不正确');
+  const settings = {
     enabled: input.enabled,
     privatePeers: peers(input.privatePeers, false),
     groups: peers(input.groups, true),
@@ -399,7 +477,16 @@ export function validateSettings(input) {
     // 账号级默认屏蔽名单只预填手动发布页；自动发布须显式勾选后才会使用。
     ...validateDefaultAudience(input),
   };
+  // Older configurations only had the single master switch, so a missing flag
+  // keeps following it until the user sets one explicitly.
+  if (input.schedules !== undefined) settings.schedules = input.schedules;
+  if (input.moments !== undefined) settings.moments = input.moments;
+  return settings;
 }
+
+export const schedulesEnabled = (settings) => (settings?.schedules ?? settings?.enabled) === true;
+
+export const momentsEnabled = (settings) => (settings?.moments ?? settings?.enabled) === true;
 
 export function publicError(error, fallback = '操作失败，请稍后重试') {
   // Only our error vocabulary crosses the UI boundary. Provider/network errors
@@ -447,8 +534,8 @@ export function messageText(message, account, { mode = 'default', persona = empt
   const mentioned = message.message.some((s) => s.type === 'at' && s.data?.qq === account.id);
   if (mentioned) {
     // WeChat keeps the display mention in text as well as the native at-list.
-    // Strip only a leading mention delimited by WeChat's special space.
-    text = text.replace(/^@[^\r\n\u2005]{1,150}\u2005\s*/u, '').trim();
+    // Strip the entire leading native-mention run, retaining /work below.
+    text = text.replace(/^(?:@[^\r\n\u2005]{1,150}\u2005\s*)+/u, '').trim();
   }
   const workCommand = /^\/work(?:\s|$)/i.test(text);
   const command = /^\/(?:agent|pc|dsh)(?:\s|$)/i.test(text) || workCommand;

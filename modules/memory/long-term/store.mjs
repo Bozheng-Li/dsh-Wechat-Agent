@@ -73,6 +73,40 @@ function readJson(file) {
     throw new ChannelError('LONG_MEMORY_INVALID', '长期记忆来源索引无法读取，请保留文件并检查 UTF-8 编码、内容和权限');
   }
 }
+/** File identity for cache validation: any external rewrite changes one of these. */
+function fileStamp(file) {
+  try {
+    const stat = fs.statSync(file);
+    return stat.mtimeMs + ':' + stat.size;
+  } catch {
+    return null;
+  }
+}
+const MAX_SEEN = 4000;
+/** `seen` grows with every extracted source; keep the newest entries (FIFO). */
+function boundSeen(cursor) {
+  const keys = Object.keys(cursor);
+  if (keys.length <= MAX_SEEN) return false;
+  for (const key of keys.slice(0, keys.length - MAX_SEEN)) delete cursor[key];
+  return true;
+}
+/**
+ * Apply non-overlapping replacements in a single pass. Equivalent to splicing
+ * from the last range down, but the document is copied once instead of once per
+ * replacement (a 5000-fact batch used to be O(k × document length)).
+ */
+function replaceRanges(markdown, replacements) {
+  if (!replacements.length) return markdown;
+  const ranges = [...replacements].sort((a, b) => a.start - b.start),
+    parts = [];
+  let cursor = 0;
+  for (const range of ranges) {
+    parts.push(markdown.slice(cursor, range.start), range.value ?? '');
+    cursor = range.end;
+  }
+  parts.push(markdown.slice(cursor));
+  return parts.join('');
+}
 function decode(value) {
   try {
     const result = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'));
@@ -126,6 +160,7 @@ export class LongTermMemory {
     this.readErrors = new Map();
     this.extractionErrors = new Map();
     this.extracting = new Set();
+    this.states = new Map();
   }
   refreshError(accountId) {
     const messages = [
@@ -134,6 +169,18 @@ export class LongTermMemory {
     ].filter(Boolean);
     if (messages.length) this.errors.set(accountId, [...new Set(messages)].join('；'));
     else this.errors.delete(accountId);
+  }
+  /** 保存模型密钥后，之前“缺少密钥”的失败已经过期，不该继续挂在页面上。 */
+  clearCredentialErrors() {
+    const stale = message => typeof message === 'string' && message.includes('API Key');
+    const touched = new Set();
+    for (const [accountId, message] of [...this.readErrors]) if (stale(message)) { this.readErrors.delete(accountId); touched.add(accountId); }
+    for (const [key, message] of [...this.extractionErrors]) if (stale(message)) {
+      this.extractionErrors.delete(key);
+      touched.add(key.slice(0, key.includes(':') ? key.indexOf(':') : key.length));
+    }
+    for (const accountId of touched) this.refreshError(accountId);
+    return touched.size;
   }
   account(accountId) {
     if (typeof accountId !== 'string' || !accountId || accountId.length > 200 || /[\s\u0000-\u001f]/.test(accountId))
@@ -174,8 +221,58 @@ export class LongTermMemory {
     }
     return [...ignored];
   }
+  /** Pending sources share the retention clock of the window that produced them. */
+  retainPending(state) {
+    let changed = false;
+    for (const [key, pending] of Object.entries(state.pending)) {
+      const keep = [];
+      for (const entry of pending.entries || []) {
+        if (!Number.isFinite(entry.rememberedAt)) {
+          entry.rememberedAt = state.retentionActivatedAt;
+          changed = true;
+        }
+        if (this.expiry(entry.rememberedAt) > this.now()) keep.push(entry);
+        else {
+          state.seen[key] ??= {};
+          state.seen[key][entry.key] = entry.digest;
+          boundSeen(state.seen[key]);
+          changed = true;
+        }
+      }
+      if (keep.length) pending.entries = keep;
+      else delete state.pending[key];
+    }
+    return changed;
+  }
+  /** The Markdown file stays authoritative, including after a manual deletion. */
+  ensureDocument(accountId, paths, state, existed) {
+    if (!fs.existsSync(paths.file)) {
+      // A manually deleted Markdown file is a clear, not a request to restore
+      // it from the still-retained local window or an old extraction batch.
+      if (existed) {
+        state.ignoredKeys = this.baseline(accountId, state);
+        state.pending = {};
+        state.seen = {};
+        state.generation = randomUUID();
+      }
+      writeText(paths.file, this.blank(accountId));
+      this.saveState(state);
+    } else if (!existed) this.saveState(state);
+  }
   state(accountId) {
-    const paths = this.paths(accountId);
+    const paths = this.paths(accountId),
+      stamp = fileStamp(paths.state),
+      cached = this.states.get(accountId);
+    // The resolved state is authoritative between writes: one message path asks
+    // for it several times, and only a changed file needs another parse.
+    if (cached && cached.stamp === stamp) {
+      const state = cached.state;
+      if (this.retainPending(state)) this.saveState(state);
+      this.ensureDocument(accountId, paths, state, true);
+      cached.stamp = fileStamp(paths.state);
+      return state;
+    }
+    this.states.delete(accountId);
     let state = readJson(paths.state),
       existed = !!state;
     state ??= {
@@ -203,42 +300,20 @@ export class LongTermMemory {
       state.retentionActivatedAt = this.now();
       this.saveState(state);
     }
-    let retentionChanged = false;
-    for (const [key, pending] of Object.entries(state.pending)) {
-      const keep = [];
-      for (const entry of pending.entries || []) {
-        if (!Number.isFinite(entry.rememberedAt)) {
-          entry.rememberedAt = state.retentionActivatedAt;
-          retentionChanged = true;
-        }
-        if (this.expiry(entry.rememberedAt) > this.now()) keep.push(entry);
-        else {
-          state.seen[key] ??= {};
-          state.seen[key][entry.key] = entry.digest;
-          retentionChanged = true;
-        }
-      }
-      if (keep.length) pending.entries = keep;
-      else delete state.pending[key];
-    }
-    if (retentionChanged) this.saveState(state);
-    if (!fs.existsSync(paths.file)) {
-      // A manually deleted Markdown file is a clear, not a request to restore
-      // it from the still-retained local window or an old extraction batch.
-      if (existed) {
-        state.ignoredKeys = this.baseline(accountId, state);
-        state.pending = {};
-        state.seen = {};
-        state.generation = randomUUID();
-      }
-      writeText(paths.file, this.blank(accountId));
-      this.saveState(state);
-    } else if (!existed) this.saveState(state);
+    if (this.retainPending(state)) this.saveState(state);
+    this.ensureDocument(accountId, paths, state, existed);
+    this.states.set(accountId, { state, stamp: fileStamp(paths.state) });
     return state;
   }
   saveState(state) {
     state.updatedAt = this.now();
-    writeText(this.paths(state.accountId).state, JSON.stringify(state, null, 2) + '\n');
+    const file = this.paths(state.accountId).state,
+      text = JSON.stringify(state, null, 2) + '\n',
+      cached = this.states.get(state.accountId);
+    // One message path can persist the same state twice; only changed bytes (or
+    // a file replaced behind us) need another atomic write.
+    if (cached?.text !== text || cached.stamp !== fileStamp(file)) writeText(file, text);
+    this.states.set(state.accountId, { state, stamp: fileStamp(file), text });
   }
   documentBytes(accountId) {
     const file = this.paths(accountId).file;
@@ -253,8 +328,8 @@ export class LongTermMemory {
     }
   }
   document(accountId) {
-    this.state(accountId);
-    const bytes = this.documentBytes(accountId);
+    const state = this.state(accountId),
+      bytes = this.documentBytes(accountId);
     let markdown;
     try {
       markdown = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
@@ -264,8 +339,7 @@ export class LongTermMemory {
         '长期记忆不是有效的 UTF-8 文本，原始文件已保留，请修复编码后再使用'
       );
     }
-    const doc = this.parse(accountId, markdown),
-      state = this.state(accountId),
+    const doc = this.parse(accountId, markdown, state.retentionActivatedAt),
       digest = hash(doc.globalNotes);
     // Only an owner edit of the shared notes renews them. Automatic fact
     // extraction and ordinary reads must not extend their lifetime.
@@ -281,7 +355,9 @@ export class LongTermMemory {
       retentionDays: this.store.config.data.memory.retentionDays,
     };
   }
-  parse(accountId, markdown) {
+  parse(accountId, markdown, retentionActivatedAt) {
+    // Keep the public two-argument reader compatible without a per-fact state read.
+    retentionActivatedAt ??= this.state(accountId).retentionActivatedAt;
     if (typeof markdown !== 'string' || markdown.length > MAX_DOCUMENT || /\u0000/.test(markdown))
       throw new ChannelError('LONG_MEMORY_INVALID', '长期记忆正文无效或超过 200 万字符，请分批整理文件');
     const header = [...markdown.matchAll(/<!-- wechat-long-memory:v1 ([A-Za-z0-9_-]+) -->/g)];
@@ -305,6 +381,13 @@ export class LongTermMemory {
     const scopes = [...markdown.matchAll(/<!-- wechat-conversation:begin ([A-Za-z0-9_-]+) -->/g)];
     if ([...markdown.matchAll(/<!-- wechat-conversation:end -->/g)].length !== scopes.length)
       throw new ChannelError('LONG_MEMORY_INVALID', '长期记忆会话范围标记不完整');
+    // Section names come from the single conversation list, built once and only
+    // when the document actually contains sections.
+    let names;
+    const sectionName = (scope) => {
+      names ??= new Map(this.store.conversations(accountId).map((peer) => [peer.key, peer.name]));
+      return names.get(scope.key) || scope.name || '会话';
+    };
     for (let index = 0; index < scopes.length; index++) {
       const match = scopes[index],
         scope = decode(match[1]),
@@ -358,7 +441,7 @@ export class LongTermMemory {
         facts.push({
           ...metadata,
           ...(legacyDefault
-            ? { expiresAt: this.expiry(this.state(accountId).retentionActivatedAt), expirySource: 'default' }
+            ? { expiresAt: this.expiry(retentionActivatedAt), expirySource: 'default' }
             : {}),
           text,
           start: factStart,
@@ -368,7 +451,7 @@ export class LongTermMemory {
       }
       sections.push({
         ...scope,
-        name: this.store.conversations(accountId).find((peer) => peer.key === scope.key)?.name || scope.name || '会话',
+        name: sectionName(scope),
         start,
         end,
         bodyEnd,
@@ -485,8 +568,7 @@ export class LongTermMemory {
           removed++;
         }
       }
-      let markdown = doc.markdown;
-      for (const replacement of replacements.sort((a, b) => b.start - a.start)) markdown = markdown.slice(0, replacement.start) + markdown.slice(replacement.end);
+      let markdown = replaceRanges(doc.markdown, replacements);
       for (const [key, pending] of Object.entries(state.pending)) {
         if (conversation(pending.selector)) { for (const entry of pending.entries) deletedKeys.add(entry.key); delete state.pending[key]; delete state.seen[key]; }
         else {
@@ -498,20 +580,19 @@ export class LongTermMemory {
       for (const row of related) delete state.seen[conversationKey(accountId, row.chatType, row.peerId)];
       for (const cursor of Object.values(state.seen)) for (const key of deletedKeys) delete cursor[key];
       state.ignoredKeys = state.ignoredKeys.filter(key => !deletedKeys.has(key)); state.generation = randomUUID();
-      if (markdown !== doc.markdown) { this.parse(accountId, markdown); writeText(paths.file, markdown); }
+      if (markdown !== doc.markdown) { this.parse(accountId, markdown, state.retentionActivatedAt); writeText(paths.file, markdown); }
       const archive = path.join(paths.directory, 'global-memory-archive');
       if (fs.existsSync(archive)) for (const entry of fs.readdirSync(archive, { withFileTypes: true })) {
         if (!entry.name.endsWith('.md')) continue;
         const file = ownedPath(this.store.root, path.join(archive, entry.name));
-        const saved = this.parse(accountId, fs.readFileSync(file, 'utf8')), remove = [];
+        const saved = this.parse(accountId, fs.readFileSync(file, 'utf8'), state.retentionActivatedAt), remove = [];
         for (const section of saved.sections) {
           if (conversation(section)) remove.push({ start: section.start, end: section.end });
           else for (const fact of section.facts) if (person(fact.subjectId) || person(fact.subjectReference?.ownerId) ||
               fact.sources?.some(source => person(source.senderId))) remove.push({ start: fact.start, end: fact.end });
         }
-        let text = saved.markdown;
-        for (const range of remove.sort((a, b) => b.start - a.start)) text = text.slice(0, range.start) + text.slice(range.end);
-        if (text !== saved.markdown) { this.parse(accountId, text); writeText(file, text); }
+        const text = replaceRanges(saved.markdown, remove);
+        if (text !== saved.markdown) { this.parse(accountId, text, state.retentionActivatedAt); writeText(file, text); }
       }
       this.saveState(state);
       this.errors.delete(accountId); this.readErrors.delete(accountId);
@@ -585,17 +666,13 @@ export class LongTermMemory {
         normalize(value.text) === normalize(fact.text) &&
         (value.expiresAt == null || value.expiresAt > this.now())
     );
-    let markdown = doc.markdown;
-    for (const value of targets.sort((a, b) => b.start - a.start)) {
+    const replacements = targets.map((value) => {
       const { text, start, end, bodyRange, ...metadata } = value;
-      const state = value.id === fact.id && input.decision === 'accept' && !equivalent ? 'active' : 'superseded';
-      markdown =
-        markdown.slice(0, start) +
-        this.factBlock({ ...metadata, state, reviewedAt: this.now(), decision: input.decision,
-          ...(state === 'active' ? { confirmation: { by: 'owner', at: this.now() } } : {}) }, text).trimEnd() +
-        markdown.slice(end);
-    }
-    return this.edit(accountId, markdown, doc.revision);
+      const next = value.id === fact.id && input.decision === 'accept' && !equivalent ? 'active' : 'superseded';
+      return { start, end, value: this.factBlock({ ...metadata, state: next, reviewedAt: this.now(), decision: input.decision,
+        ...(next === 'active' ? { confirmation: { by: 'owner', at: this.now() } } : {}) }, text).trimEnd() };
+    });
+    return this.edit(accountId, replaceRanges(doc.markdown, replacements), doc.revision);
   }
   deleteFacts(accountId, input) {
     if (input.confirmDelete !== true) throw new ChannelError('LONG_MEMORY_CONFIRM_REQUIRED', '请确认要删除的长期事实');
@@ -633,10 +710,7 @@ export class LongTermMemory {
         value: this.factBlock({ ...metadata, replaces: fact.replaces.filter((id) => !ids.has(id)) }, text).trimEnd(),
       });
     }
-    let markdown = doc.markdown;
-    for (const replacement of replacements.sort((a, b) => b.start - a.start))
-      markdown = markdown.slice(0, replacement.start) + replacement.value + markdown.slice(replacement.end);
-    return { ...this.edit(accountId, markdown, doc.revision), deletedFacts: targets.length };
+    return { ...this.edit(accountId, replaceRanges(doc.markdown, replacements), doc.revision), deletedFacts: targets.length };
   }
   adminNotes(input) {
     const selector = this.selector(input);
@@ -703,7 +777,7 @@ export class LongTermMemory {
       throw new ChannelError('LONG_MEMORY_INVALID', '长期记忆文件无法安全读取，请先检查文件和目录，再保存正文');
     if (current.revision !== expectedRevision)
       throw new ChannelError('LONG_MEMORY_CHANGED', '长期记忆已更新，请重新读取后再保存；你的草稿仍保留');
-    const next = this.parse(accountId, markdown),
+    const next = this.parse(accountId, markdown, this.state(accountId).retentionActivatedAt),
       nextIds = new Set(next.sections.flatMap((section) => section.facts.map((fact) => fact.id)));
     const removedSources = current.sections.flatMap((section) =>
       section.facts
@@ -762,6 +836,9 @@ export class LongTermMemory {
     try {
       signal.throwIfAborted();
       const state = this.state(selector.accountId),
+        // The cached state object is reused in place, so the generation this run
+        // started from must be captured by value before any await.
+        generation = state.generation,
         before = this.document(selector.accountId),
         pending = state.pending[selector.key]?.entries || [];
       let length = 0;
@@ -892,31 +969,29 @@ export class LongTermMemory {
       check();
       const currentState = this.state(selector.accountId),
         current = this.document(selector.accountId);
-      if (currentState.generation !== state.generation || current.revision !== before.revision)
+      if (currentState.generation !== generation || current.revision !== before.revision)
         throw new ChannelError('LONG_MEMORY_CHANGED', '长期记忆被人工修改或清空，本次提取未覆盖新内容；来源保留待重试');
       let markdown = current.markdown,
         section = current.sections.find((section) => section.key === selector.key),
         added = 0;
       const additions = [],
-        corrections = new Set(
-          proposed
-            .filter((fact) => !fact.subjectId &&
-              fact.replaces.every(
-                (id) => normalize(existing.find((value) => value.id === id)?.text || '') === normalize(fact.text)
-              )
-            )
-            .flatMap((fact) => fact.replaces)
-        );
+        corrections = new Set();
       // Deduplicate against facts that will remain active. Otherwise a
       // same-wording correction would retire the old fact and omit its replacement.
       const signature = fact => JSON.stringify([fact.subjectId || '', normalize(fact.text)]);
-      const texts = new Set(existing.filter((fact) => !corrections.has(fact.id)).map(signature));
+      const texts = new Set(existing.map(signature));
       for (const fact of proposed) {
         if (fact.expiresAt <= this.now()) continue;
         if (texts.has(signature(fact)) && !fact.replaces.length) continue;
         if (fact.subjectId && section?.facts.some(old => old.subjectId === fact.subjectId && normalize(old.text) === normalize(fact.text) &&
             fact.sources.every(id => old.sources.some(source => source.key === batch[Number(id.slice(1)) - 1].key)))) continue;
-        const pending = fact.state === 'pending' || fact.replaces.some((id) => !corrections.has(id));
+        // Only a fact that is really written may retire the fact it corrects;
+        // otherwise the old fact is superseded and its replacement never exists.
+        const selfCorrection = !fact.subjectId && fact.replaces.every(
+          (id) => normalize(existing.find((value) => value.id === id)?.text || '') === normalize(fact.text)
+        );
+        if (selfCorrection) for (const id of fact.replaces) corrections.add(id);
+        const pending = fact.state === 'pending' || (fact.replaces.length > 0 && !selfCorrection);
         const metadata = {
           id: randomUUID(),
           state: pending ? 'pending' : 'active',
@@ -967,13 +1042,13 @@ export class LongTermMemory {
           });
         else if (!section && additions.length)
           markdown += `\n<!-- wechat-conversation:begin ${encoded(selector)} -->\n## ${selector.chatType === 'group' ? '群聊' : '私聊'} · ${selector.name.replace(/[\r\n<>]/g, ' ')}\n\n${additions.join('\n')}\n${SCOPE_END}\n`;
-        for (const replacement of replacements.sort((a, b) => b.start - a.start))
-          markdown = markdown.slice(0, replacement.start) + replacement.value + markdown.slice(replacement.end);
-        this.parse(selector.accountId, markdown);
+        markdown = replaceRanges(markdown, replacements);
+        this.parse(selector.accountId, markdown, currentState.retentionActivatedAt);
         writeText(this.paths(selector.accountId).file, markdown);
       }
       currentState.seen[selector.key] ??= {};
       for (const entry of batch) currentState.seen[selector.key][entry.key] = entry.digest;
+      boundSeen(currentState.seen[selector.key]);
       const processed = new Map(batch.map((entry) => [entry.key, entry.digest]));
       const remaining = (currentState.pending[selector.key]?.entries || []).filter(
         (entry) => processed.get(entry.key) !== entry.digest

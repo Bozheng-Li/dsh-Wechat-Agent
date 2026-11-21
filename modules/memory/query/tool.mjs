@@ -31,7 +31,7 @@ function referenceQuery(query, names) {
   let text = normalized(query || '').trim().replace(/^\/agent\s*/u, '');
   for (const name of [...names].filter(Boolean).sort((a, b) => b.length - a.length)) {
     const value = normalized(name);
-    if (text === value || (text.startsWith(value) && /^[\s,，!！?？。~～]/u.test(text.slice(value.length)))) {
+    if (text === value || (text.startsWith(value) && /^(?:[\s,，!！?？。~～]|你|您|我|他|她|它|请|帮|怎么|为什么|重复|复述|解释|翻译|看看)/u.test(text.slice(value.length)))) {
       text = text.slice(value.length).replace(/^[\s,，!！?？。~～]+/u, ''); break;
     }
   }
@@ -75,11 +75,19 @@ export function relevantMemoryReference(source, query, { maxChars = 6000, names 
         }
     } else if (!GENERAL_TERMS.has(token)) terms.add(token);
   }
-  const rows = String(source || '').split('\n').map((line, index) => {
-    const content = searchableLine(line), value = normalized(content), hits = [...terms].filter(term => value.includes(term));
+  let summarySection = false;
+  const rows = String(source || '').split('\n').map((originalLine, index) => {
+    if (originalLine.startsWith('已保存的会话记忆（压缩摘要')) { summarySection = true; return null; }
+    if (originalLine.startsWith('最近的会话原文（按接收顺序）')) { summarySection = false; return null; }
+    const content = searchableLine(originalLine), value = normalized(content), hits = [...terms].filter(term => value.includes(term));
+    // Preserve provenance when lexical selection detaches a summary sentence
+    // from its heading. It is an older model-written aid, never new user fact.
+    const line = summarySection && originalLine.trim()
+      ? JSON.stringify({ sourceType: 'conversation-summary', status: '旧压缩摘要；非原话，后续明确更正优先', text: originalLine })
+      : originalLine;
     const origin = referenceSource(line);
     return { line, index, hits, origin, content, score: hits.reduce((total, term) => total + term.length, 0) };
-  }).filter(row => row.hits.length && row.line.trim() && !/^[^\n]*：$/u.test(row.line.trim()));
+  }).filter(row => row && row.hits.length && row.line.trim() && !/^[^\n]*：$/u.test(row.line.trim()));
   rows.sort((a, b) => b.score - a.score || b.index - a.index);
   const selected = [], matchedTerms = new Set(), seenSources = new Set();
   let used = 0;
@@ -94,7 +102,7 @@ export function relevantMemoryReference(source, query, { maxChars = 6000, names 
     for (const term of termsByLength) {
       const passage = matchedExcerpt(row.line, term);
       const excerpt = passage.truncated && row.origin
-        ? JSON.stringify({ time: row.origin.time, speaker: row.origin.speaker, senderId: row.origin.senderId, direction: row.origin.direction, excerpt: passage.text })
+        ? JSON.stringify({ time: row.origin.time, speaker: row.origin.speaker, senderId: row.origin.senderId, direction: row.origin.direction, ...(row.origin.sourceType ? { sourceType: row.origin.sourceType, status: row.origin.status } : {}), excerpt: passage.text })
         : passage.text;
       if (seen.has(excerpt)) continue;
       seen.add(excerpt);

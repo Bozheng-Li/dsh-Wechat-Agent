@@ -84,11 +84,13 @@ test('parallel same-name images get independent main-directory copies and return
     assert.equal(job.result.artifacts[0].path, 'puppy.png'); assert.equal(job.delivery.state, 'sent');
     assertImageMemory(f, job, original, 'sent');
   }
-  assert.equal(f.sent.length, 2);
-  for (const payload of f.sent) {
-    assert(!payload.message[0].data.text.includes('!['));
-    const bytes = Buffer.from(payload.message[1].data.base64, 'base64'); assert([digest(puppy), digest(changedPuppy)].includes(digest(bytes)));
+  assert.equal(f.sent.length, 4);
+  const payloadParts = f.sent.flatMap(payload => payload.message);
+  assert.equal(payloadParts.filter(part => part.type === 'image').length, 2);
+  for (const part of payloadParts.filter(value => value.type === 'image')) {
+    const bytes = Buffer.from(part.data.base64, 'base64'); assert([digest(puppy), digest(changedPuppy)].includes(digest(bytes)));
   }
+  for (const part of payloadParts.filter(value => value.type === 'text')) assert(!part.data.text.includes('!['));
   assert(!fs.readFileSync(f.channel.work.store.file, 'utf8').includes('base64'));
 });
 
@@ -105,7 +107,8 @@ test('a generated image is archived immediately and survives a later DSH executi
   released.resolve(); await f.channel.work.whenIdle();
   const job = new WorkStore(f.store).get(created.id); assert.equal(job.state, 'failed'); assertSaved(job, job.imageArchives[0], puppy);
   assert.equal(job.result.artifacts[0].sha256, digest(puppy)); assert.equal(job.delivery.state, 'sent');
-  assert.deepEqual(Buffer.from(f.sent[0].message.find(part => part.type === 'image').data.base64, 'base64'), puppy);
+  const imagePayload = f.sent.find(payload => payload.message[0]?.type === 'image');
+  assert.deepEqual(Buffer.from(imagePayload.message[0].data.base64, 'base64'), puppy);
   assert.deepEqual(fs.readFileSync(path.join(created.cwd, 'puppy.png')), puppy);
   assertImageMemory(f, job, puppy, 'sent');
 });

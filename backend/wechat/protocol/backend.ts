@@ -47,6 +47,8 @@ export class ProtocolBackend implements Backend {
   private activeHost?: string;
   private activePort?: number;
   private reconnects = 0;
+  /** Set when the saved credentials cannot work again: only a new QR scan helps. */
+  private reloginRequired = false;
   private tx = 0; private rx = 0; private sent = 0; private received = 0;
   private cache!: Cache;
   private messages = new Map<string, BridgeMessage>();
@@ -111,7 +113,7 @@ export class ProtocolBackend implements Backend {
   status(): BackendStatus {
     const transport = this.transport;
     return { mode: this.mode, online: this.online && !!transport?.connected, good: this.online && !!transport?.connected && !this.lastError, hookCount: 0,
-      diagnostics: { state: this.state, account: this.session.publicStatus().account, credentials: this.session.publicStatus(), lastError: this.lastError,
+      diagnostics: { state: this.state, reloginRequired: this.reloginRequired, account: this.session.publicStatus().account, credentials: this.session.publicStatus(), lastError: this.lastError,
         connection: { host: this.activeHost, port: this.activePort, connected: !!transport?.connected, latencyMs: transport?.latencyMs ?? null, connectedAt: transport?.connectedAt, txFrames: this.tx + (transport?.tx ?? 0), rxFrames: this.rx + (transport?.rx ?? 0), reconnects: this.reconnects },
         sync: { lastSyncAt: this.lastSyncAt, lastHeartbeatAt: this.lastHeartbeatAt, intervalMs: this.options.syncIntervalMs },
         cache: { contacts: this.cache.contacts.length, groups: this.cache.groups.length, members: this.cache.members.length, messages: this.messages.size, scope: 'protocol-observed-only' },
@@ -120,6 +122,9 @@ export class ProtocolBackend implements Backend {
   async start() {
     if (this.worker) return;
     if (!this.session.value) { this.lastError = this.session.error; this.setState(this.session.error ? 'credential-error' : 'session-missing'); return; }
+    // A new start follows a fresh login or an explicit owner retry; give the
+    // saved credentials another chance before reporting an expired session.
+    this.reloginRequired = false;
     this.controller = new AbortController(); const signal = this.controller.signal;
     this.worker = this.run(signal).catch(error => { if (!signal.aborted) { this.lastError = error instanceof Error ? error.message : String(error); this.setState('error'); this.log('error', this.lastError); } }).finally(() => { this.worker = undefined; });
   }
@@ -143,6 +148,7 @@ export class ProtocolBackend implements Backend {
         if (signal.aborted) return;
         await this.sync(t);
         c.host = host; c.port = endpoint.port; this.session.save(c);
+        this.reloginRequired = false;
         if (attempts) this.log('info', 'Protocol connection recovered'); attempts = 0;
         let nextSync = Date.now() + this.options.syncIntervalMs;
         let nextHeartbeat = Date.now() + this.options.heartbeatIntervalMs;
@@ -162,7 +168,16 @@ export class ProtocolBackend implements Backend {
         if (!signal.aborted) throw new BridgeError('ERR_CONNECTION_CLOSED', 'Protocol edge closed the connection');
       } catch (error) {
         if (signal.aborted) return;
-        this.lastError = error instanceof Error ? error.message : String(error); this.setState('reconnecting');
+        const code = error instanceof BridgeError ? error.code : (error as { code?: string } | undefined)?.code;
+        this.lastError = error instanceof Error ? error.message : String(error);
+        // Retrying cannot fix an expired or unusable credential: keep the owner
+        // informed instead of reporting a network fault for ever.
+        if (code === 'ERR_SESSION_EXPIRED' || code === 'ERR_CREDENTIAL') {
+          this.reloginRequired = true; this.setState('session-expired');
+          this.log('error', code === 'ERR_SESSION_EXPIRED' ? '微信会话已失效，请重新扫码登录' : '微信登录凭据不可用，请重新扫码登录');
+          return;
+        }
+        this.setState('reconnecting');
         this.log('warn', `${host}:${endpoint.port}: ${this.lastError}`); attempts++; this.reconnects++;
       } finally { this.retireTransport(); }
       try { await sleep(Math.min(this.options.reconnectMs * Math.max(1, Math.floor(attempts / endpoints.length) + 1), 60000), undefined, { signal }); }
@@ -427,7 +442,7 @@ export class ProtocolBackend implements Backend {
       throw new BridgeError('ERR_MOMENTS_ACCOUNT_CHANGED', '读取图片期间微信连接变化，未返回旧连接图片');
     return result;
   }
-  async readMomentsAudience(signal: AbortSignal) {
+  async readMomentsAudience(signal: AbortSignal, contactIds?: string[]) {
     const account = this.session.value, transport = this.transport;
     const identity = account && ['uin', 'wxid', 'token', 'body_key', 's08'].map(key => (account as any)[key]);
     const check = () => {
@@ -439,7 +454,7 @@ export class ProtocolBackend implements Backend {
     check();
     const reader = new MomentsAudienceReader((account, cmd, route, makeBody, requestSignal) => this.momentsAudienceReader.request(account, cmd, route, makeBody,
       AbortSignal.any([requestSignal, AbortSignal.timeout(this.options.requestTimeoutMs)])));
-    return reader.read(account!, signal, check);
+    return reader.read(account!, signal, check, contactIds);
   }
   async readMomentsPublication(raw: unknown, _scopeKey: string, signal: AbortSignal) {
     const account = this.session.value, transport = this.transport;
@@ -606,8 +621,10 @@ export class ProtocolBackend implements Backend {
     if (mediaCount && !imageBase) throw new BridgeError(parts.some(part => part.type === 'image' || part.type === 'face') ? 'ERR_IMAGE_CREDENTIAL' : 'ERR_FILE_CREDENTIAL', '当前会话的媒体发送参数未完整交接，请更新插件后重试；整条回复尚未发送', { delivery: 'rejected' });
     const signal = cancel ? AbortSignal.any([this.controller!.signal, cancel]) : this.controller!.signal; this.sendPending++; this.queuedMediaBytes += mediaBytes;
     const task = this.sendTail.then(async () => {
-      const ids: string[] = []; let first: BridgeMessage | undefined, currentIndex = -1, requestStarted = false;
-      const deliveryParts = () => parts.map((part, index) => ({ index, type: part.type, state: index < ids.length ? 'acknowledged' : index === currentIndex && requestStarted ? 'unknown' : 'not-sent', ...(ids[index] ? { serverMessageId: ids[index] } : {}),
+      const ids: string[] = [], receipts: { time: number; observedAt: number }[] = [];
+      let first: BridgeMessage | undefined, currentIndex = -1, requestStarted = false;
+      const deliveryParts = () => parts.map((part, index) => ({ index, type: part.type, state: index < ids.length ? 'acknowledged' : index === currentIndex && requestStarted ? 'unknown' : 'not-sent', ...(ids[index] ? { serverMessageId: ids[index], ...receipts[index] } : {}),
+        ...(part.type === 'text' ? { text: part.text } : {}),
         ...(part.type === 'image' && part.nativeFallback ? { nativeFallback: true } : {}),
         ...(part.type !== 'text' && part.name ? { name: part.name, bytes: part.bytes.length, sha256: part.sha256 } : {}) }));
       try {
@@ -687,10 +704,11 @@ export class ProtocolBackend implements Backend {
             if (!final) throw new BridgeError('ERR_PROTOCOL', '图片上传缺少最终确认，发送结果未知');
             ack = final;
           }
-          ids.push(ack.id); this.sent++;
+          const observedAt = Date.now();
+          ids.push(ack.id); receipts.push({ time: ack.time, observedAt }); this.sent++;
           const c = this.session.value!;
           // The durable cache stores only media metadata, never base64 payloads.
-          const message: BridgeMessage = { id: `wx:${p.peerId}:${ack.id}`, serverMessageId: ack.id, time: ack.time, chatType: p.chatType, peerId: p.peerId, sender: { id: c.wxid, nickname: c.nickname }, message: part.type === 'text' ? [...(part.mentions || []).map(target => ({ type: 'at' as const, data: { qq: target.id, name: target.name } })), { type: 'text', data: { text: part.text } }] : part.type === 'face' ? [{ type: 'face', data: { file: 'unavailable', stickerMd5: part.md5 } }] : part.type === 'file' ? [{ type: 'file', data: { name: part.name, mediaType: part.mediaType, bytes: part.bytes.length, sha256: part.sha256 } }] : [{ type: 'image', data: { file: 'unavailable', mediaType: part.mediaType, bytes: part.bytes.length, sha256: part.sha256, ...(part.name ? { name: part.name } : {}) } }], direction: 'outgoing', source: part.type === 'text' ? 'longlink:SendMsg' : part.type === 'face' ? 'shortlink:SendEmoji' : part.type === 'file' ? 'shortlink:SendAppMsg' : 'longlink:UploadMsgImg', delivery: 'server-ack', observedAt: Date.now(), messageType: part.type === 'text' ? 1 : part.type === 'face' ? 47 : part.type === 'file' ? 49 : 3 };
+          const message: BridgeMessage = { id: `wx:${p.peerId}:${ack.id}`, serverMessageId: ack.id, time: ack.time, chatType: p.chatType, peerId: p.peerId, sender: { id: c.wxid, nickname: c.nickname }, message: part.type === 'text' ? [...(part.mentions || []).map(target => ({ type: 'at' as const, data: { qq: target.id, name: target.name } })), { type: 'text', data: { text: part.text } }] : part.type === 'face' ? [{ type: 'face', data: { file: 'unavailable', stickerMd5: part.md5 } }] : part.type === 'file' ? [{ type: 'file', data: { name: part.name, mediaType: part.mediaType, bytes: part.bytes.length, sha256: part.sha256 } }] : [{ type: 'image', data: { file: 'unavailable', mediaType: part.mediaType, bytes: part.bytes.length, sha256: part.sha256, ...(part.name ? { name: part.name } : {}) } }], direction: 'outgoing', source: part.type === 'text' ? 'longlink:SendMsg' : part.type === 'face' ? 'shortlink:SendEmoji' : part.type === 'file' ? 'shortlink:SendAppMsg' : 'longlink:UploadMsgImg', delivery: 'server-ack', observedAt, messageType: part.type === 'text' ? 1 : part.type === 'face' ? 47 : part.type === 'file' ? 49 : 3 };
           this.remember(message); this.persist(); first ??= message; this.emit({ type: 'event.message', payload: structuredClone(message) });
         }
       } catch (error) {

@@ -1,4 +1,4 @@
-import { ChannelError, publicError } from '../../shared/contracts.mjs';
+import { ChannelError, publicError, momentsEnabled } from '../../shared/contracts.mjs';
 import { materialFields, materialSourceKey } from '../../shared/moments-materials.mjs';
 import { timeLimitMs, timeDurationLabel } from '../../shared/time-settings.mjs';
 import { readPrompt } from '../../prompts/loader.mjs';
@@ -111,7 +111,9 @@ export class MomentsMaterials extends MomentsMaterialStore {
       const text = await this.channel.runner.describeImage({ type: 'image', data: image.data, mediaType: image.mediaType, quality: 'original' }, abort,
         { question: '为朋友圈素材记录图片中实际可见的主体、色彩和构图。不要辨认人物身份、转录姓名电话或聊天文字，不猜测拍摄者、地点、关系或经历。只写简短描述，不写朋友圈文案。' });
       this.check(accountId, abort);
-      if (typeof text !== 'string' || !text.trim() || text.length > 2000 || !materialTextIsPublic(text)) throw new ChannelError('MOMENTS_MATERIAL_RESPONSE', '图片描述不可用，请手动补充；原图片保留');
+      if (typeof text !== 'string' || !text.trim() || text.length > 2000 ||
+        !materialTextIsPublic(text, this.peers(accountId).flatMap(peer => [peer.name, peer.peerId])))
+        throw new ChannelError('MOMENTS_MATERIAL_RESPONSE', '图片描述不可用，请手动补充；原图片保留');
       return this.put(accountId, { id, revision, fields: { ...item.fields, text } });
     }, 'describe');
   }
@@ -153,7 +155,7 @@ export class MomentsMaterials extends MomentsMaterialStore {
       const revision = account.revision, startedAt = this.now(); let sourceSnapshots = [];
       const check = () => {
         this.check(accountId, abort);
-        if (account.revision !== revision || automatic && (this.stopped || !account.settings.enabled || !this.channel.store.settings(accountId).enabled))
+        if (account.revision !== revision || automatic && (this.stopped || !account.settings.enabled || !momentsEnabled(this.channel.store.settings(accountId))))
           throw new ChannelError('MOMENTS_MATERIAL_CHANGED', '素材整理设置或运行状态已变化，旧结果未保存');
         for (const snapshot of sourceSnapshots) if (!this.sourceAllowed(accountId, snapshot.source) || this.channel.memory.load({ accountId, ...snapshot.source }).generation !== snapshot.generation)
           throw new ChannelError('MOMENTS_MATERIAL_CHANGED', '原聊天记忆已清理、过期或撤权，本次整理结果未保存');
@@ -215,7 +217,7 @@ export class MomentsMaterials extends MomentsMaterialStore {
   start() { if (this.timer || this.error) return; this.stopped = false; this.timer = setInterval(() => { void this.tick().catch(() => {}); }, 30000); this.timer.unref?.(); }
   tick() {
     const status = this.channel.transport.status(), accountId = status.account?.id, account = accountId && this.account(accountId);
-    if (this.stopped || this.pending || this.error || !status.online || !account?.settings.enabled || !this.channel.store.settings(accountId).enabled || !account.nextRunAt || account.nextRunAt > this.now() || this.channel.momentsAutomation?.publishing.pending)
+    if (this.stopped || this.pending || this.error || !status.online || !account?.settings.enabled || !momentsEnabled(this.channel.store.settings(accountId)) || !account.nextRunAt || account.nextRunAt > this.now() || this.channel.momentsAutomation?.publishing.pending)
       return Promise.resolve();
     return this.organize(accountId, 'automatic-' + account.nextRunAt, null, true);
   }
