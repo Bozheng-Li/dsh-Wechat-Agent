@@ -2,11 +2,11 @@
 
 [产品首页](https://github.com/Bozheng-Li/dsh-Wechat-Agent#readme) · [开发与发布](DEVELOPMENT.md) · [更新日志](../CHANGELOG.md)
 
-适用于 Windows x64、DeepSeek Harness 0.2.1-rc.5 与 **preview.12 发布候选源码**。远端 npm/GitHub 分发尚待授权；当前可安装包仍为 0.2.0-preview.11。候选新增人设库、分段恢复和独立自动开关等，见 [App 同步说明](APP-SYNC.md) 与更新日志。
+适用于 Windows x64、DeepSeek Harness 0.2.1-rc.5 与 **GitHub 预发布版 0.2.0-preview.12**。完整安装包和 SHA-256 可从 [GitHub Release](https://github.com/Bozheng-Li/dsh-Wechat-Agent/releases/tag/v0.2.0-preview.12) 下载。npm registry 暂未公开此版本，npm 的 latest/next 仍为 preview.11；状态见 [App 同步说明](APP-SYNC.md) 与更新日志。
 
 ## 当前版本与已知限制
 
-本页说明 `0.2.0-preview.12` 候选源码的功能与使用方式，尚不可通过 npm/GitHub 下载。GitHub 与 npm 的对应安装包、校验结果和版本变化见[更新日志](../CHANGELOG.md)，[首页](../README.md#开始使用)提供安装、升级与当前功能介绍。源码或本地后续修改记在“未发布”；更新仓库或发布安装包不会自动升级正在运行的插件。
+本页说明已发布的 `0.2.0-preview.12` GitHub 安装包功能与使用方式。npm registry 的版本、校验结果和分发状态见[更新日志](../CHANGELOG.md)；[首页](../README.md#开始使用)提供当前 npm 版本与 GitHub 下载入口。安装不会自动替换正在运行的插件。
 
 本版修复编辑器保存的人设分块和恢复会话的上下文筛选。实际模型仍可能补出未提供的经历、去向、时长或心理状态，漏完整名字，或者出现机械或不合适的表达。代码回归、请求结构与工具链检查通过，不代表真实回答已全面满足人设和事实要求；需要核对重要事实、数字和日期。
 

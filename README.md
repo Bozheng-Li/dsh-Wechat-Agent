@@ -6,11 +6,11 @@
 [![Plugin checks](https://github.com/Bozheng-Li/dsh-Wechat-Agent/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Bozheng-Li/dsh-Wechat-Agent/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/Bozheng-Li/dsh-Wechat-Agent?style=flat-square)](LICENSE)
 
-候选版本 **0.2.0-preview.12（待远端发布）** · **Windows x64** · **DeepSeek Harness 0.2.1-rc.5**
+GitHub 预发布版本 **0.2.0-preview.12** · **Windows x64** · **DeepSeek Harness 0.2.1-rc.5**
 
-本地完成了适用 App 业务能力同步和原生 DSH 验收；尚未上传 npm/GitHub，需先恢复发布凭据。当前可安装版本仍是 preview.11，已安装插件不会因仓库源码改变而自动升级。功能差异见 [App 同步说明](docs/APP-SYNC.md) 和 [候选变更日志](CHANGELOG.md)。
+preview.12 已推送到 GitHub，包含源码与完整安装包；实际下载包已与本地审计包哈希核对一致。npm registry 暂未公开 preview.12：发布请求被接受后，registry 返回 staged-version 冲突，且暂存列表没有可审批条目。npm 的 `latest/next` 仍是 preview.11；已安装插件不会自动升级。
 
-[开始使用](#开始使用) · [使用指南](docs/USER-GUIDE.md) · [更新日志](CHANGELOG.md) · [安装包](https://github.com/Bozheng-Li/dsh-Wechat-Agent/releases/tag/v0.2.0-preview.11) · [反馈问题](https://github.com/Bozheng-Li/dsh-Wechat-Agent/issues)
+[开始使用](#开始使用) · [使用指南](docs/USER-GUIDE.md) · [更新日志](CHANGELOG.md) · [preview.12 安装包](https://github.com/Bozheng-Li/dsh-Wechat-Agent/releases/tag/v0.2.0-preview.12) · [反馈问题](https://github.com/Bozheng-Li/dsh-Wechat-Agent/issues)
 
 <img src="https://raw.githubusercontent.com/Bozheng-Li/dsh-Wechat-Agent/main/docs/images/studio-overview-light.png" alt="preview.11 工作台：微信连接、自动回复、授权会话、处理队列和常用入口" width="100%" />
 
@@ -28,19 +28,19 @@ _preview.11 的实际界面，使用隔离的示例账号与内容。_
 | 图片、表情与搜索 | 普通聊天可按需看图、从全库候选选表情或调用已配置生图接口；搜索可选 DSH 原生、DeepSeek Search API 或 Tavily。 |
 | 执行与回执 | 任务轨迹记录模型与工具过程；处理记录展示显式 `<SPLIT>` 分段及逐条回执，可核对只发送明确未发出的部分。 |
 
-preview.11 的重点是**对象授权与清理、人物卡标签分组、自动功能集中设置、统一时间设置和任务轨迹**。上方功能表描述 preview.12 本地候选源码，尚未进入 npm/GitHub 分发；完整变化与验证范围见 [CHANGELOG](CHANGELOG.md)。
+preview.11 的重点是**对象授权与清理、人物卡标签分组、自动功能集中设置、统一时间设置和任务轨迹**。上方功能表描述 GitHub 已发布的 preview.12；npm registry 暂未公开该版本，完整变化及验证范围见 [CHANGELOG](CHANGELOG.md)。
 
 ## 开始使用
 
 先安装并配置 **DeepSeek Harness 0.2.1-rc.5**。插件使用 DSH 中配置的模型服务；完整安装包包含微信认证组件、Python 与固定版本依赖。
 
-在 DSH 插件管理页添加 `dsh-plugin-wechat-agent`。当前公开包为 preview.11；如果已安装 DSH 命令行，也可指定这个已发布版本：
+在 DSH 插件管理页添加 `dsh-plugin-wechat-agent`。npm registry 当前仍只公开 preview.11；preview.12 可从 [GitHub Release](https://github.com/Bozheng-Li/dsh-Wechat-Agent/releases/tag/v0.2.0-preview.12) 下载。
 
 ```powershell
 dsh plugin --profile desktop add dsh-plugin-wechat-agent@0.2.0-preview.11
 ```
 
-[npm](https://www.npmjs.com/package/dsh-plugin-wechat-agent/v/0.2.0-preview.11) 与 [GitHub Releases](https://github.com/Bozheng-Li/dsh-Wechat-Agent/releases/tag/v0.2.0-preview.11) 提供同一份完整安装包，Release 附有 SHA-256 校验文件。
+[npm 当前版本](https://www.npmjs.com/package/dsh-plugin-wechat-agent/v/0.2.0-preview.11) 与 [GitHub preview.12 Release](https://github.com/Bozheng-Li/dsh-Wechat-Agent/releases/tag/v0.2.0-preview.12)；GitHub 附件包含完整安装包和 SHA-256 校验文件。
 
 1. **扫码连接**：打开 DSH 侧栏“微信 Agent”，用手机微信扫码并确认。
 2. **设置模型与人设**：在“设置 → 模型设置”选择回复模型；在“默认助手”编辑当前人设，或切到“人设库”新建、提炼授权聊天语言和试聊。所有会话共用当前选中的人设。
@@ -48,7 +48,7 @@ dsh plugin --profile desktop add dsh-plugin-wechat-agent@0.2.0-preview.11
 4. **分别管理自动功能**：在“设置 → 自动功能”控制自动回复、定时任务和朋友圈自动功能。新安装默认关闭自动回复和朋友圈自动化；旧配置中未单独设置的提醒开关继续跟随旧总开关。
 5. **配置群参与与可选能力**：在会话详情分别选择新消息、冷场和连续接话机会。高精度人设会多进行一轮模型调用；普通聊天生图需配置图片生成 API。
 
-以上功能步骤描述 preview.12 候选源码。远端发布尚未完成，已安装及目前可下载的 **0.2.0-preview.11** 仍按发布版运行。
+以上功能步骤描述 GitHub 已发布的 preview.12。GitHub 附件可下载；npm registry 的 preview.12 发布仍受暂存版本冲突阻挡，目前可经 npm 安装的仍是 **0.2.0-preview.11**。已安装实例需独立升级后才会应用新版本。
 
 <details>
 <summary>通过自定义插件市场安装或升级</summary>
