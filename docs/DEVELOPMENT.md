@@ -48,24 +48,27 @@ npm run pack:plugin
 npm run audit:package
 ```
 
-完整包按 `package.json` 的版本输出到 `release/dsh-plugin-wechat-agent-<版本>.tgz`，当前候选为 `release/dsh-plugin-wechat-agent-0.2.0-preview.12.tgz`，同目录提供 `.sha256` 校验文件。打包脚本下载并校验 Python 3.13.9 嵌入版，安装 `runtime/requirements.txt` 中固定版本的依赖。只打包显式列出的运行文件、默认 `config.yaml`、`package.json.files` 声明的提示模板、更新日志、说明和许可证，排除开发脚本、实际账号配置、登录资料、存储和测试入口。默认 YAML 必须没有工作目录归属、授权账号或密钥，存储路径必须为相对路径；包审计核对每个提示资源与本地审阅文件的哈希。新增 Markdown／JSON 提示时同步资源清单。
+完整包按 `package.json` 的版本输出到 `release/dsh-plugin-wechat-agent-<版本>.tgz`，当前候选为 `release/dsh-plugin-wechat-agent-0.2.0-preview.13.tgz`，同目录提供 `.sha256` 校验文件。打包脚本下载并校验 Python 3.13.9 嵌入版，安装 `runtime/requirements.txt` 中固定版本的依赖。只打包显式列出的运行文件、默认 `config.yaml`、`package.json.files` 声明的提示模板、更新日志、说明和许可证，排除开发脚本、实际账号配置、登录资料、存储和测试入口。默认 YAML 必须没有工作目录归属、授权账号或密钥，存储路径必须为相对路径；包审计核对每个提示资源与本地审阅文件的哈希。新增 Markdown／JSON 提示时同步资源清单。
 
 若 Python 自动下载超时，可将从 [Python 官网](https://www.python.org/ftp/python/3.13.9/python-3.13.9-embed-amd64.zip) 取得的 `python-3.13.9-embed-amd64.zip` 放入 `storage/cache/` 后重试；脚本会验证相同的固定 SHA-256。
 
 `lib/`、`release/`、`storage/`、`node_modules/`、本地 Python 和微信组件均被 Git 忽略。不要直接使用 `npm pack` 作为完整安装包；使用上面的 `pack:plugin` 命令准备全部运行资源。兼容命令 `dsh:build`、`dsh:test`、`dsh:pack` 仍可使用。
 
-本地未发布候选可使用 `npm run pack:plugin -- --output-dir release/candidate`，再用 `npm run audit:package -- release/candidate/dsh-plugin-wechat-agent-0.2.0-preview.12.tgz` 审计指定文件；版本号随 `package.json` 调整。输出目录与已发布包分开，打包不会自动发布或升级正在运行的插件。表情素材来自运行账号的微信收藏、已授权聊天或自行导入，不再随包下载网上图片；包审计拒绝旧版内置图片混入。
+`release/candidate/dsh-plugin-wechat-agent-0.2.0-preview.13.tgz` 已经由 DSH 0.2.2-rc.3 的真实 Plugin Manager 装入仓库隔离 profile，且组合配置解析出 `wechat-agent` bundle；用户 Desktop profile 未更动。完整测试会运行于单并发。再用 `npm run audit:package -- release/candidate/dsh-plugin-wechat-agent-0.2.0-preview.13.tgz` 审计指定文件；版本号随 `package.json` 调整。输出目录与已发布包分开，打包不会自动发布或升级正在运行的插件。表情素材来自运行账号的微信收藏、已授权聊天或自行导入，不再随包下载网上图片；包审计拒绝旧版内置图片混入。
 
-发布时先完成测试、完整打包和包审计，再发布已验证的压缩包：
+发布时先完成测试、完整打包、包审计，再通过 npm staged publication 分开暂存与公开审批：
 
 ```powershell
-npm publish ./release/dsh-plugin-wechat-agent-0.2.0-preview.12.tgz --access public --tag next --registry=https://registry.npmjs.org/
+npm stage publish ./release/dsh-plugin-wechat-agent-0.2.0-preview.13.tgz --access public --tag next --registry=https://registry.npmjs.org/
+npm stage list 'dsh-plugin-wechat-agent@*' --json --registry=https://registry.npmjs.org/
+npm stage view <stage-id> --json --registry=https://registry.npmjs.org/
+npm stage approve <stage-id> --registry=https://registry.npmjs.org/
 npm run verify:npm -- --wait --download
-npm dist-tag add dsh-plugin-wechat-agent@0.2.0-preview.12 latest --registry=https://registry.npmjs.org/
+npm dist-tag add dsh-plugin-wechat-agent@0.2.0-preview.13 latest --registry=https://registry.npmjs.org/
 npm run verify:npm -- --write-index
 ```
 
-上方为本版发布命令示例；先确认更新日志中的发布阶段和 npm 的实际状态，已发布版本不可覆盖，后续发布必须更新版本号并使用对应的新包。先通过暂存标签发布，完整下载校验通过后才调整 `latest`；先核对标签现值，不覆盖其他维护者正在使用的标签。源码 `package.json` 保留 `private: true`，防止误把不含完整运行环境的源码目录直接发布；完整打包阶段会去除此标记与开发依赖、脚本。`latest` 指向当前公开预览版，版本名仍明确标记 `preview`。
+preview.13 的 stage ID 为 `e82af7e3-ea38-46fd-96cd-a51c940f4f82`，npm 返回 `status: validating`。公开审批前，此版本未出现在 npm package metadata，`latest/next` 仍是 preview.11；不要把 staged 上传回执当已发布，也不要移动标签。等待 `npm stage view <stage-id>` 显示可批准状态，再由包维护者完成 `npm stage approve <stage-id>` 的 2FA。
 
 ### 仓库文件维护
 

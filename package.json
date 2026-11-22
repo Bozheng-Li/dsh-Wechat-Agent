@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-wechat-agent",
-  "version": "0.2.0-preview.12",
+  "version": "0.2.0-preview.13",
   "description": "DeepSeek Harness 微信 Agent：人设库、分段回执、授权记忆、DSH 原生工作任务与朋友圈自动化",
   "keywords": [
     "dsh-plugin",
@@ -85,7 +85,7 @@
   },
   "engines": {
     "node": ">=22.18",
-    "dsh": "0.2.1-rc.5"
+    "dsh": "^0.2.1-rc.5 || ^0.2.2-rc.3"
   },
   "os": [
     "win32"
