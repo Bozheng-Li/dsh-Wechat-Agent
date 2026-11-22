@@ -8,7 +8,11 @@
 
 当前插件版本 **0.2.0-preview.13** · **Windows x64** · **DeepSeek Harness 0.2.1-rc.5 / 0.2.2-rc.3**
 
-**在 DSH 下载：**侧栏选择 **Plugins → Add plugin**，输入 `dsh-plugin-wechat-agent@0.2.0-preview.13`，Registry 选择 **npm 官方源**，点击 **Install**。若该包名已在 Installed 列表中，先移除旧版，再安装指定版本。
+**在 DSH 下载：**侧栏选择 **Plugins → Add plugin**，包名框粘贴 GitHub 完整安装包地址：
+
+`https://github.com/Bozheng-Li/dsh-Wechat-Agent/releases/download/v0.2.0-preview.13/dsh-plugin-wechat-agent-0.2.0-preview.13.tgz`
+
+点击 **Install**。若该包名已在 Installed 列表中，先移除旧版，再安装此版本。
 
 完整包包含微信认证运行时、Python 与固定依赖，并保留 DSH 原生工作任务。版本状态和验证范围见 [更新日志](CHANGELOG.md)。
 
@@ -36,7 +40,11 @@ _preview.11 的实际界面，使用隔离的示例账号与内容。_
 
 先安装并配置 **DeepSeek Harness 0.2.1-rc.5 或 0.2.2-rc.3**。插件使用 DSH 中配置的模型服务；完整包包含微信认证组件、Python 与固定版本依赖。
 
-在 DSH 侧栏选择 **Plugins → Add plugin**，输入 `dsh-plugin-wechat-agent@0.2.0-preview.13`，Registry 选 **npm 官方源**，点击 **Install**。如果该包名已在 Installed 列表中，先移除旧版再安装这个精确版本。
+在 DSH 侧栏选择 **Plugins → Add plugin**，包名框粘贴完整 GitHub 安装包地址：
+
+`https://github.com/Bozheng-Li/dsh-Wechat-Agent/releases/download/v0.2.0-preview.13/dsh-plugin-wechat-agent-0.2.0-preview.13.tgz`
+
+点击 **Install**。若此包已在 Installed 列表中，先移除旧版再装。GitHub tarball 不依赖 npm registry 选择。
 
 1. **扫码连接**：打开 DSH 侧栏“微信 Agent”，用手机微信扫码并确认。
 2. **设置模型与人设**：在“设置 → 模型设置”选择回复模型；在“默认助手”编辑当前人设，或切到“人设库”新建、提炼授权聊天语言和试聊。所有会话共用当前选中的人设。

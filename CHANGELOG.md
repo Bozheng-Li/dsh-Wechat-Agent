@@ -2,11 +2,12 @@
 
 ## 0.2.0-preview.13 · 2026-11-22 · DSH 插件管理器兼容
 
-### 在 DSH 中安装
+### 在 DSH 中下载
 
 - 将 `engines.dsh` 扩为 `^0.2.1-rc.5 || ^0.2.2-rc.3`，覆盖旧测试运行时与当前 DSH 0.2.2-rc.3；preview.12 在 0.2.2-rc.3 下会被安装器拒绝，preview.13 使用新 semver 版本。
-- preview.13 完整包通过文件清单、提示资源、微信组件哈希和无凭据审计；已通过 DSH 0.2.2-rc.3 Plugin Manager 安装到隔离 profile，组合配置可解析 `wechat-agent` bundle。验证未修改用户 Desktop profile。
-- 下载路径：DSH 侧栏 **Plugins → Add plugin**，包名 `dsh-plugin-wechat-agent@0.2.0-preview.13`，Registry 选择 npm 官方源，点击 **Install**。
+- preview.13 完整包通过文件清单、提示资源、微信组件哈希和无凭据审计；已由 DSH 0.2.2-rc.3 Plugin Manager 安装到隔离 profile，组合配置可解析 `wechat-agent` bundle。验证未修改用户 Desktop profile。
+- DSH 侧栏选择 **Plugins → Add plugin**，粘贴 GitHub Release tarball URL `https://github.com/Bozheng-Li/dsh-Wechat-Agent/releases/download/v0.2.0-preview.13/dsh-plugin-wechat-agent-0.2.0-preview.13.tgz` 并点击 **Install**；本版本的此下载路径不依赖 npm registry。
+- GitHub Release 同时附带 `.sha256` 校验文件；其值对应本次实际上传的完整安装包。
 
 ## 0.2.0-preview.12 · 2026-11-22 · App 适用能力同步（GitHub 预发布）
 
